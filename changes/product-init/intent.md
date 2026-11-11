@@ -44,8 +44,8 @@ All of these are in scope for the product. Each must be producible by the genera
 ## Constraints
 
 - The banking server is written in Rust.
-- Structured data lives in Oracle Database; unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
-- The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is an OCI Always Free Ampere A1 instance: ARM64, 4 vCPU, 24 GB RAM, 50 GB boot volume plus 150 GB block volume. Every service runs under explicit CPU and memory limits, including the Oracle Database memory and the MongoDB cache, and the chosen Oracle edition's resource and data-size limits apply (Oracle Database Free: about 2 CPU threads, 2 GB memory, 12 GB user data, regardless of the host's size).
+- Structured data lives in Oracle Database, run as a container built from Oracle's official container build scripts (Oracle Database 19c Enterprise Edition, which supports both ARM64 and x86-64 and has no edition data-size cap). Unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
+- The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is an OCI Always Free Ampere A1 instance: ARM64, 4 vCPU, 24 GB RAM, 50 GB boot volume plus 150 GB block volume. Every service runs under explicit CPU and memory limits, including the Oracle Database memory (SGA and PGA) and the MongoDB cache, and the services share the host with other workloads already running there.
 - A secondary, occasional environment is a local lab: VMware Workstation Pro on an x86-64 Windows host with WSL, provisioned with Terraform and configured with Ansible. It is not required for every change, but nothing may lock the stack to ARM64.
 - All data is synthetic. No real personal or financial data is ever used.
 - Detection is real-time and asynchronous: it processes events as they happen, and it must never block or delay a banking transaction.
@@ -70,7 +70,7 @@ Data foundation (first):
 - Every generated activity event joins, through opaque identifiers, to exactly one label: normal, benign lookalike, or a primary scenario A to F.
 - Through the mobile app a customer can sign in, view balances and history, manage payees, transfer money, open and early-close a term deposit, and take a loan. Through the simulated ATM channel the generator deposits and withdraws cash; that activity appears in the logs, and stored data distinguishes the channel. Through the admin web app an analyst can look up customers, accounts and transactions.
 - After documented prerequisites, one Docker Compose command starts all server-side services on the development host. Installing the mobile app is separate.
-- At steady state every service stays within its configured CPU and memory limit, and retained structured data stays within the chosen Oracle edition's limits for the spec-defined retention period.
+- At steady state every service stays within its configured CPU and memory limit, and one year of retained data fits on the host's block volume with headroom.
 - Every container image is available for both linux/arm64 and linux/amd64, and the Rust services build for both.
 
 Detection (later):
@@ -82,10 +82,10 @@ Detection (later):
 ## Open questions
 
 - Mobile app and admin web app technology stacks.
-- Oracle Database edition (Oracle Database Free in a container fits Docker Compose and supports ARM64) and the retention period its data limit allows.
+- Oracle Database container details: obtaining the 19c installation binaries for ARM64 and x86-64, image build time and size, memory sizing, and confirming the license terms fit a personal, non-production portfolio project.
 - Whether OCI is ever a deployment target, or only the development host.
 - How events reach detection in real time (for example a message broker such as Kafka, or change data capture), and when it is introduced.
 - Detection approach and MLOps tooling (rules, ML scoring, workflow orchestration, model registry), and where model training runs. Deferred until detection is designed; data collection comes first.
-- Generator volume (customers, transactions per minute) and scenario frequencies, grounded in published fraud statistics for large retail banks, and whether one year of history at that volume fits the Oracle edition's data limit.
+- Generator volume (customers, transactions per minute) and scenario frequencies, grounded in published fraud statistics for large retail banks, sized to what the host's CPU, memory and disk sustain.
 - Authentication model for customers and analysts.
 - Concrete thresholds, for example the simulated reporting threshold for D (modelled on the Korean currency transaction report, which aggregates daily cash transactions).
