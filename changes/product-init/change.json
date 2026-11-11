@@ -28,14 +28,22 @@
       "sha256": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
       "by": "naelonambul",
       "at": "2026-11-11T13:15:45Z",
-      "note": "Owner in session: 응 승인 (re-approve intent with loan repayment, no interest, whole-won KRW)"
+      "note": "Owner in session: \uc751 \uc2b9\uc778 (re-approve intent with loan repayment, no interest, whole-won KRW)"
     },
     {
       "artifact": "spec.md",
       "sha256": "sha256:4f20bccb86a6ff21d2ff66bf8cb4222d37722e8a928b5949b994d64c220b1a3c",
       "by": "naelonambul",
       "at": "2026-11-11T23:05:39Z",
-      "note": "Owner in session: 스팩 부터 승인할게 (approve spec with staged delivery at sha256:4f20bccb)"
+      "note": "Owner in session: \uc2a4\ud329 \ubd80\ud130 \uc2b9\uc778\ud560\uac8c (approve spec with staged delivery at sha256:4f20bccb)"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8295af1661118a4adc2ccd82c669ac83fbe4fa594c7a445c05bcb2a3f26af7eb",
+      "by": "naelonambul",
+      "at": "2026-11-11T23:15:16Z",
+      "write_scope_sha256": "sha256:be4c0e710cf0b7325400a6904a621211ed13f8529ca8dbeb40ea3fd9dbd79c84",
+      "note": "Owner in session, replying to 'approve and I start step 1': \uc9c4\ud589\ud574 (plan at sha256:8295af16)"
     }
   ]
 }
