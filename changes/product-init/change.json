@@ -22,10 +22,10 @@
     },
     {
       "artifact": "spec.md",
-      "sha256": "sha256:d1f06bded655a506197bb63c40cecd485f0d1ea9cc4ec831a65ef77051619a69",
+      "sha256": "sha256:4f20bccb86a6ff21d2ff66bf8cb4222d37722e8a928b5949b994d64c220b1a3c",
       "by": "naelonambul",
-      "at": "2026-11-11T21:38:54Z",
-      "note": "Owner in session: \uc2b9\uc778 (approve spec at sha256:d1f06bde)"
+      "at": "2026-11-11T23:05:39Z",
+      "note": "Owner in session: \uc2a4\ud329 \ubd80\ud130 \uc2b9\uc778\ud560\uac8c (approve spec with staged delivery at sha256:4f20bccb)"
     }
   ]
 }
