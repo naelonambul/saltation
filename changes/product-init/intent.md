@@ -10,8 +10,8 @@ The owner is a data-engineering and MLOps bootcamp student building a personal p
 
 Saltation is a self-contained simulated bank with a fraud-detection platform built on top of it, developed incrementally with no fixed end date.
 
-1. **A bank that produces realistic data.** A Rust banking server provides accounts, cash deposits and withdrawals, transfers, payees, simplified term deposits (open and early close) and simplified loans (disbursement), authentication, and device and session tracking. It serves two channels: a customer-facing mobile app and a simulated ATM. An analyst-facing admin web app sits alongside them.
-2. **Persona-driven synthetic activity.** A synthetic generator drives the bank through its public channel interfaces as a population of personas: ordinary customers (for example office workers, students, self-employed, elderly) and fraud actors. It first backfills a history of weeks to months, so that customer baselines and dormant accounts exist, then keeps generating activity in real time. Fraud actors play the scenarios below, interleaved with normal behaviour and with benign lookalikes (legitimate activity that resembles fraud). The generator records ground truth separately from the bank's own data.
+1. **A bank that produces realistic data.** A Rust banking server provides accounts, cash deposits and withdrawals, transfers, payees, simplified term deposits (open and early close) and simplified loans (disbursement), authentication, and device and session tracking. It serves two channels: a customer-facing mobile app and a simulated ATM. The simulated ATM is an interface driven by the generator, with no human-facing screen; its activity is recorded in the bank's logs. An analyst-facing admin web app sits alongside the channels.
+2. **Persona-driven synthetic activity.** A synthetic generator drives the bank through its public channel interfaces as a population of personas: ordinary customers (for example office workers, students, self-employed, elderly) and fraud actors. It first backfills about one year of history, so that customer baselines and dormant accounts exist, then keeps generating activity in real time. Fraud actors play the scenarios below, interleaved with normal behaviour and with benign lookalikes (legitimate activity that resembles fraud). The generator records ground truth separately from the bank's own data.
 3. **Data collection first.** Structured banking records are stored in a relational database, and unstructured logs (application, access, session, device and channel events) are collected into a document store, so that a growing, labelled history accumulates. This is the first priority.
 4. **Real-time detection, later.** Detection consumes bank activity as a stream, in real time but asynchronously, so it never blocks a transaction. It raises alerts that analysts review in the admin web app. An alert signals suspicion, not proven fraud. Rule-based and machine-learning detection, and the MLOps around the models (training, versioning, deployment, retraining), are built after data collection is in place.
 
@@ -45,7 +45,7 @@ All of these are in scope for the product. Each must be producible by the genera
 
 - The banking server is written in Rust.
 - Structured data lives in Oracle Database; unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
-- The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is ARM64 (Ampere, 4 cores, about 24 GB RAM). Every service runs under explicit CPU and memory limits, including the Oracle Database memory and the MongoDB cache, and the chosen Oracle edition's resource and data-size limits apply (Oracle Database Free: about 2 CPU threads, 2 GB memory, 12 GB user data).
+- The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is an OCI Always Free Ampere A1 instance: ARM64, 4 vCPU, 24 GB RAM, 50 GB boot volume plus 150 GB block volume. Every service runs under explicit CPU and memory limits, including the Oracle Database memory and the MongoDB cache, and the chosen Oracle edition's resource and data-size limits apply (Oracle Database Free: about 2 CPU threads, 2 GB memory, 12 GB user data, regardless of the host's size).
 - A secondary, occasional environment is a local lab: VMware Workstation Pro on an x86-64 Windows host with WSL, provisioned with Terraform and configured with Ansible. It is not required for every change, but nothing may lock the stack to ARM64.
 - All data is synthetic. No real personal or financial data is ever used.
 - Detection is real-time and asynchronous: it processes events as they happen, and it must never block or delay a banking transaction.
@@ -65,10 +65,10 @@ All of these are in scope for the product. Each must be producible by the genera
 
 Data foundation (first):
 
-- After backfilling a history of spec-defined length, the generator runs for at least 24 continuous hours against the Docker Compose stack on the development host, using only the bank's public mobile and ATM interfaces, with no manual intervention or service restart. In that run every persona type produces normal activity, every scenario A to F occurs at least a spec-defined number of times, and benign lookalikes occur.
+- After backfilling about one year of history, the generator runs for at least 24 continuous hours against the Docker Compose stack on the development host, using only the bank's public mobile and ATM interfaces, with no manual intervention or service restart. In that run every persona type produces normal activity, every scenario A to F occurs at least a spec-defined number of times, and benign lookalikes occur.
 - Every scenario instance has all spec-defined expected records, including rejected attempts such as failed logins: transactions in Oracle Database and login, session, device and channel events in MongoDB, with none missing.
 - Every generated activity event joins, through opaque identifiers, to exactly one label: normal, benign lookalike, or a primary scenario A to F.
-- Through the mobile app a customer can sign in, view balances and history, manage payees, transfer money, open and early-close a term deposit, and take a loan. Through the simulated ATM channel a customer can deposit and withdraw cash, and stored data distinguishes the channel. Through the admin web app an analyst can look up customers, accounts and transactions.
+- Through the mobile app a customer can sign in, view balances and history, manage payees, transfer money, open and early-close a term deposit, and take a loan. Through the simulated ATM channel the generator deposits and withdraws cash; that activity appears in the logs, and stored data distinguishes the channel. Through the admin web app an analyst can look up customers, accounts and transactions.
 - After documented prerequisites, one Docker Compose command starts all server-side services on the development host. Installing the mobile app is separate.
 - At steady state every service stays within its configured CPU and memory limit, and retained structured data stays within the chosen Oracle edition's limits for the spec-defined retention period.
 - Every container image is available for both linux/arm64 and linux/amd64, and the Rust services build for both.
@@ -82,11 +82,10 @@ Detection (later):
 ## Open questions
 
 - Mobile app and admin web app technology stacks.
-- Whether the simulated ATM needs a human-usable interface, or is an API surface driven by the generator.
 - Oracle Database edition (Oracle Database Free in a container fits Docker Compose and supports ARM64) and the retention period its data limit allows.
 - Whether OCI is ever a deployment target, or only the development host.
 - How events reach detection in real time (for example a message broker such as Kafka, or change data capture), and when it is introduced.
-- Detection approach and MLOps tooling (rules, ML scoring, workflow orchestration, model registry), and whether model training may run on the same host as the bank.
-- Generator volume (customers, transactions per minute), backfill length, and scenario frequencies.
+- Detection approach and MLOps tooling (rules, ML scoring, workflow orchestration, model registry), and where model training runs. Deferred until detection is designed; data collection comes first.
+- Generator volume (customers, transactions per minute) and scenario frequencies, grounded in published fraud statistics for large retail banks, and whether one year of history at that volume fits the Oracle edition's data limit.
 - Authentication model for customers and analysts.
 - Concrete thresholds, for example the simulated reporting threshold for D (modelled on the Korean currency transaction report, which aggregates daily cash transactions).
