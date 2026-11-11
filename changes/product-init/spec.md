@@ -102,7 +102,7 @@ References used for interface and data shapes:
 |---|---|---|---|
 | Contracts | `contracts/` | OpenAPI documents for the public, ATM, admin and internal interfaces; the log envelope JSON Schema; code tables | YAML, JSON |
 | Bank core | `bank/crates/core` | Domain model, ledger rules, transfer and product logic, simulated clock abstraction; no I/O | Rust |
-| Bank store | `bank/crates/store` | Oracle schema migrations and repositories; implements core's storage traits | Rust, SQL |
+| Bank store | `bank/crates/store` | Oracle schema migrations, hand-written SQL files and repositories; implements core's storage traits | Rust, SQL |
 | Bank API | `bank/crates/api` | HTTP handlers for public, ATM, admin and internal interfaces; authentication; Open Banking field mapping | Rust |
 | Bank events | `bank/crates/events` | Outbox relay from Oracle to MongoDB; log envelope serialisation | Rust |
 | Bank server | `bank/crates/server` | Binary wiring config, clock, store, API and events | Rust |
@@ -152,6 +152,13 @@ generator ─HTTP (private network)─▶ Rust bank API server (public, ATM, int
 - The internal interface (seeding, clock) listens only on the `internal` network and is disabled in live mode except for read-only clock status.
 - Local testing uses plain HTTP: a `local` Compose profile publishes `web` and `bank` on localhost ports and omits `cloudflared`; the SPAs read the API base URL from build-time configuration, and the CORS allow-list includes the local origins only in that profile.
 - TLS is terminated by Cloudflare. Public traffic reaches `web` and `bank` only through Cloudflare Workers VPC over the `cloudflared` tunnel; no Saltation port is published on the host. Grafana is reached through the tunnel behind Cloudflare Access, or through an SSH tunnel. Oracle, MongoDB, Loki and Prometheus are never exposed.
+
+### Data access: plain Oracle SQL, no ORM
+
+- No ORM and no query builder. Every statement is hand-written Oracle SQL in its own file under `bank/crates/store/sql/` (for example `transfer/lock_accounts.sql`, `transfer/insert_transaction.sql`), embedded at compile time and executed through the `oracle` crate with bind variables only; no SQL is assembled by string concatenation.
+- Each SQL file starts with a comment naming the statement, its purpose and its expected access path (index), so the exact query the bank runs can be read in the repository and checked with `EXPLAIN PLAN`.
+- Schema changes are numbered plain SQL migration files under `bank/crates/store/migrations/`, applied in order and recorded in a migration history table.
+- The operational log (`app.log`) records, for every statement, its name, duration and row count; at debug level it also records the SQL text. Bind values are never logged for credential columns (password, PIN, token hashes).
 
 ### Transfer processing (in one Oracle transaction)
 
