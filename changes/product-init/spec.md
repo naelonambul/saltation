@@ -41,12 +41,12 @@ References used for interface and data shapes:
 - F-16. Every request that can move money carries an idempotency key; for Open Banking-shaped requests the key is `bank_tran_id`. A repeated request with the same key and identical payload returns the original result; with a different payload it is rejected.
 - F-17. Rejected attempts (insufficient balance, limit exceeded, invalid account, wrong PIN, unauthorized) are recorded with their response codes and no ledger effect.
 
-**Ledger**
+**Ledger (simple, single-entry)**
 
-- F-18. The ledger is double-entry. Every money movement is one journal whose postings sum to zero. Customer accounts and internal accounts (ATM cash, external clearing, loan principal) are ledger accounts.
-- F-19. Customer account balances are maintained on the account row and updated inside the same database transaction as the journal. Internal accounts have no updatable balance row; their balance is the previous daily closing balance plus that day's postings.
-- F-20. A daily close (business date) records closing balances for every ledger account and verifies that each customer account's stored balance equals its opening balance plus postings, and that all postings of the day sum to zero.
-- F-21. Corrections are new reversing journals referencing the original; posted rows are never updated or deleted.
+- F-18. Every money movement writes one account transaction row per in-bank account it affects, with a signed amount and the balance after. A transfer between two in-bank accounts writes two rows (debit and credit) linked by one transfer record. Cash, external-counterparty, term-deposit and loan movements write rows only for the in-bank accounts involved, with counterparty details where they exist. There are no internal ledger accounts and no double-entry journals.
+- F-19. Account balances are kept on the account row and updated in the same database transaction as the transaction rows, under a row lock.
+- F-20. A daily close (business date) records each account's closing balance and verifies that the opening balance plus the day's transaction rows equals the stored balance, and that every in-bank transfer's two rows have equal and opposite amounts.
+- F-21. Corrections are new reversing rows referencing the original; written rows are never updated or deleted.
 
 **Simulated clock**
 
@@ -80,10 +80,11 @@ References used for interface and data shapes:
 - N-2. **Hot account:** many concurrent transfers into one account (mule pattern): p95 ≤ 500 ms.
 - N-3. **Saturation point:** under a stepped load (25, 50, 100, 200 transfers per second), the load at which p95 first exceeds 300 ms is at least 100 per second; the limiting resource (lock wait, disk, CPU, connection pool) is recorded.
 - N-4. **Backfill throughput:** at least 200 generated banking operations per second sustained, so one year for 20,000 customers completes within 24 hours.
-- N-5. **Correctness:** zero daily-close mismatches, zero duplicate money movements, zero journals that do not sum to zero, under all load tests.
-- N-6. **Resource budget for Saltation** on the shared host: at most 3 vCPU total CPU limits and 12 GB total memory limits across Saltation containers; at most 60 GB of the block volume for one year of data plus 30 days of live data. Initial limits: Oracle 6 GB (SGA 4 GB, PGA 1 GB), MongoDB 3 GB (WiredTiger cache 1.5 GB), bank server 1 GB, generator 1 GB, web 256 MB. During backfill and the 24-hour run no Saltation container is OOM-killed or restarted, and the co-tenant containers stay healthy.
+- N-5. **Correctness:** zero daily-close mismatches, zero duplicate money movements, and zero in-bank transfers whose two rows do not offset, under all load tests.
+- N-6. **Resource budget for Saltation** on the shared host: at most 3 vCPU total CPU limits and 14 GB total memory limits across Saltation containers; at most 70 GB of the block volume for one year of data plus 30 days of live data and observability retention. Initial limits: Oracle 6 GB (SGA 4 GB, PGA 1 GB), MongoDB 3 GB (WiredTiger cache 1.5 GB), bank server 1 GB, generator 1 GB, nginx 256 MB, Alloy 256 MB, Loki 768 MB, Prometheus 768 MB, Grafana 256 MB. During backfill and the 24-hour run no Saltation container is OOM-killed or restarted, and the co-tenant containers stay healthy.
 - N-7. **Portability:** every image is published for, or (Oracle) buildable from documented steps on, linux/arm64 and linux/amd64.
-- N-8. **Operability:** one `docker compose up` command starts all server-side services after documented prerequisites (the Oracle image built locally). The mobile web app needs no installation; it is served by the stack.
+- N-8. **Operability:** one `docker compose up` command starts all server-side services after documented prerequisites (the Oracle image built locally, TLS certificates in place). The mobile web app needs no installation; it is served by the stack.
+- N-10. **Observability:** the bank server exposes Prometheus metrics (request rate, latency histograms per endpoint, transfer outcomes, row-lock wait, DB pool usage) and writes structured operational logs to stdout; Grafana dashboards show transfer latency percentiles (N-1), error rates and container resource use.
 - N-9. **Partitioning is optional.** The design performs within N-1 to N-5 without Oracle Partitioning. Tables carry business date so that monthly interval partitioning can be enabled later if the license permits it.
 
 ## User experience and behavior
@@ -107,7 +108,7 @@ References used for interface and data shapes:
 | Bank server | `bank/crates/server` | Binary wiring config, clock, store, API and events | Rust |
 | Web | `web/apps/mobile`, `web/apps/admin`, `web/packages/api-client` | Customer and analyst SPAs; a typed client generated from `contracts/` | TypeScript, React |
 | Generator | `generator/` | Personas, scenario engine, backfill and live drivers, seeding, truth writer, run manifests | Python |
-| Infra | `infra/compose`, `infra/oracle`, `infra/lab` | Compose files, Oracle image build steps and init scripts, later Terraform/Ansible for the VMware lab | YAML, shell, HCL |
+| Infra | `infra/compose`, `infra/oracle`, `infra/nginx`, `infra/observability`, `infra/lab` | Compose files, Oracle image build steps and init scripts, nginx TLS config, Alloy/Loki/Prometheus/Grafana config and dashboards, later Terraform/Ansible for the VMware lab | YAML, shell, HCL |
 | Load tests | `loadtest/` | Transfer latency, hot-account and saturation tests (N-1 to N-5) | Python |
 
 ### Dependency direction
@@ -115,32 +116,48 @@ References used for interface and data shapes:
 - `core` depends on nothing in the repository. `store`, `api` and `events` depend on `core`; `server` depends on all bank crates. `api` never touches Oracle or MongoDB directly.
 - `web` and `generator` depend only on `contracts/` (generated or validated clients), never on bank internals or databases.
 - The generator has no access to Oracle or the bank's MongoDB database; the bank has no access to the truth store.
-- **Where new features go:** a new banking capability starts in `contracts/` (interface) and `core` (rules), then `store` and `api`. Detection, when added, is a new top-level module (`detect/`) consuming the outbox stream; it does not import bank crates.
+- **Where new features go:** a new banking capability starts in `contracts/` (interface) and `core` (rules), then `store` and `api`. Detection, when added, is a new top-level module (`detect/`) consuming the outbox stream; it does not import bank crates. A later Python data service (pandas and NumPy analysis over Oracle and MongoDB data) is also a new top-level module (`analytics/`) that reads data stores read-only and never calls bank internals.
+- The internal folder layout inside each module (for example feature-based folders) is decided in the plan, after the owner's structure research.
 - Boundary enforcement: Cargo workspace dependencies make `core` I/O-free (checked by a `cargo tree` based check); the generator's import boundary is checked by a lint rule. The plan registers both as checks.
 
 ### Runtime topology (Docker Compose, one network per trust zone)
+
+```text
+browser ──HTTPS──▶ nginx (static SPAs only: mobile web, admin web)
+browser ──HTTPS──▶ Rust bank API server (standalone, terminates TLS itself)
+                     ├─▶ Oracle Database (structured data)
+                     ├─▶ MongoDB (unstructured data and business event logs)
+                     ├─ stdout logs ─▶ Alloy ─▶ Loki ─▶ Grafana
+                     └─ /metrics ───▶ Prometheus ─▶ Grafana
+generator ─HTTPS─▶ Rust bank API server (public, ATM, internal interfaces)
+```
 
 | Service | Image | Networks |
 |---|---|---|
 | `oracle` | locally built Oracle Database 19c EE | `data` |
 | `mongo` | official MongoDB (arm64 and amd64) | `data`, `truth` |
-| `bank` | built from `bank/` | `data`, `edge`, `internal` |
-| `web` | nginx serving both SPAs and proxying `/oauth`, `/v2.0`, `/atm`, `/admin` to `bank` | `edge` |
-| `generator` | built from `generator/` | `edge` (public and ATM interfaces via `web`), `internal` (seeding and clock), `truth` |
+| `bank` | built from `bank/`; serves HTTPS directly (rustls) | `data`, `edge`, `internal`, `obs` |
+| `web` | nginx serving the two SPAs over HTTPS; no API proxying | `edge` |
+| `generator` | built from `generator/` | `edge` (public and ATM interfaces), `internal` (seeding and clock), `truth` |
+| `alloy` | Grafana Alloy, collecting the `bank` container's stdout logs | `obs` |
+| `loki` | Grafana Loki | `obs` |
+| `prometheus` | Prometheus, scraping `bank` metrics | `obs` |
+| `grafana` | Grafana with Loki and Prometheus data sources | `obs` |
+
+- Two log streams with different purposes: **business event logs** (login, session, device, payee, ATM and request outcomes) go to MongoDB through the outbox and are product data for detection and analysis; **operational logs** (request traces, errors, timings) go to stdout and are collected by Alloy into Loki for monitoring. Both carry the same `request_id` and `session_id`.
+- The SPAs call the API on its own origin, so the bank server enforces a CORS allow-list of the two SPA origins.
 
 - The truth store is a separate MongoDB database (`truth`) with its own user; the bank's MongoDB user is granted only the `bank_logs` database. The plan may move truth to a separate MongoDB instance if credential separation proves insufficient.
 - The internal interface (seeding, clock) listens only on the `internal` network and is disabled in live mode except for read-only clock status.
-- Nothing is published on the host except the `web` port, bound to localhost; access from outside the host uses an SSH tunnel.
+- Published on the host: the `web` HTTPS port and the `bank` HTTPS port; Grafana is bound to localhost and reached through an SSH tunnel. Oracle, MongoDB, Loki and Prometheus are not published.
 
 ### Transfer processing (in one Oracle transaction)
 
 1. Insert the request into `TRANSACTION_REQUEST` with the idempotency key; a unique-constraint violation returns the stored result.
-2. Lock both customer accounts with `SELECT ... FOR UPDATE` in ascending account-ID order (deadlock avoidance).
+2. Lock the in-bank accounts involved with `SELECT ... FOR UPDATE` in ascending account-ID order (deadlock avoidance).
 3. Check status, balance and the daily limit (`DAILY_ACCOUNT_TOTAL` row for account and business date, locked with the account).
-4. Insert the journal and its postings; update the customer balances and the daily totals; insert outbox rows.
-5. Update the request with the outcome; commit. On a business rejection, record the outcome without a journal and commit.
-
-Transfers to external counterparties post against the external clearing internal account. ATM cash posts against the ATM cash internal account.
+4. Insert the transfer record and its account transaction rows; update the balances and the daily totals; insert outbox rows.
+5. Update the request with the outcome; commit. On a business rejection, record the outcome with no transaction rows and commit.
 
 ## Interfaces, data, and dependencies
 
@@ -201,16 +218,15 @@ Korean logical names follow the MyData-based model; physical names are English. 
 | 토큰 (`ACCESS_TOKEN`) | token hash, user_seq_no, scope, expires_at, device_id, session_id |
 | 수취인 (`PAYEE`) | customer, bank code, account number, holder name, alias, registered_at, channel, session_id, deleted_at |
 | 자동화기기 (`ATM_TERMINAL`) | terminal id, region code, location |
-| 거래요청 (`TRANSACTION_REQUEST`) | `request_id`; type, channel, idempotency key and scope (unique), request hash, `bank_tran_id`, status, rsp_code, bank_rsp_code, journal_id (nullable), event_id, session_id, device_id, terminal_id, business time, system time |
-| 분개 (`JOURNAL`) | `journal_id`; type, request_id, business time and date, system time, reversal_of |
-| 분개항목 = 수신거래/대출거래 (`POSTING`) | `posting_id`; journal_id, ledger account, signed amount, balance_after (customer accounts), account sequence, `inout_type`, `tran_type`, `print_content`, counterparty bank code, account number and name (nullable), channel, event_id, business date and time |
-| 원장계정 (`LEDGER_ACCOUNT`) | customer accounts and internal accounts (ATM cash, external clearing, loan principal) |
+| 거래요청 (`TRANSACTION_REQUEST`) | `request_id`; type, channel, idempotency key and scope (unique), request hash, `bank_tran_id`, status, rsp_code, bank_rsp_code, event_id, session_id, device_id, terminal_id, business time, system time |
+| 이체 (`TRANSFER`) | `transfer_id`; request_id, `bank_tran_id`, debit transaction row, credit transaction row (nullable for external), amount, business time |
+| 수신거래/대출거래 (`ACCOUNT_TRANSACTION`) | `tran_id`; account, signed amount, balance_after, account sequence, `inout_type`, `tran_type`, `print_content`, counterparty bank code, account number and name (nullable), channel, terminal_id, request_id, transfer_id (nullable), event_id, reversal_of, business date and time, system time |
 | 일계좌합계 (`DAILY_ACCOUNT_TOTAL`) | account, business date; transfer total, cash in, cash out |
-| 일마감 (`DAILY_CLOSE`) | ledger account, business date, closing balance, verified flag |
+| 일마감 (`DAILY_CLOSE`) | account, business date, opening balance, closing balance, verified flag |
 | 이벤트발행함 (`OUTBOX`) | outbox id, event JSON, created system time, published flag |
 | 공통코드 (`CODE`), 코드매핑 (`CODE_MAP`) | internal codes and their Open Banking and MyData mappings (`inout_type`, `tran_type`, `account_type`, response codes) |
 
-Indexes support the access paths: postings by (ledger account, business date, account sequence); requests by idempotency key; payees by customer; accounts by customer.
+Indexes support the access paths: transaction rows by (account, business date, account sequence); requests by idempotency key; payees by customer; accounts by customer.
 
 ### Log envelope (MongoDB `bank_logs`, portable to PostgreSQL JSONB)
 
@@ -240,14 +256,14 @@ No ObjectId, BSON Date or Decimal128 in the envelope or payload; MongoDB's `_id`
 
 ### Dependencies
 
-Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64 and amd64, the MongoDB Rust driver), Oracle Database 19c EE (owner-built image), MongoDB, Node.js and pnpm for the web build, React and TypeScript, Python 3 with httpx and asyncio for the generator, nginx.
+Rust (axum, tokio, rustls, the `oracle` crate over Oracle Instant Client for Linux arm64 and amd64, the MongoDB Rust driver, a Prometheus metrics exporter), Oracle Database 19c EE (owner-built image), MongoDB, Node.js and pnpm for the web build, React and TypeScript, Python 3 with httpx and asyncio for the generator, nginx, Grafana Alloy, Loki, Prometheus, Grafana.
 
 ## Security, privacy, and policy constraints
 
 - Synthetic data only; `ci_hash` is a hash of synthetic data. No resident registration numbers in any form.
 - Passwords and PINs are stored with a slow password hash; access tokens are stored hashed.
 - Ground truth is unreachable from the bank (credentials and networks, see Architecture).
-- Internal interfaces are reachable only on the internal Compose network; only the web port is published, on localhost.
+- Internal interfaces are reachable only on the internal Compose network. The web and API ports serve HTTPS only; Grafana is localhost-only.
 - Secrets come from an untracked `.env` file; no secret is committed.
 - Oracle binaries and the KFTC specification PDF are never committed. Oracle use is limited to development and demonstration of this personal portfolio project, subject to the owner's license check at download.
 
@@ -270,8 +286,9 @@ The `product-init` change is accepted when:
 3. In that run, every persona type and every scenario A to F appear at least the configured minimum count, and benign lookalikes appear; the run manifest records the amplification factor.
 4. For every scenario instance, the spec-defined expected records exist in Oracle and in `bank_logs`, including rejected attempts.
 5. Every generated event joins to exactly one label per involved account through opaque identifiers; B-to-C transfers carry B on the sender side and C on the receiver side; human sessions are excluded.
-6. Daily close reports zero mismatches for every day of the run; no journal fails to sum to zero; no duplicate money movement exists (N-5).
+6. Daily close reports zero mismatches for every day of the run; every in-bank transfer's two rows offset; no duplicate money movement exists (N-5).
 7. Transfer load tests meet N-1, N-2 and N-3, and their reports are stored as evidence.
+11. Grafana shows the bank's operational logs from Loki and its metrics from Prometheus, including transfer latency percentiles.
 8. A human can, in the mobile web app, sign in, view balances and history, manage payees, transfer, open and early-close a term deposit, and take and repay a loan; in the admin web app, an analyst can perform every F-32 lookup.
 9. Business time and system time differ as expected for backfilled records; no business column was set from wall-clock time.
 10. Disk use for the data stays within N-6; all images build for arm64 and amd64 (Oracle from documented steps).
@@ -284,3 +301,5 @@ The `product-init` change is accepted when:
 - Default yearly scenario instance counts and amplification factor, with sources (starting point: the statistics gathered during the intent review).
 - Whether Oracle Partitioning is permitted by the license shown at download.
 - Whether the truth store needs a separate MongoDB instance rather than a separate database.
+- TLS certificates: self-signed for development, or certificates through the host's existing reverse proxy or tunnel; domain names for the web and API origins.
+- Internal folder structure of each module (feature-based layout), pending the owner's structure research.
