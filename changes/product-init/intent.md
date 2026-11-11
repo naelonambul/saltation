@@ -40,8 +40,8 @@ All of these are in scope for the product. Each must be producible by the genera
 - The banking server is written in Rust.
 - Structured data lives in Oracle Database; unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
 - The whole system is developed and run with Docker Compose. Development happens on an Oracle Cloud Infrastructure host the owner reaches over SSH.
-- Infrastructure as code (Terraform for provisioning, Ansible for configuration) targets a local lab: VMware Workstation Pro on an x86 Windows host with WSL. A move to Kubernetes comes later.
-- The same Compose stack must run on both the OCI development host, which is ARM64 (Ampere, 4 cores, about 24 GB RAM), and the x86-64 lab VMs, so every image must be built or available for both architectures and fit within that host's resources.
+- The primary environment is Docker Compose on the OCI development host, which is ARM64 (Ampere, 4 cores, about 24 GB RAM); the stack must fit within that host's resources.
+- A secondary, occasional environment is a local lab: VMware Workstation Pro on an x86-64 Windows host with WSL, provisioned with Terraform and configured with Ansible. It is not required for every change, but design choices should avoid locking the stack to ARM64 (for example by preferring images available for both architectures). A move to Kubernetes comes later.
 - All data is synthetic. No real personal or financial data is ever used.
 - Detection is asynchronous: it must never block or delay a banking transaction.
 - Ground-truth labels are kept apart from the bank's operational data, so detection cannot read them.
@@ -64,7 +64,7 @@ Data foundation (first):
 - Every generated event can be joined to its ground-truth label by an identifier, without the label being visible to the bank.
 - A customer can sign in, view balances and history, and transfer money through the mobile app; an operator can look up customers, accounts and transactions in the admin web app.
 - The whole stack starts from the repository with one Docker Compose command on the development host.
-- The same stack can be stood up from the repository on fresh VMware Workstation Pro VMs with Terraform and Ansible.
+- The stack does not depend on ARM64-only components, so it can later be stood up on x86-64 VMware lab VMs with Terraform and Ansible.
 
 Detection (later):
 
