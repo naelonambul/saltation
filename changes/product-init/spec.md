@@ -83,8 +83,8 @@ References used for interface and data shapes:
 - N-5. **Correctness:** zero daily-close mismatches, zero duplicate money movements, and zero in-bank transfers whose two rows do not offset, under all load tests.
 - N-6. **Resource budget for Saltation** on the shared host: at most 3 vCPU total CPU limits and 14 GB total memory limits across Saltation containers; at most 70 GB of the block volume for one year of data plus 30 days of live data and observability retention. Initial limits: Oracle 6 GB (SGA 4 GB, PGA 1 GB), MongoDB 3 GB (WiredTiger cache 1.5 GB), bank server 1 GB, generator 1 GB, nginx 256 MB, Alloy 256 MB, Loki 768 MB, Prometheus 768 MB, Grafana 256 MB. During backfill and the 24-hour run no Saltation container is OOM-killed or restarted, and the co-tenant containers stay healthy.
 - N-7. **Portability:** every image is published for, or (Oracle) buildable from documented steps on, linux/arm64 and linux/amd64.
-- N-8. **Operability:** one `docker compose up` command starts all server-side services after documented prerequisites (the Oracle image built locally, TLS certificates in place). The mobile web app needs no installation; it is served by the stack.
-- N-10. **Observability:** the bank server exposes Prometheus metrics (request rate, latency histograms per endpoint, transfer outcomes, row-lock wait, DB pool usage) and writes structured operational logs to stdout; Grafana dashboards show transfer latency percentiles (N-1), error rates and container resource use.
+- N-8. **Operability:** one `docker compose up` command starts all server-side services after documented prerequisites (the Oracle image built locally, the Cloudflare tunnel token in `.env`). The mobile web app needs no installation; it is served by the stack.
+- N-10. **Observability:** the bank server exposes Prometheus metrics (request rate, latency histograms per endpoint, transfer outcomes, row-lock wait, DB pool usage) and writes structured operational logs as JSON lines to `app.log` on a log volume, rotated by size and age; Grafana dashboards show transfer latency percentiles (N-1), error rates and container resource use.
 - N-9. **Partitioning is optional.** The design performs within N-1 to N-5 without Oracle Partitioning. Tables carry business date so that monthly interval partitioning can be enabled later if the license permits it.
 
 ## User experience and behavior
@@ -123,33 +123,34 @@ References used for interface and data shapes:
 ### Runtime topology (Docker Compose, one network per trust zone)
 
 ```text
-browser ──HTTPS──▶ nginx (static SPAs only: mobile web, admin web)
-browser ──HTTPS──▶ Rust bank API server (standalone, terminates TLS itself)
-                     ├─▶ Oracle Database (structured data)
-                     ├─▶ MongoDB (unstructured data and business event logs)
-                     ├─ stdout logs ─▶ Alloy ─▶ Loki ─▶ Grafana
-                     └─ /metrics ───▶ Prometheus ─▶ Grafana
-generator ─HTTPS─▶ Rust bank API server (public, ATM, internal interfaces)
+browser ─HTTPS─▶ Cloudflare (TLS, Workers VPC) ─tunnel─▶ nginx (static SPAs only: mobile web, admin web)
+browser ─HTTPS─▶ Cloudflare (TLS, Workers VPC) ─tunnel─▶ Rust bank API server (standalone API)
+                                                          ├─▶ Oracle Database (structured data)
+                                                          ├─▶ MongoDB (unstructured data and business event logs)
+                                                          ├─ app.log ─▶ Alloy ─▶ Loki ─▶ Grafana
+                                                          └─ /metrics ─▶ Prometheus ─▶ Grafana
+generator ─HTTP (private network)─▶ Rust bank API server (public, ATM, internal interfaces)
 ```
 
 | Service | Image | Networks |
 |---|---|---|
 | `oracle` | locally built Oracle Database 19c EE | `data` |
 | `mongo` | official MongoDB (arm64 and amd64) | `data`, `truth` |
-| `bank` | built from `bank/`; serves HTTPS directly (rustls) | `data`, `edge`, `internal`, `obs` |
-| `web` | nginx serving the two SPAs over HTTPS; no API proxying | `edge` |
+| `bank` | built from `bank/`; serves the API over HTTP on the private network; writes `app.log` to the `applogs` volume | `data`, `edge`, `internal`, `obs` |
+| `web` | nginx serving the two SPAs over HTTP on the private network; no API proxying | `edge` |
+| `cloudflared` | Cloudflare Tunnel connector used by Workers VPC to reach `web` and `bank` | `edge` |
 | `generator` | built from `generator/` | `edge` (public and ATM interfaces), `internal` (seeding and clock), `truth` |
-| `alloy` | Grafana Alloy, collecting the `bank` container's stdout logs | `obs` |
+| `alloy` | Grafana Alloy, tailing `app.log` from the `applogs` volume (read-only mount) | `obs` |
 | `loki` | Grafana Loki | `obs` |
 | `prometheus` | Prometheus, scraping `bank` metrics | `obs` |
 | `grafana` | Grafana with Loki and Prometheus data sources | `obs` |
 
-- Two log streams with different purposes: **business event logs** (login, session, device, payee, ATM and request outcomes) go to MongoDB through the outbox and are product data for detection and analysis; **operational logs** (request traces, errors, timings) go to stdout and are collected by Alloy into Loki for monitoring. Both carry the same `request_id` and `session_id`.
+- Two log streams with different purposes: **business event logs** (login, session, device, payee, ATM and request outcomes) go to MongoDB through the outbox and are product data for detection and analysis; **operational logs** (request traces, errors, timings) are written to `app.log` and shipped by Alloy into Loki for monitoring. Both carry the same `request_id` and `session_id`.
 - The SPAs call the API on its own origin, so the bank server enforces a CORS allow-list of the two SPA origins.
 
 - The truth store is a separate MongoDB database (`truth`) with its own user; the bank's MongoDB user is granted only the `bank_logs` database. The plan may move truth to a separate MongoDB instance if credential separation proves insufficient.
 - The internal interface (seeding, clock) listens only on the `internal` network and is disabled in live mode except for read-only clock status.
-- Published on the host: the `web` HTTPS port and the `bank` HTTPS port; Grafana is bound to localhost and reached through an SSH tunnel. Oracle, MongoDB, Loki and Prometheus are not published.
+- TLS is terminated by Cloudflare. Public traffic reaches `web` and `bank` only through Cloudflare Workers VPC over the `cloudflared` tunnel; no Saltation port is published on the host. Grafana is reached through the tunnel behind Cloudflare Access, or through an SSH tunnel. Oracle, MongoDB, Loki and Prometheus are never exposed.
 
 ### Transfer processing (in one Oracle transaction)
 
@@ -256,14 +257,14 @@ No ObjectId, BSON Date or Decimal128 in the envelope or payload; MongoDB's `_id`
 
 ### Dependencies
 
-Rust (axum, tokio, rustls, the `oracle` crate over Oracle Instant Client for Linux arm64 and amd64, the MongoDB Rust driver, a Prometheus metrics exporter), Oracle Database 19c EE (owner-built image), MongoDB, Node.js and pnpm for the web build, React and TypeScript, Python 3 with httpx and asyncio for the generator, nginx, Grafana Alloy, Loki, Prometheus, Grafana.
+Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64 and amd64, the MongoDB Rust driver, a Prometheus metrics exporter), Oracle Database 19c EE (owner-built image), MongoDB, Node.js and pnpm for the web build, React and TypeScript, Python 3 with httpx and asyncio for the generator, nginx, Cloudflare Tunnel (`cloudflared`) with Cloudflare Workers VPC, Grafana Alloy, Loki, Prometheus, Grafana.
 
 ## Security, privacy, and policy constraints
 
 - Synthetic data only; `ci_hash` is a hash of synthetic data. No resident registration numbers in any form.
 - Passwords and PINs are stored with a slow password hash; access tokens are stored hashed.
 - Ground truth is unreachable from the bank (credentials and networks, see Architecture).
-- Internal interfaces are reachable only on the internal Compose network. The web and API ports serve HTTPS only; Grafana is localhost-only.
+- Internal interfaces are reachable only on the internal Compose network and are never routed through the tunnel. Public access is HTTPS through Cloudflare only; Grafana is behind Cloudflare Access or an SSH tunnel.
 - Secrets come from an untracked `.env` file; no secret is committed.
 - Oracle binaries and the KFTC specification PDF are never committed. Oracle use is limited to development and demonstration of this personal portfolio project, subject to the owner's license check at download.
 
@@ -301,5 +302,5 @@ The `product-init` change is accepted when:
 - Default yearly scenario instance counts and amplification factor, with sources (starting point: the statistics gathered during the intent review).
 - Whether Oracle Partitioning is permitted by the license shown at download.
 - Whether the truth store needs a separate MongoDB instance rather than a separate database.
-- TLS certificates: self-signed for development, or certificates through the host's existing reverse proxy or tunnel; domain names for the web and API origins.
+- Domain names for the web and API origins, and whether Saltation shares the host's existing `cloudflared` connector or runs its own.
 - Internal folder structure of each module (feature-based layout), pending the owner's structure research.
