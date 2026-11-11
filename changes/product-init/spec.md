@@ -373,9 +373,22 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 - **MyData code values** not yet verified against the official standard.
 - **Scenario realism** relies on assumptions where no statistics exist (A, D, E, F); documented in generator config.
 
+## Delivery
+
+The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold.
+
+| Stage | Change | Delivers |
+|---|---|---|
+| 1 | `product-init` | Establishes this intent and specification as the baseline, and a walking skeleton: repository layout and registered checks; Compose stack (`local` profile) with Oracle, MongoDB, bank, nginx, Alloy, Loki, Prometheus and Grafana; migrations for customers, credentials, sessions, login attempts, accounts, transaction requests, transfers, transaction rows, daily totals, clock and outbox; login, balance, transaction history and in-bank transfer; outbox relay; `app.log` and metrics; seeding of customers and demand accounts; a minimal mobile web flow (login, balance, history, transfer); a generator that seeds and drives normal transfers |
+| 2 | ledger and products | payees, recipient inquiry, limits, inbound deposits, term deposits, loans, password reset, devices, simulated clock modes and day rollover, daily close |
+| 3 | ATM channel | ATM interface, terminals, PIN credentials and sessions |
+| 4 | admin web | analyst login and every F-39 lookup |
+| 5 | generator scenarios | personas, scenarios A to F, lookalikes, truth labels, backfill and live drivers, run manifests |
+| 6 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
+
 ## Acceptance criteria
 
-The `product-init` change is accepted when:
+The data foundation is accepted when:
 
 1. `docker compose up` on the development host starts every service, and all health checks report healthy within 10 minutes (N-11).
 2. The generator seeds 20,000 customers, backfills 365 business days within 24 hours, switches to live mode and runs 24 hours with no manual intervention; N-8 holds throughout.
