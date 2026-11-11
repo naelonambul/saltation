@@ -98,27 +98,57 @@ References used for interface and data shapes:
 
 ### Top-level modules and ownership
 
+The code is organised **by feature** (vertical slices), not by technical layer: the Rust server follows vertical-slice / package-by-feature, the React apps follow the Bulletproof React layout, and the generator groups code by persona and scenario.
+
 | Module | Path | Owns | Language |
 |---|---|---|---|
 | Contracts | `contracts/` | OpenAPI documents for the public, ATM, admin and internal interfaces; the log envelope JSON Schema; code tables | YAML, JSON |
-| Bank core | `bank/crates/core` | Domain model, ledger rules, transfer and product logic, simulated clock abstraction; no I/O | Rust |
-| Bank store | `bank/crates/store` | Oracle schema migrations, hand-written SQL files and repositories; implements core's storage traits | Rust, SQL |
-| Bank API | `bank/crates/api` | HTTP handlers for public, ATM, admin and internal interfaces; authentication; Open Banking field mapping | Rust |
-| Bank events | `bank/crates/events` | Outbox relay from Oracle to MongoDB; log envelope serialisation | Rust |
-| Bank server | `bank/crates/server` | Binary wiring config, clock, store, API and events | Rust |
+| Bank server | `bank/` | The Rust API server, one feature folder per banking capability (below) | Rust, SQL |
 | Web | `web/apps/mobile`, `web/apps/admin`, `web/packages/api-client` | Customer and analyst SPAs; a typed client generated from `contracts/` | TypeScript, React |
 | Generator | `generator/` | Personas, scenario engine, backfill and live drivers, seeding, truth writer, run manifests | Python |
 | Infra | `infra/compose`, `infra/oracle`, `infra/nginx`, `infra/observability`, `infra/lab` | Compose files, Oracle image build steps and init scripts, nginx config, Alloy/Loki/Prometheus/Grafana config and dashboards, later Terraform/Ansible for the VMware lab | YAML, shell, HCL |
 | Load tests | `loadtest/` | Transfer latency, hot-account and saturation tests (N-1 to N-5) | Python |
 
+**Bank server layout**
+
+```text
+bank/
+├── migrations/            # numbered plain-SQL schema migrations
+└── src/
+    ├── main.rs            # config, wiring, startup
+    ├── app.rs             # composes feature routers and middleware
+    ├── shared/            # DB pool and transaction helper, simulated clock, auth extractor,
+    │                      # error and response envelope, money and identifier types,
+    │                      # outbox writer, app.log and metrics
+    └── features/
+        ├── auth/          # login, logout, password reset, devices, sessions
+        ├── accounts/      # user info, account list, balance, transaction history
+        ├── transfers/     # recipient inquiry, transfer, transfer result, daily limits
+        ├── payees/
+        ├── deposits/      # term deposits
+        ├── loans/
+        ├── atm/
+        ├── admin/         # analyst queries
+        ├── internal/      # seeding and clock (internal network only)
+        ├── daily_close/   # daily close batch
+        └── outbox/        # relay of business events to MongoDB
+```
+
+Each feature folder holds its router (`mod.rs`), handlers, domain rules, repository and its own `sql/` directory of hand-written Oracle statements.
+
+**Web app layout** (both apps): `src/app/` (router, providers, shell) → `src/features/<feature>/` (`api/`, `components/`, `hooks/`, `types.ts`, `index.ts`) → `src/shared/` (UI kit, formatters). Mobile features: auth, accounts, transfers, payees, deposits, loans. Admin features: auth, customer-lookup, account-transactions, transfer-detail, daily-close.
+
+**Generator layout:** `generator/saltation_gen/` with `personas/`, `scenarios/` (one module per scenario A to F and per benign lookalike), `drivers/` (seed, backfill, live), `client/` (generated from `contracts/`), `truth/`, `config/`.
+
 ### Dependency direction
 
-- `core` depends on nothing in the repository. `store`, `api` and `events` depend on `core`; `server` depends on all bank crates. `api` never touches Oracle or MongoDB directly.
+- Inside each app: `app` → `features` → `shared`, one way only. A feature never imports another feature's internals; when two features need the same thing it moves to `shared`. In Rust, feature internals are `pub(crate)` only through the feature's `mod.rs`; in TypeScript, other code imports a feature only through its `index.ts`.
+- `shared` never imports from `features`.
 - `web` and `generator` depend only on `contracts/` (generated or validated clients), never on bank internals or databases.
 - The generator has no access to Oracle or the bank's MongoDB database; the bank has no access to the truth store.
-- **Where new features go:** a new banking capability starts in `contracts/` (interface) and `core` (rules), then `store` and `api`. Detection, when added, is a new top-level module (`detect/`) consuming the outbox stream; it does not import bank crates. A later Python data service (pandas and NumPy analysis over Oracle and MongoDB data) is also a new top-level module (`analytics/`) that reads data stores read-only and never calls bank internals.
-- The internal folder layout inside each module (for example feature-based folders) is decided in the plan, after the owner's structure research.
-- Boundary enforcement: Cargo workspace dependencies make `core` I/O-free (checked by a `cargo tree` based check); the generator's import boundary is checked by a lint rule. The plan registers both as checks.
+- **Where new features go:** a new banking capability is a new folder under `bank/src/features/`, with its interface first added to `contracts/`; a new customer or analyst screen is a new folder under the app's `src/features/`. Detection, when added, is a new top-level module (`detect/`) consuming the outbox stream; it does not import bank code. A later Python data service (pandas and NumPy analysis over Oracle and MongoDB data) is a new top-level module (`analytics/`) that reads data stores read-only.
+- Boundary enforcement: an ESLint `import/no-restricted-paths` rule in both web apps, an import-boundary check for `bank/src` (no `features::<other>::` paths, no `features` paths from `shared`), and an import lint for the generator. The plan registers each as a check.
+- A project verification skill (`verify-saltation`) keeps one feature file per user-facing feature, matching the feature folders (see the `verification-map` skill).
 
 ### Runtime topology (Docker Compose, one network per trust zone)
 
@@ -155,9 +185,9 @@ generator ─HTTP (private network)─▶ Rust bank API server (public, ATM, int
 
 ### Data access: plain Oracle SQL, no ORM
 
-- No ORM and no query builder. Every statement is hand-written Oracle SQL in its own file under `bank/crates/store/sql/` (for example `transfer/lock_accounts.sql`, `transfer/insert_transaction.sql`), embedded at compile time and executed through the `oracle` crate with bind variables only; no SQL is assembled by string concatenation.
+- No ORM and no query builder. Every statement is hand-written Oracle SQL in its own file under the owning feature's `sql/` directory (for example `bank/src/features/transfers/sql/lock_accounts.sql`, `insert_transaction.sql`), embedded at compile time and executed through the `oracle` crate with bind variables only; no SQL is assembled by string concatenation.
 - Each SQL file starts with a comment naming the statement, its purpose and its expected access path (index), so the exact query the bank runs can be read in the repository and checked with `EXPLAIN PLAN`.
-- Schema changes are numbered plain SQL migration files under `bank/crates/store/migrations/`, applied in order and recorded in a migration history table.
+- Schema changes are numbered plain SQL migration files under `bank/migrations/`, applied in order and recorded in a migration history table.
 - The operational log (`app.log`) records, for every statement, its name, duration and row count; at debug level it also records the SQL text. Bind values are never logged for credential columns (password, PIN, token hashes).
 
 ### Transfer processing (in one Oracle transaction)
@@ -311,4 +341,3 @@ The `product-init` change is accepted when:
 - Whether Oracle Partitioning is permitted by the license shown at download.
 - Whether the truth store needs a separate MongoDB instance rather than a separate database.
 - Domain names for the web and API origins, and whether Saltation shares the host's existing `cloudflared` connector or runs its own.
-- Internal folder structure of each module (feature-based layout), pending the owner's structure research.
