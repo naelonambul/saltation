@@ -1,0 +1,67 @@
+# Saltation stack. Stage 1 services; `cloudflared` arrives in stage 6.
+# Limits follow spec N-7; the `local` profile publishes ports on localhost only.
+name: saltation
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  oracle:
+    image: saltation/oracle-ee:19.19
+    profiles: [local, ci]
+    environment:
+      ORACLE_PWD: ${ORACLE_PWD:?set in .env}
+      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
+      INIT_SGA_SIZE: "3584"
+      INIT_PGA_SIZE: "1024"
+    volumes:
+      - oradata:/opt/oracle/oradata
+      - ../oracle/setup:/opt/oracle/scripts/setup:ro
+    networks: [data]
+    ports: ["127.0.0.1:1521:1521"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /opt/oracle/oradata/.saltation-ready && /opt/oracle/checkDBStatus.sh"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 30m
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 6g }
+    logging: *logging
+
+  mongo:
+    image: mongo:8.0
+    profiles: [local, ci]
+    command: ["--auth", "--wiredTigerCacheSizeGB", "1.5"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set in .env}
+      MONGO_BANK_PASSWORD: ${MONGO_BANK_PASSWORD:?set in .env}
+      MONGO_GENERATOR_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?set in .env}
+    volumes:
+      - mongodata:/data/db
+      - ../mongo/init:/docker-entrypoint-initdb.d:ro
+    networks: [data]
+    ports: ["127.0.0.1:27017:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 3g }
+    logging: *logging
+
+networks:
+  data: {}
+  edge: {}
+  internal: {}
+  obs: {}
+
+volumes:
+  oradata: {}
+  mongodata: {}
