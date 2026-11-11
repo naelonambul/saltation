@@ -10,7 +10,7 @@ This plan delivers **stage 1** of the spec's Delivery table:
 
 Stages 2 to 6 (ledger and products, ATM, admin web, generator scenarios, operations) are separate changes with their own plans.
 
-All work happens in `~/block/repos/saltation` on the OCI development host (`ssh oracle`). Commits, pushes and pull requests use the host's `agent-git` and `agent-gh` wrappers, with `saltation` on the token helper's allowlist. Toolchains (Rust, Node, Python packages) run in containers, so the host needs only Docker, Git and Python 3.
+Development for this stage happens on the owner's Mac (Apple Silicon, arm64, the same CPU architecture as the OCI host) in `/Users/ckh/repos/saltation`, with Docker provided by Colima (VM sized 6 CPU, 10 GB memory, 100 GB disk). Commits, pushes and pull requests use the Mac's `agent-git` and `agent-gh` wrappers. Toolchains (Rust, Node, Python packages) run in containers, so the Mac needs only Docker, Git and Python 3. The OCI host runs the self-hosted CI runner for the Oracle integration group; the Oracle image built on the Mac is transferred to it with `docker save | ssh oracle docker load`. Running the stack on the OCI host is stage 6.
 
 ### Spec acceptance criteria proved by this change
 
@@ -29,7 +29,7 @@ Every other criterion is proved by later stages.
 
 ## Prerequisites (owner)
 
-- **P1. Oracle installation file.** Place the Oracle Database 19c Linux ARM64 installation zip on the OCI host at `~/block/oracle-install/` and accept the license there. The build step reads it from that path; it is never copied into the repository.
+- **P1. Oracle installation file.** Done: `LINUX.ARM64_1919000_db_home.zip` is in the owner's iCloud Drive `Downloads` folder on the Mac. The build step reads it from the path in `ORACLE_ZIP` (default: that file); it is copied only into a temporary build directory, never into the repository. The owner confirms the license shown at download permits this use.
 - **P2. Self-hosted runner.** Install a GitHub Actions runner for this repository on the OCI host:
   - labels `self-hosted`, `linux`, `arm64`, `saltation-oracle`;
   - it runs as a non-root user that can use Docker;
@@ -73,9 +73,9 @@ Every other criterion is proved by later stages.
 
 ## Order of work
 
-Each step names its proof command, run from the repository root on the OCI host. A step is done when its command passes. Commit after each step.
+Each step names its proof command, run from the repository root on the Mac. A step is done when its command passes. Commit after each step.
 
-1. **Oracle image.** Write `infra/oracle/build.sh`. It clones `oracle/docker-images` at a pinned commit into a temporary directory, links the zip from `~/block/oracle-install/`, and builds `saltation/oracle-ee:19.19`. Write the init SQL and `smoke.sh`.
+1. **Oracle image.** Start Colima with the sizes above. Write `infra/oracle/build.sh`. It clones `oracle/docker-images` at a pinned commit into a temporary directory, copies the zip from `ORACLE_ZIP`, and builds `saltation/oracle-ee:19.19` for linux/arm64. Write the init SQL and `smoke.sh`.
    - Files: `infra/oracle/**`.
    - Proof: `infra/oracle/build.sh && infra/oracle/smoke.sh`. The smoke test prints the 19c banner, NOARCHIVELOG mode, `OUTBOX_TS` max size 4 GB and the undo max size.
 2. **Compose data services.** Add `oracle` and `mongo` with health checks, limits, networks and the Mongo init that creates two users.
@@ -170,7 +170,8 @@ New checks in `checks.json`:
 - **Oracle 19c ARM64 build fails or is slow.** It is step 1, so it fails before anything depends on it. Pin the `docker-images` commit. If the build is impossible on this host, stop and revise the plan with the owner.
 - **The `oracle` crate on ARM64** needs Instant Client for Linux ARM64. Step 3 proves the connection before any feature code.
 - **Self-hosted runner security.** Docker access is root-equivalent on a shared host. Mitigations: approval required for outside contributors; the runner is used only by the `oracle-integration` job; the job cleans up its containers and volumes; no secrets beyond the test database passwords. The owner may stop the runner service at any time; CI then reports `oracle-integration` as not completed rather than passing.
-- **Resource contention with co-tenants.** Compose limits from N-7 apply from step 2. Integration tests use a separate Compose project with its own volumes and the same limits.
+- **Mac resources.** The Colima VM gets 6 of 10 CPUs and 10 of 16 GB; Compose limits from N-7 apply inside it. The full N-7 budget (14 GB) does not fit on the Mac, so Loki and Prometheus run with reduced limits in the `local` profile; the full budget is exercised on the OCI host in stage 6.
+- **Resource contention on the OCI runner.** The `oracle-integration` job uses a separate Compose project with its own volumes and the N-7 limits, and removes them afterwards.
 - **Container-wrapped toolchains are slower.** Cargo, pnpm and uv caches are mounted as named volumes.
 - **Scope creep from later stages.** Anything outside the Delivery stage-1 row waits for its own change.
 
@@ -178,12 +179,13 @@ New checks in `checks.json`:
 
 - Before merge: close the pull request; the branch can be deleted.
 - After merge: revert the squash commit in a new change.
-- On the host:
+- On the Mac and the OCI host:
   - `docker compose -f infra/compose/compose.yml --profile local down -v` removes the stack and its data;
   - `docker image rm saltation/oracle-ee:19.19` removes the image;
-  - the owner removes the runner with `./config.sh remove`.
+  - `colima stop` frees the Mac's resources;
+  - the owner removes the runner from the OCI host with `./config.sh remove`.
 - No co-tenant service or file is modified.
 
 ## Open questions
 
-- Confirm the Oracle zip path on the host (P1) when it is in place.
+- None.
