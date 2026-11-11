@@ -1,0 +1,14 @@
+-- Test-only: recreates the empty SALTATION schema in ORCLPDB1.
+-- Run as SYSDBA by scripts/dev/it-oracle.sh, which defines &pw first; never against a database with data to keep.
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = ORCLPDB1;
+BEGIN
+  EXECUTE IMMEDIATE 'DROP USER saltation CASCADE';
+EXCEPTION WHEN OTHERS THEN
+  IF SQLCODE != -1918 THEN RAISE; END IF;
+END;
+/
+CREATE USER saltation IDENTIFIED BY "&pw" DEFAULT TABLESPACE saltation_data
+  QUOTA UNLIMITED ON saltation_data QUOTA UNLIMITED ON outbox_ts;
+GRANT CREATE SESSION, CREATE TABLE, CREATE SEQUENCE, CREATE VIEW, CREATE PROCEDURE TO saltation;
+EXIT
