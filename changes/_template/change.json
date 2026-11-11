@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "id": "replace-with-change-id",
+  "kind": "implementation",
+  "title": "One-line summary of the change",
+  "base": {"ref": "main", "commit": ""},
+  "baseline": {"intent.md": "", "spec.md": ""},
+  "write_scope": [],
+  "approvals": []
+}

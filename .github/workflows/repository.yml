@@ -1,0 +1,103 @@
+# Repository gate. No path filters: every job always runs to a terminal result,
+# and routing / not-applicable decisions happen inside scripts/repo.py.
+name: repository
+
+on:
+  pull_request:
+    # `edited` re-runs routing when the PR body's Change-ID changes.
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One live run per PR; a superseded (cancelled) run never qualifies.
+  # Pushes to main are grouped per commit so every merged tree gets a full run.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  # PR: judged against the PR base, identified by the PR body's Change-ID.
+  # main: no active change. Branch-name inference is off in CI.
+  REPO_ARGS: >-
+    --ci --branch=
+    ${{ github.event_name == 'pull_request' && format('--pr-body /tmp/pr-body.md --base {0} --head HEAD', github.event.pull_request.base.sha) || '' }}
+
+jobs:
+  # Runs the control-plane check directly, so its verdict does not depend on repo.py.
+  control-plane-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: python3 scripts/tests/run.py
+
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the diff against the PR base needs history
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Write PR body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
+      - run: python3 scripts/repo.py status $REPO_ARGS
+
+  # Fails a pull request not authored by the agent identity. An unset
+  # AGENT_LOGIN passes with a notice; see docs/host-setup.md.
+  identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          AGENT_LOGIN: ${{ vars.AGENT_LOGIN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "identity: not a pull request"
+            exit 0
+          fi
+          if [ -z "$AGENT_LOGIN" ]; then
+            echo "::notice::AGENT_LOGIN is not set; pull request author not checked"
+            exit 0
+          fi
+          if [ "$PR_AUTHOR" != "$AGENT_LOGIN" ]; then
+            echo "::error::pull request author $PR_AUTHOR is not the agent identity $AGENT_LOGIN"
+            exit 1
+          fi
+          echo "identity: $PR_AUTHOR"
+
+  # The one status check to require. Every job above must end in success;
+  # skipped, cancelled, or failed jobs all fail the summary.
+  summary:
+    if: always()
+    needs: [control-plane-tests, status, identity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          for job, v in needs.items():
+              print(f"{job}: {v['result']}")
+          sys.exit(0 if needs and all(v["result"] == "success" for v in needs.values()) else 1)
+          PY

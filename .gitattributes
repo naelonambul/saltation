@@ -1,0 +1,5 @@
+# Approval claims bind exact bytes; keep SDLC artifacts LF on every checkout.
+intent.md text eol=lf
+spec.md text eol=lf
+changes/** text eol=lf
+checks.json text eol=lf

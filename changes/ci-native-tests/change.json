@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "ci-native-tests",
+  "kind": "repository",
+  "title": "Run the control-plane tests once, with native unittest, outside repo.py",
+  "base": {
+    "ref": "main",
+    "commit": "536a1ecf704e657ea008fb9236366ef54d559beb"
+  },
+  "baseline": {},
+  "write_scope": [
+    "scripts/tests/run.py",
+    "scripts/tests/test_run.py",
+    "scripts/tests/support.py",
+    "scripts/tests/test_support.py",
+    "scripts/tests/test_workflow.py",
+    "scripts/tests/test_status.py",
+    "scripts/repo.py",
+    ".github/workflows/repository.yml",
+    "scripts/README.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8e7fb04ae7d1191cebcdb0cae4afa35e20db9ad400c590205a8e7c3c601e5897",
+      "by": "naelonambul",
+      "at": "2026-11-08T16:15:37Z",
+      "write_scope_sha256": "sha256:a637bb5f6bf556126a7ffb7c071890757170c369c705e48d1357fb077874d36c",
+      "note": "Owner said '\uc9c4\ud589\ud574' in session after the plan (sha256:8e7fb04a...) was explained and the reply said approval would be recorded on their go-ahead."
+    }
+  ]
+}

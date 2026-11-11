@@ -1,0 +1,107 @@
+# -----------------------------------------------------------------------------
+# OS / editor noise
+# -----------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+*.iml
+
+# Keep editor/project configuration opt-in rather than ignoring all of .vscode/.
+
+# -----------------------------------------------------------------------------
+# Local environment / secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+.direnv/
+.envrc.local
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# -----------------------------------------------------------------------------
+# Logs / temporary files
+# -----------------------------------------------------------------------------
+*.log
+*.log.*
+*.tmp
+*.temp
+.tmp/
+tmp/
+temp/
+.cache/
+
+# -----------------------------------------------------------------------------
+# Node / JavaScript / web tooling
+# -----------------------------------------------------------------------------
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+coverage/
+.nyc_output/
+.parcel-cache/
+.vite/
+.turbo/
+.eslintcache
+.stylelintcache
+
+# Common generated web output. Remove an entry if a project intentionally
+# versions that directory as source.
+dist/
+build/
+out/
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+
+# -----------------------------------------------------------------------------
+# Apple / Xcode / Swift
+# -----------------------------------------------------------------------------
+DerivedData/
+.build/
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcuserstate
+
+# -----------------------------------------------------------------------------
+# Test / coverage artifacts
+# -----------------------------------------------------------------------------
+coverage.xml
+lcov.info
+junit.xml
+.test-results/
+test-results/
+
+# -----------------------------------------------------------------------------
+# repo.py verify evidence (raw logs + evidence.json per run)
+# -----------------------------------------------------------------------------
+.evidence/

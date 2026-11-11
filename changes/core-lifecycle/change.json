@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "core-lifecycle",
+  "kind": "repository",
+  "title": "Make the merged pull request the closure: remove closure.json, frozen anchors and the template's closed packets",
+  "base": {
+    "ref": "main",
+    "commit": "bccaed3f386e4c80d17a5865f68c512db3ffe876"
+  },
+  "baseline": {},
+  "write_scope": [
+    "scripts/repo.py",
+    "scripts/README.md",
+    "scripts/hooks/guard.py",
+    "scripts/hooks/README.md",
+    "scripts/tests/support.py",
+    "scripts/tests/test_status.py",
+    "scripts/tests/test_approve_close.py",
+    "scripts/tests/test_new.py",
+    "scripts/tests/test_guard.py",
+    "scripts/tests/test_support.py",
+    "changes/**",
+    "README.md",
+    "AGENTS.md",
+    ".agents/skills/sdlc-artifacts/SKILL.md",
+    ".agents/skills/change-execution/references/worker-brief.md",
+    "docs/host-setup.md",
+    ".gitattributes"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:9e2a9ea70cf03d275f56475c2762349ff919f7f6a5ce3398105d7567c8fd7a52",
+      "by": "naelonambul",
+      "at": "2026-11-08T16:08:41Z",
+      "write_scope_sha256": "sha256:b860759d57b45cae0f11adfe11171f143451548a980ae90ceebd1a5801a5c569",
+      "note": "Owner approved revision 2 in session (answer: 'Approve revision 2'): adds scripts/tests/test_support.py to write_scope."
+    }
+  ]
+}
