@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "product-init",
+  "kind": "product-init",
+  "title": "Real-time financial fraud detection MLOps pipeline",
+  "base": {
+    "ref": "main",
+    "commit": "45a9a6011d705bb20e4749d0bf1bfd3f2632e89e"
+  },
+  "baseline": {},
+  "write_scope": [
+    "intent.md",
+    "spec.md"
+  ],
+  "approvals": []
+}
