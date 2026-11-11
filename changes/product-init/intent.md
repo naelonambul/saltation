@@ -4,7 +4,7 @@
 
 Fraud detection systems (FDS) and the MLOps pipelines behind them are hard to learn and hard to demonstrate without access to a real bank. Public fraud datasets are static tables: they carry no live event stream, no login, device or session context, no channel (app, ATM) detail, and no way to inject a new fraud pattern and watch a pipeline react to it. Real banking data cannot be used for privacy and legal reasons.
 
-The owner is a data-engineering and MLOps bootcamp student building a personal portfolio project, "real-time financial fraud anomaly detection MLOps pipeline", and needs a realistic, continuously running source of banking activity, including fraud with known ground truth, to build that pipeline on.
+The owner is a data-engineering and MLOps bootcamp student building a personal portfolio project on the theme "real-time financial fraud anomaly detection MLOps pipeline". It is not coursework or a classroom submission. The owner needs a realistic, continuously running source of banking activity, including fraud with known ground truth, to build that pipeline on.
 
 ## Proposed outcome
 
@@ -82,7 +82,7 @@ Detection (later):
 ## Open questions
 
 - Mobile app and admin web app technology stacks.
-- Oracle Database container details: obtaining the 19c installation binaries for ARM64 and x86-64, image build time and size, memory sizing, and confirming the license terms fit a personal, non-production portfolio project.
+- Oracle Database container details: obtaining the 19c installation binaries for ARM64 and x86-64, image build time and size, and memory sizing. The owner confirms at download that the license shown permits this use: development and demonstration of a personal portfolio project, with no production, commercial or classroom use.
 - Whether OCI is ever a deployment target, or only the development host.
 - How events reach detection in real time (for example a message broker such as Kafka, or change data capture), and when it is introduced.
 - Detection approach and MLOps tooling (rules, ML scoring, workflow orchestration, model registry), and where model training runs. Deferred until detection is designed; data collection comes first.
