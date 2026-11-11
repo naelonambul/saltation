@@ -91,7 +91,7 @@ All performance figures are server-side (request received to response sent) on t
 - N-4. **Backfill throughput:** at least 200 generated operations per second sustained, where an operation is one API request; the default population produces about 7.5 million requests per business year (about 375 per customer, including logins and inquiries), so the backfill completes within 24 hours.
 - N-5. **Correctness:** zero daily-close mismatches, zero duplicate money movements and zero `TRANSFER` records violating F-21, after every load test and run.
 - N-6. **Security cost settings:** password and PIN hashing uses Argon2id with parameters fixed in configuration and sized so that login stays within N-4 (the plan measures and records them).
-- N-7. **Resource budget:** Saltation containers together have CPU limits of at most 3 vCPU and memory limits of at most 14.5 GB; each container has its own CPU and memory limit. Initial memory: Oracle 6 GB (SGA 4 GB, `PGA_AGGREGATE_LIMIT` 1.5 GB), MongoDB 3 GB (WiredTiger cache 1.5 GB), truth MongoDB 512 MB, bank 1 GB, generator 1 GB, nginx 128 MB, cloudflared 128 MB, Alloy 256 MB, Loki 768 MB, Prometheus 768 MB, Grafana 256 MB. Oracle redo logs are sized for the backfill write rate (initially three groups of 1 GB).
+- N-7. **Resource budget:** Saltation containers together have CPU limits of at most 3 vCPU and memory limits of at most 14 GB; each container has its own CPU and memory limit. Initial memory: Oracle 6 GB (SGA 4 GB, `PGA_AGGREGATE_LIMIT` 1.5 GB), MongoDB 3 GB (WiredTiger cache 1.5 GB), bank 1 GB, generator 1 GB, nginx 128 MB, cloudflared 128 MB, Alloy 256 MB, Loki 768 MB, Prometheus 768 MB, Grafana 256 MB. Oracle redo logs are sized for the backfill write rate (initially three groups of 1 GB).
 - N-8. **Co-tenant safety:** during the backfill, the 24-hour live run and load tests, no Saltation container is OOM-killed or restarted, and the co-tenant containers (`sonarqube-sonarqube-1`, `postgresql-postgresql-1`, `qdrant-qdrant-1`, `npm`, `jenkins`, `cloudflared-oci-podobank-api`) have zero restarts and keep their health status.
 - N-9. **Storage and retention:** Saltation uses at most 70 GB of the block volume. Retention: Oracle keeps all data; MongoDB `bank_logs` 18 months; delivered outbox rows 7 days; Loki 14 days; Prometheus 15 days; `app.log` rotated daily, 7 files kept. An alert fires when Saltation's data volumes exceed 80% of the budget. Data beyond Oracle's budget is archived in a later change.
 - N-10. **Portability:** every image is published for, or (Oracle) buildable from documented steps on, linux/arm64 and linux/amd64.
@@ -180,7 +180,7 @@ Each feature folder holds its router, handlers, rules, repository and its own `s
 ### Dependency direction
 
 - Inside each app: `app` → `features` → `shared`, one way only. A feature never imports another feature; shared needs move to `shared`. `shared` never imports `features`. Cross-feature effects go through `shared` (ledger, outbox, rollover registry).
-- `web` and `generator` use the bank only through `contracts/` interfaces. The generator reads and writes only its own truth store; it never connects to Oracle or `bank_logs`. The bank never connects to the truth store.
+- `web` and `generator` use the bank only through `contracts/` interfaces. The generator reads and writes only the `truth` database; it never connects to Oracle or `bank_logs`. The bank never reads or writes `truth`.
 - **Where new features go:** a new banking capability is a new folder under `bank/src/features/` with its interface first added to `contracts/`; a new screen is a new folder under the app's `src/features/`. Detection, when added, is a new top-level module (`detect/`) consuming `bank_logs` and read-only Oracle views; it does not import bank code. A later Python data service (pandas and NumPy) is a new top-level module (`analytics/`) reading data stores read-only.
 - These boundaries are enforced by automated import checks for the bank, the web apps and the generator (registered by the plan).
 
@@ -192,7 +192,7 @@ browser ─HTTPS─▶ Cloudflare (TLS, Workers VPC) ─tunnel─▶ bank public
 generator ─HTTP─▶ bank generator listener: /oauth, /v2.0, /atm, /internal (internal network only)
 bank ─▶ Oracle (structured data, outbox) ─ relay ─▶ MongoDB bank_logs (business events)
 bank ─ app.log ─▶ Alloy ─▶ Loki ─▶ Grafana;  bank metrics listener ─▶ Prometheus ─▶ Grafana
-generator ─▶ truth MongoDB (separate instance)
+generator ─▶ MongoDB truth database (same instance, separate user)
 ```
 
 **Bank listeners**
@@ -208,12 +208,11 @@ generator ─▶ truth MongoDB (separate instance)
 | Service | Image | Networks |
 |---|---|---|
 | `oracle` | locally built Oracle Database 19c EE | `data` |
-| `mongo` | official MongoDB, `--auth`, user for `bank_logs` only | `data` |
-| `mongo-truth` | official MongoDB, `--auth`, separate instance | `truth` |
+| `mongo` | official MongoDB, `--auth`; databases `bank_logs` and `truth`, each with its own user | `data` |
 | `bank` | built from `bank/`; HTTP listeners above; `app.log` on the `applogs` volume | `data`, `edge`, `internal`, `obs` |
 | `web` | nginx serving the two SPAs; no API proxying | `edge` |
 | `cloudflared` | tunnel connector; ingress allow-list: `web`, and the bank public listener | `edge` |
-| `generator` | built from `generator/` | `internal`, `truth` |
+| `generator` | built from `generator/` | `internal`, `data` |
 | `alloy` | tails `app.log` (read-only volume mount) | `obs` |
 | `loki`, `prometheus`, `grafana` | official images | `obs` |
 
@@ -343,7 +342,7 @@ Indexes support the access paths: transaction rows by (account, business date, a
 
 No ObjectId, BSON Date or Decimal128 in the envelope or payload; `_id` equals `event_id`. Bank-originated events have `request_id` null and `channel` `SYSTEM`.
 
-### Truth store (separate MongoDB instance)
+### Truth store (MongoDB `truth` database)
 
 `labels`: `{request_id, subject_type, subject_id, label, scenario, scenario_instance_id, run_id}`, unique on (`request_id`, `subject_type`, `subject_id`); `subject_type` is `account` or `customer`; `label` is `normal`, `lookalike` or `A`..`F`. `runs`: run manifest with seed, population, amplification factor, scenario counts, code version and clock range.
 
@@ -355,9 +354,9 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 
 - Synthetic data only; `ci_hash` hashes synthetic data. No resident registration numbers in any form.
 - Passwords, PINs and reset codes are stored as Argon2id hashes; tokens and client secrets are stored hashed. None is logged.
-- The truth store is a separate MongoDB instance on a network the bank is not attached to. The bank's MongoDB user can access only `bank_logs`; the generator has no network route to Oracle or `mongo`.
+- The truth store is the `truth` database in the same MongoDB instance. The bank's MongoDB user is granted only `bank_logs`; the generator's MongoDB user is granted only `truth`. The generator has no Oracle credentials.
 - The generator listener, ATM routes, inbound deposits, internal routes and metrics are never reachable through the tunnel; tunnel ingress allows only `web` and the public listener.
-- Negative tests prove: the tunnel route cannot reach `/atm`, `/internal`, `/v2.0/transfer/deposit/fin_num` or `/metrics`; simulated context headers are ignored on the public listener; the bank container cannot reach `mongo-truth`; the generator container cannot reach `oracle` or `mongo`.
+- Negative tests prove: the tunnel route cannot reach `/atm`, `/internal`, `/v2.0/transfer/deposit/fin_num` or `/metrics`; simulated context headers are ignored on the public listener; the bank's MongoDB user is denied on `truth`; the generator's MongoDB user is denied on `bank_logs`.
 - Secrets come from an untracked `.env`; no secret is committed.
 - Oracle binaries and the KFTC specification PDF are never committed. Oracle use is limited to development and demonstration of this personal portfolio project, subject to the owner's license check at download.
 
