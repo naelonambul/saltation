@@ -375,16 +375,18 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 
 ## Delivery
 
-The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold.
+The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable.
+
+Until the owner-built Oracle Database 19c EE image exists, development and tests run against the official Oracle Database Free container image (arm64 and amd64) as a stand-in. All SQL stays within features available in 19c, so switching to 19c changes only the image and connection settings. Criteria that depend on 19c capacity or memory settings (N-1 to N-4, N-7, the 365-day backfill) are proven on 19c. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold.
 
 | Stage | Change | Delivers |
 |---|---|---|
-| 1 | `product-init` | Establishes this intent and specification as the baseline, and a walking skeleton: repository layout and registered checks; Compose stack (`local` profile) with Oracle, MongoDB, bank, nginx, Alloy, Loki, Prometheus and Grafana; migrations for customers, credentials, sessions, login attempts, accounts, transaction requests, transfers, transaction rows, daily totals, clock and outbox; login, balance, transaction history and in-bank transfer; outbox relay; `app.log` and metrics; seeding of customers and demand accounts; a minimal mobile web flow (login, balance, history, transfer); a generator that seeds and drives normal transfers |
+| 1 | `product-init` | Establishes this intent and specification as the baseline, and a walking skeleton: repository layout and registered checks; Compose stack (`local` profile) with Oracle (Free stand-in), MongoDB, bank, nginx, Alloy, Loki, Prometheus and Grafana; migrations for customers, credentials, sessions, login attempts, accounts, transaction requests, transfers, transaction rows, daily totals, clock and outbox; login, balance, transaction history and in-bank transfer; outbox relay; `app.log` and metrics; seeding of customers and demand accounts; a minimal mobile web flow (login, balance, history, transfer); a generator that seeds and drives normal transfers |
 | 2 | ledger and products | payees, recipient inquiry, limits, inbound deposits, term deposits, loans, password reset, devices, simulated clock modes and day rollover, daily close |
 | 3 | ATM channel | ATM interface, terminals, PIN credentials and sessions |
 | 4 | admin web | analyst login and every F-39 lookup |
 | 5 | generator scenarios | personas, scenarios A to F, lookalikes, truth labels, backfill and live drivers, run manifests |
-| 6 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
+| 6 | operations | the switch to the Oracle 19c EE image, Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
 
 ## Acceptance criteria
 
