@@ -19,6 +19,13 @@
       "by": "naelonambul",
       "at": "2026-11-11T13:15:45Z",
       "note": "Owner in session: \uc751 \uc2b9\uc778 (re-approve intent with loan repayment, no interest, whole-won KRW)"
+    },
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:d1f06bded655a506197bb63c40cecd485f0d1ea9cc4ec831a65ef77051619a69",
+      "by": "naelonambul",
+      "at": "2026-11-11T21:38:54Z",
+      "note": "Owner in session: \uc2b9\uc778 (approve spec at sha256:d1f06bde)"
     }
   ]
 }
