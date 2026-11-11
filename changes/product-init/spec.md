@@ -108,7 +108,7 @@ References used for interface and data shapes:
 | Bank server | `bank/crates/server` | Binary wiring config, clock, store, API and events | Rust |
 | Web | `web/apps/mobile`, `web/apps/admin`, `web/packages/api-client` | Customer and analyst SPAs; a typed client generated from `contracts/` | TypeScript, React |
 | Generator | `generator/` | Personas, scenario engine, backfill and live drivers, seeding, truth writer, run manifests | Python |
-| Infra | `infra/compose`, `infra/oracle`, `infra/nginx`, `infra/observability`, `infra/lab` | Compose files, Oracle image build steps and init scripts, nginx TLS config, Alloy/Loki/Prometheus/Grafana config and dashboards, later Terraform/Ansible for the VMware lab | YAML, shell, HCL |
+| Infra | `infra/compose`, `infra/oracle`, `infra/nginx`, `infra/observability`, `infra/lab` | Compose files, Oracle image build steps and init scripts, nginx config, Alloy/Loki/Prometheus/Grafana config and dashboards, later Terraform/Ansible for the VMware lab | YAML, shell, HCL |
 | Load tests | `loadtest/` | Transfer latency, hot-account and saturation tests (N-1 to N-5) | Python |
 
 ### Dependency direction
@@ -150,6 +150,7 @@ generator ─HTTP (private network)─▶ Rust bank API server (public, ATM, int
 
 - The truth store is a separate MongoDB database (`truth`) with its own user; the bank's MongoDB user is granted only the `bank_logs` database. The plan may move truth to a separate MongoDB instance if credential separation proves insufficient.
 - The internal interface (seeding, clock) listens only on the `internal` network and is disabled in live mode except for read-only clock status.
+- Local testing uses plain HTTP: a `local` Compose profile publishes `web` and `bank` on localhost ports and omits `cloudflared`; the SPAs read the API base URL from build-time configuration, and the CORS allow-list includes the local origins only in that profile.
 - TLS is terminated by Cloudflare. Public traffic reaches `web` and `bank` only through Cloudflare Workers VPC over the `cloudflared` tunnel; no Saltation port is published on the host. Grafana is reached through the tunnel behind Cloudflare Access, or through an SSH tunnel. Oracle, MongoDB, Loki and Prometheus are never exposed.
 
 ### Transfer processing (in one Oracle transaction)
