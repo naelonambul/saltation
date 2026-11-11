@@ -12,6 +12,8 @@ use oracle::pool::{CloseMode, GetMode, Pool, PoolBuilder};
 use oracle::sql_type::ToSql;
 use tokio::sync::Semaphore;
 
+use crate::shared::telemetry::RequestStats;
+
 pub use migrations::{MIGRATIONS, Migration};
 
 /// A named SQL statement loaded from a file at compile time.
@@ -129,14 +131,41 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
     {
-        let permit = tokio::time::timeout(self.acquire_timeout, self.gate.clone().acquire_owned())
-            .await
-            .map_err(|_| DbError::Busy)?
-            .map_err(|_| DbError::Busy)?;
+        self.run_collect(work).await.0
+    }
+
+    /// Like [`Db::run`], adding the statement statistics to a request's totals.
+    pub async fn run_in<T, F>(&self, stats: &RequestStats, work: F) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
+    {
+        let (result, collected) = self.run_collect(work).await;
+        if let Ok(mut total) = stats.lock() {
+            total.merge(&collected);
+        }
+        result
+    }
+
+    async fn run_collect<T, F>(&self, work: F) -> (Result<T, DbError>, StatementStats)
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
+    {
+        let permit =
+            match tokio::time::timeout(self.acquire_timeout, self.gate.clone().acquire_owned())
+                .await
+            {
+                Ok(Ok(p)) => p,
+                _ => return (Err(DbError::Busy), StatementStats::default()),
+            };
         let pool = self.pool.clone();
-        tokio::task::spawn_blocking(move || {
+        let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let conn = pool.get()?;
+            let conn = match pool.get() {
+                Ok(c) => c,
+                Err(e) => return (Err(DbError::from(e)), StatementStats::default()),
+            };
             let mut session = Session {
                 conn,
                 stats: StatementStats::default(),
@@ -145,9 +174,13 @@ impl Db {
             if result.is_err() {
                 let _ = session.conn.rollback();
             }
-            result
+            (result, session.stats)
         })
-        .await?
+        .await;
+        match joined {
+            Ok(pair) => pair,
+            Err(e) => (Err(DbError::Join(e)), StatementStats::default()),
+        }
     }
 
     /// Applies pending migrations in order; returns how many were applied.
@@ -166,6 +199,17 @@ impl Db {
 pub struct StatementStats {
     pub count: u32,
     pub slowest: Option<(&'static str, Duration)>,
+}
+
+impl StatementStats {
+    pub fn merge(&mut self, other: &StatementStats) {
+        self.count += other.count;
+        if let Some((name, d)) = other.slowest
+            && self.slowest.is_none_or(|(_, mine)| d > mine)
+        {
+            self.slowest = Some((name, d));
+        }
+    }
 }
 
 /// One connection checked out for one unit of work.
