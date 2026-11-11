@@ -44,7 +44,7 @@ All of these are in scope for the product. Each must be producible by the genera
 ## Constraints
 
 - The banking server is written in Rust.
-- Structured data lives in Oracle Database, run as a container built from Oracle's official container build scripts (Oracle Database 19c Enterprise Edition, which supports both ARM64 and x86-64 and has no edition data-size cap). Unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
+- Structured data lives in Oracle Database, run as a container built from Oracle's official container build scripts (Oracle Database 19c Enterprise Edition, which supports both ARM64 and x86-64 and has no edition data-size cap). Unstructured logs live in MongoDB for now; MongoDB is planned to be replaced later by PostgreSQL (JSONB), so the log format must stay portable and must not depend on MongoDB-only features.
 - The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is an OCI Always Free Ampere A1 instance: ARM64, 4 vCPU, 24 GB RAM, 50 GB boot volume plus 150 GB block volume. Every service runs under explicit CPU and memory limits, including the Oracle Database memory (SGA and PGA) and the MongoDB cache, and the services share the host with other workloads already running there.
 - A secondary, occasional environment is a local lab: VMware Workstation Pro on an x86-64 Windows host with WSL, provisioned with Terraform and configured with Ansible. It is not required for every change, but nothing may lock the stack to ARM64.
 - All data is synthetic. No real personal or financial data is ever used.
