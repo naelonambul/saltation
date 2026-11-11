@@ -32,18 +32,18 @@
     },
     {
       "artifact": "spec.md",
-      "sha256": "sha256:4f20bccb86a6ff21d2ff66bf8cb4222d37722e8a928b5949b994d64c220b1a3c",
+      "sha256": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3",
       "by": "naelonambul",
-      "at": "2026-11-11T23:05:39Z",
-      "note": "Owner in session: \uc2a4\ud329 \ubd80\ud130 \uc2b9\uc778\ud560\uac8c (approve spec with staged delivery at sha256:4f20bccb)"
+      "at": "2026-11-11T23:37:54Z",
+      "note": "Owner in session: \uc2b9\uc778 (spec PGA 2 GB fix, sha256:bdbb3134)"
     },
     {
       "artifact": "plan.md",
       "sha256": "sha256:8295af1661118a4adc2ccd82c669ac83fbe4fa594c7a445c05bcb2a3f26af7eb",
       "by": "naelonambul",
-      "at": "2026-11-11T23:15:16Z",
+      "at": "2026-11-11T23:37:54Z",
       "write_scope_sha256": "sha256:be4c0e710cf0b7325400a6904a621211ed13f8529ca8dbeb40ea3fd9dbd79c84",
-      "note": "Owner in session, replying to 'approve and I start step 1': \uc9c4\ud589\ud574 (plan at sha256:8295af16)"
+      "note": "Owner in session: \uc2b9\uc778 (plan unchanged, re-approved after spec)"
     }
   ]
 }
