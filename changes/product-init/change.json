@@ -15,10 +15,10 @@
   "approvals": [
     {
       "artifact": "intent.md",
-      "sha256": "sha256:f0da129eeb53645d18a36499c6a3f32c615f0aad094b7175c99f1211bd5c94ee",
+      "sha256": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
       "by": "naelonambul",
-      "at": "2026-11-11T12:47:40Z",
-      "note": "Owner in session: \uc2b9\uc778\ud574 (approve intent at sha256:f0da129e)"
+      "at": "2026-11-11T13:15:45Z",
+      "note": "Owner in session: \uc751 \uc2b9\uc778 (re-approve intent with loan repayment, no interest, whole-won KRW)"
     }
   ]
 }
