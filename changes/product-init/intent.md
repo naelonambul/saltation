@@ -13,7 +13,7 @@ Saltation is a self-contained simulated bank with a fraud-detection platform bui
 1. **A bank that produces realistic data.** A Rust banking server provides accounts, deposits, withdrawals, transfers, payees, authentication, and device and session tracking, across a mobile app channel and a simulated ATM channel. A customer-facing mobile app and an operator-facing admin web app sit on top of it.
 2. **Persona-driven synthetic activity.** A synthetic generator drives the bank through its public interfaces as a population of personas: ordinary customers (for example office workers, students, self-employed, elderly) and fraud actors. Fraud actors play the scenarios below, interleaved with normal behaviour. The generator records ground truth (which events belong to which scenario) separately from the bank's own data.
 3. **Data collection first.** Structured banking records are stored in a relational database, and unstructured logs (application, access, session and device events) are collected into a document store, so that a growing, labelled history accumulates. This is the first priority.
-4. **Asynchronous detection, later.** Detection consumes bank activity asynchronously and never blocks a transaction. It raises alerts that operators review in the admin web app. Rule-based and machine-learning detection, and the MLOps around the models (training, versioning, deployment, retraining), are built after data collection is in place.
+4. **Real-time detection, later.** Detection consumes bank activity as a stream, in real time but asynchronously, so it never blocks a transaction. It raises alerts that operators review in the admin web app. Rule-based and machine-learning detection, and the MLOps around the models (training, versioning, deployment, retraining), are built after data collection is in place.
 
 ### Fraud scenarios
 
@@ -39,11 +39,10 @@ All of these are in scope for the product. Each must be producible by the genera
 
 - The banking server is written in Rust.
 - Structured data lives in Oracle Database; unstructured logs live in MongoDB. Consolidating stores later (for example onto PostgreSQL) must remain possible.
-- The whole system is developed and run with Docker Compose. Development happens on an Oracle Cloud Infrastructure host the owner reaches over SSH.
-- The primary environment is Docker Compose on the OCI development host, which is ARM64 (Ampere, 4 cores, about 24 GB RAM); the stack must fit within that host's resources.
+- The primary environment is Docker Compose on an Oracle Cloud Infrastructure development host the owner reaches over SSH. The host is ARM64 (Ampere, 4 cores, about 24 GB RAM); the stack must fit within that host's resources.
 - A secondary, occasional environment is a local lab: VMware Workstation Pro on an x86-64 Windows host with WSL, provisioned with Terraform and configured with Ansible. It is not required for every change, but design choices should avoid locking the stack to ARM64 (for example by preferring images available for both architectures). A move to Kubernetes comes later.
 - All data is synthetic. No real personal or financial data is ever used.
-- Detection is asynchronous: it must never block or delay a banking transaction.
+- Detection is real-time and asynchronous: it processes events as they happen, and it must never block or delay a banking transaction.
 - Ground-truth labels are kept apart from the bank's operational data, so detection cannot read them.
 - One developer, no deadline; the product grows through successive changes.
 
@@ -68,7 +67,7 @@ Data foundation (first):
 
 Detection (later):
 
-- Asynchronous detection raises alerts for scenarios A to F without affecting transaction latency, and operators can review alerts in the admin web app.
+- Real-time detection raises alerts for scenarios A to F within seconds of the triggering event, without affecting transaction latency, and operators can review alerts in the admin web app.
 - Detection quality is measured against ground truth (for example precision and recall per scenario).
 - Models are trained, versioned, deployed and retrained through an automated pipeline.
 
