@@ -1,0 +1,18 @@
+{
+  "name": "@saltation/api-client",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "gen": "openapi-typescript ../../../contracts/openapi/public.yaml -o src/schema.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "echo 'api-client: generated types only'"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.9.3"
+  }
+}

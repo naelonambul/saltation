@@ -4,9 +4,11 @@
 //! - metrics: `/metrics` only
 
 use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method};
 use axum::middleware::from_fn;
 use axum::routing::get;
 use metrics_exporter_prometheus::PrometheusHandle;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::features;
 use crate::shared::clock::Clock;
@@ -39,8 +41,29 @@ fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) ->
         .with_state(state)
 }
 
+/// CORS for the public listener (spec: Runtime topology): only the SPA
+/// origins listed in `SALTATION_CORS_ORIGINS` (comma-separated).
+fn cors() -> CorsLayer {
+    let origins: Vec<HeaderValue> = std::env::var("SALTATION_CORS_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("x-request-id"),
+        ])
+        .expose_headers([HeaderName::from_static("x-request-id")])
+}
+
 pub fn public_router(state: AppState) -> Router {
-    with_layers(public_routes(), Listener::Public, state)
+    with_layers(public_routes(), Listener::Public, state).layer(cors())
 }
 
 pub fn generator_router(state: AppState) -> Router {

@@ -114,3 +114,4 @@ dist/
 infra/compose/.env
 infra/compose/.env.it
 *_db_home.zip
+web/packages/api-client/src/schema.ts

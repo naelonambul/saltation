@@ -32,6 +32,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 metrics = "0.24"
 mongodb = "3"
+tower-http = { version = "0.7.1", features = ["cors"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
