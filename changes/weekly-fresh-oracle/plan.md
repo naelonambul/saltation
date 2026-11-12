@@ -2,17 +2,16 @@
 
 ## Summary
 
-Since `oracle-ci-speed`, CI and local runs reuse the Oracle test database, and only a setup-key change recreates it. A slow drift (a migration that only works on a reused schema, an image or Docker change that breaks database creation) would stay hidden. This change runs the whole Oracle integration suite from empty volumes once a week on the owner's Mac mini, against the latest `main`, and reports the result on that Mac.
+Since `oracle-ci-speed`, CI and local runs reuse the Oracle test database, and only a setup-key change recreates it. A slow drift (a migration that only works on a reused schema, an image or Docker change that breaks database creation) would stay hidden. This change runs the whole Oracle integration suite from empty volumes once a week on the self-hosted CI runner, against `main`.
 
-- `scripts/dev/weekly-fresh.sh`: in a dedicated clone, checks out `origin/main`, runs `scripts/dev/it-oracle.sh all --fresh`, keeps a log, records the result and shows a macOS notification.
-- `scripts/dev/install-weekly-fresh.sh`: creates the clone and installs (or with `--uninstall` removes) a user launchd agent that runs it every Sunday at 04:00 local time.
+- New workflow `.github/workflows/weekly-fresh.yml`: on a weekly schedule (Sunday 04:00 KST) and on manual dispatch, it checks out `main` on the `saltation-oracle` runner and runs `scripts/dev/it-oracle.sh all --fresh`.
+- The result is the workflow run in GitHub Actions; GitHub emails a failed scheduled run to the owner, who pushes the workflow file.
 
 Decisions:
 
-- **Local result only.** No GitHub issue, comment or status is created; the result stays on the Mac (log, result file, notification). Publishing results can be a later change.
-- **Separate clone.** The run never touches the owner's working tree. It fetches the public repository anonymously, so it needs no credentials.
-- **Shared state.** It uses the default `it-oracle.sh` state directory, so its `--fresh` run leaves a fresh database that later local runs reuse, and the existing lock keeps it from overlapping a local run.
-- **Self-updating.** The launchd agent updates the clone before it runs the script, so the script that runs is always the one on `main`.
+- **One place, the CI runner.** Development happens on the Mac mini and on the OCI host, so a weekly run on the runner covers both, needs no host-specific installer, and records its results where the other CI results are.
+- **No change to `it-oracle.sh` or `repository.yml`.** The new workflow calls the script with `--fresh`; the script's lock keeps it from overlapping a pull-request `oracle` job, and the fresh database it leaves behind is reused by the next one.
+- **Not a required check.** The weekly workflow does not feed the `summary` job, so it never blocks a pull request.
 
 ## Files and components that change
 
@@ -20,46 +19,36 @@ Decisions:
 
 | Path | Change |
 |---|---|
-| `scripts/dev/weekly-fresh.sh` | new: preflight, fresh run, log rotation, result file, notification |
-| `scripts/dev/install-weekly-fresh.sh` | new: clone, launchd agent install and uninstall |
-| `docs/dev-host.md` | a "Weekly fresh run (Mac mini)" section |
-
-Outside the repository, at install time only: the clone and logs in `${SALTATION_WEEKLY_DIR:-$HOME/.cache/saltation-weekly}` and `~/Library/LaunchAgents/com.saltation.weekly-fresh.plist`.
+| `.github/workflows/weekly-fresh.yml` | new: weekly and manual fresh Oracle run on the self-hosted runner |
+| `docs/dev-host.md` | the CI section describes the weekly run, how to start it by hand and where to read results |
 
 ## Order of work
 
-1. **`scripts/dev/weekly-fresh.sh`** (bash, macOS and Linux). Run from a checkout; uses its own checkout as the repository.
-   - Preflight, each failure recorded as a failed result with its reason: `docker info` succeeds; the image `saltation/oracle-ee:19.19` exists.
-   - Runs `scripts/dev/it-oracle.sh all --fresh`, output to `$SALTATION_WEEKLY_DIR/logs/<UTC timestamp>.log`; keeps the newest 12 logs.
-   - Writes one line to `$SALTATION_WEEKLY_DIR/last-result`: `<UTC time> <commit> pass|fail <seconds>s <log path or reason>`, and appends it to `$SALTATION_WEEKLY_DIR/history`.
-   - Shows a notification with `osascript` when it is available (title `Saltation weekly fresh run`, text pass or fail and the duration); exits with the run's status.
-   - Proof: `scripts/dev/weekly-fresh.sh` from this branch passes, its log contains `it-oracle: creating fresh test volumes`, and `last-result` reads `pass`.
-   - Proof (failure path): `PATH=/usr/bin:/bin scripts/dev/weekly-fresh.sh` (no `docker`) exits non-zero and `last-result` reads `fail` with the reason.
-2. **`scripts/dev/install-weekly-fresh.sh [--ref <branch>] [--uninstall]`** (macOS only; refuses elsewhere).
-   - Clones `https://github.com/naelonambul/saltation.git` into `$SALTATION_WEEKLY_DIR/repo` when missing.
-   - Writes the plist: label `com.saltation.weekly-fresh`; `StartCalendarInterval` Weekday 0, Hour 4, Minute 0; a `PATH` that includes the directory of the current `docker`; standard output and error to `$SALTATION_WEEKLY_DIR/launchd.log`; the program is `/bin/bash -c` with: fetch `origin`, `git checkout --detach --force origin/<ref>` (default `main`), then run `scripts/dev/weekly-fresh.sh`.
-   - Loads it with `launchctl bootstrap gui/<uid>` (after `bootout` of an earlier copy); `--uninstall` boots it out and deletes the plist, leaving the clone and logs.
-   - Proof: `scripts/dev/install-weekly-fresh.sh --ref change/weekly-fresh-oracle`, then `launchctl print gui/$(id -u)/com.saltation.weekly-fresh` shows the calendar interval; `launchctl kickstart gui/$(id -u)/com.saltation.weekly-fresh` runs once and `last-result` reads `pass`; `--uninstall` removes it.
-3. **Docs.** `docs/dev-host.md`: what the weekly run proves, install and uninstall, where the result and logs are, that the Mac must be awake with Docker Desktop running (launchd runs a missed time at the next wake).
-4. Run `python3 scripts/repo.py verify --change weekly-fresh-oracle --full` untouched; open the pull request. After merge, the owner (or Mac Claude on request) reinstalls with the default `--ref main`.
+1. **Workflow.** `.github/workflows/weekly-fresh.yml`:
+   - `on: schedule: - cron: "0 19 * * 6"` (Saturday 19:00 UTC = Sunday 04:00 KST) and `workflow_dispatch`.
+   - `permissions: contents: read`; `concurrency: group: weekly-fresh, cancel-in-progress: false`.
+   - One job `oracle-fresh` on `[self-hosted, linux, ARM64, saltation-oracle]`, `timeout-minutes: 120`: `actions/checkout` and `actions/setup-python` pinned to the same SHAs as `repository.yml` (`persist-credentials: false`), then `scripts/dev/it-oracle.sh all --fresh`.
+   - Proof: actionlint (the `rhysd/actionlint` Docker image, pinned by digest) reports nothing for `.github/workflows/weekly-fresh.yml`, and `scripts/dev/it-oracle.sh all --fresh`, the command the job runs, passes locally.
+2. **Docs.** `docs/dev-host.md`, CI section: what the weekly run proves, its schedule, how to start it (`gh workflow run weekly-fresh.yml`, owner), that a failure arrives by GitHub email, and that GitHub disables scheduled workflows after 60 days without repository activity.
+3. **Workflow handoff** (`docs/host-setup.md`, "Workflow changes"): commit the workflow as its own commit, commit the docs on top, run `python3 scripts/repo.py verify --change weekly-fresh-oracle --full` untouched, give the owner the workflow commit SHA; the owner pushes up to it, the agent pushes the rest and opens the pull request.
+4. **After merge:** the owner starts it once with `gh workflow run weekly-fresh.yml`; record its duration and result on the pull request.
 
 Implementation is delegated: Fable leads and briefs coding workers run as `codex exec --yolo -m gpt-6.1-sol -c model_reasoning_effort=low`; workers stay inside `write_scope` and never commit. Mac Claude reruns every proof and the full verify before committing.
 
 ## Tests and proof
 
-The proofs above; the full verify; the CI `summary` check (the change touches no registered check's code paths beyond `docs/dev-host.md`).
+The proofs above; the full verify; the CI `summary` check on the pull request; the first dispatched run after merge passes and its log shows `it-oracle: creating fresh test volumes`.
 
 ## Risks and mitigations
 
-- **Mac asleep or Docker Desktop not running at 04:00:** launchd runs a missed calendar job at wake; a missing Docker is recorded as a failed result with the reason and a notification, not silently skipped.
-- **Overlap with a local run:** the `it-oracle.sh` lock serialises them; the weekly run may wait.
-- **A fresh run wipes the local test database:** intended; it is test data only, and the next local run reuses the new one.
-- **`checkout --force` in the clone:** the clone is dedicated to this job and never edited by hand; the docs say so.
-- **Disk:** 12 logs at most.
+- **Overlap with a pull-request `oracle` job:** the `it-oracle.sh` lock serialises them; one waits (about 12 minutes at most).
+- **The weekly run wipes the runner's test database:** intended; it is test data only, and the next job reuses the new one.
+- **Silent disablement after 60 days of inactivity:** documented; the owner re-enables it in the Actions tab.
+- **Workflow security:** schedule and dispatch run only on `main` code, with read-only permissions and no secrets; fork pull requests cannot trigger it.
 
 ## Rollback or recovery
 
-`scripts/dev/install-weekly-fresh.sh --uninstall`, then revert the squash commit. Deleting `$SALTATION_WEEKLY_DIR` removes the clone and logs.
+Disable the workflow in the Actions tab, or revert the squash commit.
 
 ## Open questions
 

@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "weekly-fresh-oracle",
   "kind": "implementation",
-  "title": "Run the Oracle integration tests from an empty database every week on the Mac mini",
+  "title": "Run the Oracle integration tests from an empty database every week in CI",
   "base": {
     "ref": "main",
     "commit": "0127b6a320bf7c336df6715f5e854094c8dd2b95"
@@ -12,8 +12,7 @@
     "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
   },
   "write_scope": [
-    "scripts/dev/weekly-fresh.sh",
-    "scripts/dev/install-weekly-fresh.sh",
+    ".github/workflows/weekly-fresh.yml",
     "docs/dev-host.md"
   ],
   "approvals": []
