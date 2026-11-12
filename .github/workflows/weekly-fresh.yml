@@ -1,0 +1,35 @@
+# Weekly fresh Oracle run. Proves that database creation and the whole Oracle
+# integration suite still work from empty volumes, against main; pull-request
+# runs reuse the test database and would hide that drift.
+# Not part of the required `summary` check in repository.yml: it never blocks
+# a pull request.
+name: weekly-fresh
+
+on:
+  schedule:
+    # Saturday 19:00 UTC = Sunday 04:00 KST.
+    - cron: "0 19 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One fresh run at a time; a queued run waits instead of cancelling.
+  group: weekly-fresh
+  cancel-in-progress: false
+
+jobs:
+  # Shares the runner's test database and lock with the `oracle` job of
+  # repository.yml; scripts/dev/it-oracle.sh serialises them.
+  oracle-fresh:
+    runs-on: [self-hosted, linux, ARM64, saltation-oracle]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: scripts/dev/it-oracle.sh all --fresh
