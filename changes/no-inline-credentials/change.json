@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "no-inline-credentials",
+  "kind": "implementation",
+  "title": "Remove inline credentials flagged by GitGuardian",
+  "base": {
+    "ref": "main",
+    "commit": "16f0a92576ada8bd603ba44fa74d6f80cf215adb"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    "infra/oracle/smoke.sh",
+    "infra/compose/compose.yml",
+    "bank/src/main.rs",
+    "generator/saltation_gen/config/__init__.py"
+  ],
+  "approvals": []
+}
