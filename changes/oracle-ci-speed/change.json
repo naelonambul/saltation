@@ -17,5 +17,14 @@
     "web/Dockerfile.dockerignore",
     "docs/dev-host.md"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:28f20a1902d37119fe4f95f2a1cd9583b56cf8685bd9f9bfc8985c455d5e4520",
+      "by": "naelonambul",
+      "at": "2026-11-12T06:02:24Z",
+      "write_scope_sha256": "sha256:a80635b40376f4f8d892e43aa72cfce83671cb63319f2a895698c50d9cfe201e",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:28f20a19)"
+    }
+  ]
 }
