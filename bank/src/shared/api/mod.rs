@@ -13,10 +13,27 @@ use crate::shared::context::RequestContext;
 
 /// Open Banking API response codes used by the bank (`rsp_code`).
 pub mod codes {
+    /// Every code the bank can return, for replaying stored outcomes.
+    pub fn known(code: &str) -> Option<&'static str> {
+        [
+            SUCCESS,
+            SYSTEM_ERROR,
+            INVALID_PARAMETER,
+            NOT_FOUND,
+            BANK_REJECTED,
+            DUPLICATE_REQUEST,
+            BUSY,
+            UNAUTHORIZED,
+        ]
+        .into_iter()
+        .find(|c| *c == code)
+    }
+
     pub const SUCCESS: &str = "A0000";
     pub const SYSTEM_ERROR: &str = "A0001";
     pub const INVALID_PARAMETER: &str = "A0002";
     pub const NOT_FOUND: &str = "A0003";
+    pub const BANK_REJECTED: &str = "A0004";
     pub const DUPLICATE_REQUEST: &str = "A0007";
     pub const BUSY: &str = "A0013";
     pub const UNAUTHORIZED: &str = "O0001";
@@ -51,6 +68,26 @@ pub fn ok<T: Serialize>(ctx: &RequestContext, body: T) -> Response {
         body,
     };
     (StatusCode::OK, Json(env)).into_response()
+}
+
+/// A response with an explicit HTTP status and response code (used to replay
+/// stored outcomes and to report bank-level rejections with their details).
+pub fn respond<T: Serialize>(
+    ctx: &RequestContext,
+    status: StatusCode,
+    rsp_code: &'static str,
+    rsp_message: impl Into<String>,
+    body: T,
+) -> Response {
+    let env = Envelope {
+        api_tran_id: Ulid::new().to_string(),
+        api_tran_dtm: api_tran_dtm(),
+        rsp_code,
+        rsp_message: rsp_message.into(),
+        request_id: ctx.request_id.clone(),
+        body,
+    };
+    (status, Json(env)).into_response()
 }
 
 /// An error response with an Open Banking response code and a Korean message.

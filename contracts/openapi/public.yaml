@@ -143,6 +143,64 @@ components:
               type: array
               maxItems: 25
               items: { $ref: "#/components/schemas/TransactionItem" }
+    TransferRequest:
+      type: object
+      required: [bank_tran_id, fintech_use_num, tran_amt, tran_dtime, transfer_purpose, recv_client_name, recv_client_bank_code, recv_client_account_num]
+      properties:
+        bank_tran_id: { type: string, pattern: "^[A-Za-z0-9]{10}[UM][A-Za-z0-9]{9}$" }
+        fintech_use_num: { type: string, minLength: 24, maxLength: 24 }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+        tran_dtime: { type: string, pattern: "^[0-9]{14}$" }
+        wd_print_content: { type: string, maxLength: 14 }
+        dps_print_content: { type: string, maxLength: 20 }
+        transfer_purpose: { const: TR }
+        recv_client_name: { type: string, maxLength: 20 }
+        recv_client_bank_code: { type: string, pattern: "^[0-9]{3}$" }
+        recv_client_account_num: { type: string, pattern: "^[0-9]{1,16}$" }
+    TransferResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - type: object
+          required: [fintech_use_num, tran_amt, account_num_masked, print_content, wd_limit_remain_amt, dps_bank_code_std, dps_account_num_masked, dps_account_holder_name]
+          properties:
+            rsp_code: { const: A0000 }
+            bank_rsp_code: { const: "000" }
+            fintech_use_num: { type: string, minLength: 24, maxLength: 24 }
+            tran_amt: { $ref: "#/components/schemas/AmountString" }
+            account_num_masked: { type: string, maxLength: 20 }
+            print_content: { type: string, maxLength: 14 }
+            wd_limit_remain_amt: { $ref: "#/components/schemas/AmountString" }
+            dps_bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+            dps_bank_name: { type: string, maxLength: 20 }
+            dps_account_num_masked: { type: string, maxLength: 20 }
+            dps_print_content: { type: string, maxLength: 20 }
+            dps_account_holder_name: { type: string, maxLength: 50 }
+    TransferRejected:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - type: object
+          properties:
+            rsp_code: { enum: [A0003, A0004] }
+            bank_rsp_code: { enum: ["403", "404", "405", "406"] }
+    TransferResultResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [res_cnt, res_list]
+          properties:
+            res_cnt: { type: string, pattern: "^[0-9]{1,2}$" }
+            res_list:
+              type: array
+              items:
+                type: object
+                required: [tran_no, bank_tran_id, bank_rsp_code]
+                properties:
+                  tran_no: { type: string }
+                  bank_tran_id: { type: string }
+                  bank_rsp_code: { type: string, pattern: "^[0-9]{3}$" }
+                  tran_amt: { $ref: "#/components/schemas/AmountString" }
 paths:
   /v2.0/ext/auth/login:
     post:
@@ -203,3 +261,22 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransactionListResponse" } } } }
         "404": { description: Not the customer's account, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/transfer/withdraw/fin_num:
+    post:
+      summary: In-bank transfer (stage 1); completes to the recipient in one call
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TransferRequest" } } }
+      responses:
+        "200": { description: Transferred, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/TransferResponse" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank (bank_rsp_code 403, 404, 405, 406), content: { application/json: { schema: { $ref: "#/components/schemas/TransferRejected" } } } }
+        "503": { description: Busy (lock wait or outbox capacity); retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/transfer/result:
+    post:
+      summary: Results of earlier transfers by bank_tran_id
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransferResultResponse" } } } }

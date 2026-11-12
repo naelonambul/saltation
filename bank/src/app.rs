@@ -25,6 +25,7 @@ fn public_routes() -> Router<AppState> {
         .route("/healthz", get(|| async { "ok" }))
         .merge(features::auth::router())
         .merge(features::accounts::router())
+        .merge(features::transfers::router())
 }
 
 fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) -> Router {

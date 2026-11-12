@@ -5,5 +5,6 @@ pub mod auth;
 pub mod clock;
 pub mod context;
 pub mod db;
+pub mod ledger;
 pub mod outbox;
 pub mod telemetry;

@@ -17,6 +17,7 @@ use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth;
 use crate::shared::context::RequestContext;
 use crate::shared::db::{DbError, SqlStmt};
+use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
@@ -32,6 +33,10 @@ const INSERT_FINTECH: SqlStmt = sql_stmt!("internal.insert_fintech", "sql/insert
 const INSERT_STATUS: SqlStmt = sql_stmt!(
     "internal.insert_status_history",
     "sql/insert_status_history.sql"
+);
+const INSERT_SEED_REQUEST: SqlStmt = sql_stmt!(
+    "internal.insert_seed_request",
+    "sql/insert_seed_request.sql"
 );
 
 const MAX_BATCH: usize = 500;
@@ -144,6 +149,9 @@ async fn seed_customers(
 struct SeedAccount {
     customer_no: String,
     account_no: String,
+    /// Optional opening balance, posted as an inbound movement.
+    #[serde(default)]
+    opening_balance: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +196,34 @@ async fn seed_accounts(
                     &[&fin, &account_id, &auth::user_seq_no(customer_id)],
                 )?;
                 s.execute(&INSERT_STATUS, &[&account_id, &now])?;
+                if a.opening_balance > 0 {
+                    let request_id = ulid::Ulid::new().to_string();
+                    s.execute(&INSERT_SEED_REQUEST, &[&request_id, &a.account_no, &now])?;
+                    let mut locks = ledger::lock_accounts(s, &[account_id])?;
+                    let movement = Movement {
+                        kind: Kind::Inbound,
+                        request_id: &request_id,
+                        bank_tran_id: None,
+                        amount: a.opening_balance,
+                        channel: "SYSTEM",
+                        occurred_at: now,
+                        legs: vec![Leg {
+                            account_id,
+                            amount: a.opening_balance,
+                            inout_type: "입금",
+                            tran_type: "대체",
+                            print_content: Some("개설입금".into()),
+                            counterparty_bank_code: None,
+                            counterparty_account_no: None,
+                            counterparty_name: Some("살테이션 초기화".into()),
+                            transfer_out: 0,
+                        }],
+                    };
+                    ledger::post(s, &mut locks, &movement).map_err(|e| match e {
+                        LedgerError::Db(e) => e,
+                        other => DbError::Config(other.to_string()),
+                    })?;
+                }
                 out.push(json!({ "account_no": a.account_no, "fintech_use_num": fin }));
             }
             s.commit()?;
