@@ -5,11 +5,11 @@
   "title": "Debit card payments and overseas card misuse",
   "base": {
     "ref": "main",
-    "commit": "ed1fb8566a4bf0ad9c64a092b445356ef36c85bc"
+    "commit": "8165e8a15341b24d93808c33963b5bee5a29176b"
   },
   "baseline": {
     "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
-    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+    "spec.md": "sha256:f55b12289d27b96998a703b1cca14eae623d9a0c5909b65758ffbbdda401bca0"
   },
   "write_scope": [
     "intent.md",
@@ -22,6 +22,13 @@
       "by": "naelonambul",
       "at": "2026-11-12T10:53:42Z",
       "note": "Owner in session: \uc2b9\uc778 (debit-card intent with GPS, dollar anywhere, yuan at 200 won; sha256:802a2659)"
+    },
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd",
+      "by": "naelonambul",
+      "at": "2026-11-12T11:03:53Z",
+      "note": "Owner in session: 6\ubc88 \uba38\uc9c0\ud588\uc5b4 \uc2a4\ud399 \uc2b9\uc778 (spec sha256:09bcb070, baseline refreshed to merged main)"
     }
   ]
 }
