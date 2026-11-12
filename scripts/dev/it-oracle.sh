@@ -10,7 +10,9 @@ project="saltation-it"
 env_file="$root/infra/compose/.env.it"
 compose=(docker compose -p "$project" -f "$root/infra/compose/compose.yml" --env-file "$env_file" --profile ci)
 
+fresh_env=no
 if [ ! -f "$env_file" ]; then
+  fresh_env=yes
   umask 077
   gen() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20; }
   cat >"$env_file" <<ENV
@@ -32,7 +34,11 @@ fi
 set -a; . "$env_file"; set +a
 
 target="${1:-all}"
-[ "${2:-}" = "--fresh" ] && "${compose[@]}" down -v
+# New credentials cannot open volumes created with old ones (CI checkouts
+# delete the untracked env file), so a new env file means fresh volumes.
+if [ "${2:-}" = "--fresh" ] || [ "$fresh_env" = yes ]; then
+  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+fi
 
 "${compose[@]}" up -d --wait --wait-timeout 3600 oracle mongo
 # Database tests inspect the outbox directly; a running bank container's relay
