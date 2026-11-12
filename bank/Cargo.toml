@@ -34,6 +34,8 @@ metrics = "0.24"
 
 [dev-dependencies]
 http-body-util = "0.1"
+jsonschema = "0.61.1"
+serde_yaml = "0.9.34"
 
 [lints.rust]
 unsafe_code = "forbid"

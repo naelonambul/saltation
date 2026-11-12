@@ -1,0 +1,20 @@
+{
+  "description": "rsp_code (API) and bank_rsp_code (bank) values used by Saltation, following KFTC Open Banking v3.3.6 where an equivalent exists.",
+  "rsp_code": {
+    "A0000": "처리 성공",
+    "A0001": "시스템 오류",
+    "A0002": "요청 항목 오류",
+    "A0003": "대상 없음",
+    "A0007": "중복 요청",
+    "A0013": "처리 지연, 재시도 필요",
+    "O0001": "인증 실패"
+  },
+  "bank_rsp_code": {
+    "000": "처리 성공",
+    "400": "거래고유번호 중복",
+    "403": "계좌 상태 오류",
+    "404": "계좌 없음",
+    "405": "잔액 부족",
+    "406": "한도 초과"
+  }
+}

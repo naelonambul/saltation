@@ -74,3 +74,38 @@ pub async fn call(
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
+
+/// Validates a JSON value against a schema in `contracts/openapi/public.yaml`.
+/// Returns the validation errors, empty when valid.
+pub fn contract_errors(schema_name: &str, value: &Value) -> Vec<String> {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
+    let text = std::fs::read_to_string(format!("{dir}/openapi/public.yaml"))
+        .expect("read the public contract");
+    let doc: Value = serde_yaml::from_str(&text).expect("contract YAML");
+    let defs = doc["components"]["schemas"]
+        .to_string()
+        .replace("#/components/schemas/", "#/$defs/");
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": serde_json::from_str::<Value>(&defs).expect("defs"),
+        "$ref": format!("#/$defs/{schema_name}"),
+    });
+    let validator = jsonschema::draft202012::new(&schema).expect("valid contract schema");
+    validator
+        .iter_errors(value)
+        .map(|e| format!("{} at {}", e, e.instance_path()))
+        .collect()
+}
+
+pub fn assert_contract(schema_name: &str, value: &Value) {
+    let errors = contract_errors(schema_name, value);
+    assert!(
+        errors.is_empty(),
+        "{schema_name} contract violations: {errors:?}\n{value}"
+    );
+}
+
+/// A valid `bank_tran_id` for tests.
+pub fn bank_tran_id() -> String {
+    format!("T{}U{}", unique_digits(9), unique_digits(9))
+}

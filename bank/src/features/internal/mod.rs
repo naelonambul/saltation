@@ -12,6 +12,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::app::AppState;
+use crate::shared::api::fields::BANK_CODE;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth;
 use crate::shared::context::RequestContext;
@@ -34,8 +35,6 @@ const INSERT_STATUS: SqlStmt = sql_stmt!(
 );
 
 const MAX_BATCH: usize = 500;
-/// Saltation's synthetic bank code (contracts/codes).
-pub const BANK_CODE: &str = "998";
 
 pub fn router() -> Router<AppState> {
     Router::new()

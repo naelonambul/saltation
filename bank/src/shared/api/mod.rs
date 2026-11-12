@@ -109,3 +109,65 @@ impl IntoResponse for ApiError {
         (self.status, Json(env)).into_response()
     }
 }
+
+/// Open Banking field formats shared by features.
+pub mod fields {
+    use chrono::{DateTime, FixedOffset};
+
+    use crate::shared::clock::kst;
+
+    /// Saltation's synthetic `bank_code_std` (contracts/codes/institutions.json).
+    pub const BANK_CODE: &str = "998";
+    pub const BANK_NAME: &str = "살테이션은행";
+
+    /// `account_num_masked`: the last three digits replaced with `*`.
+    pub fn mask_account(account_no: &str) -> String {
+        let keep = account_no.len().saturating_sub(3);
+        format!("{}***", &account_no[..keep])
+    }
+
+    /// Open Banking `account_type`: 1 demand, 2 term deposit, 4 loan.
+    pub fn account_type(subtype: &str) -> &'static str {
+        match subtype {
+            "TERM" => "2",
+            "LOAN" => "4",
+            _ => "1",
+        }
+    }
+
+    /// `YYYYMMDD` in KST.
+    pub fn date(t: DateTime<FixedOffset>) -> String {
+        t.with_timezone(&kst()).format("%Y%m%d").to_string()
+    }
+
+    /// `HHMMSS` in KST.
+    pub fn time(t: DateTime<FixedOffset>) -> String {
+        t.with_timezone(&kst()).format("%H%M%S").to_string()
+    }
+
+    /// A valid `bank_tran_id`: AN(20), the 11th character `U` or `M`.
+    pub fn valid_bank_tran_id(id: &str) -> bool {
+        id.len() == 20
+            && id.chars().all(|c| c.is_ascii_alphanumeric())
+            && matches!(id.as_bytes()[10], b'U' | b'M')
+    }
+
+    /// A valid `tran_dtime`: N(14).
+    pub fn valid_tran_dtime(v: &str) -> bool {
+        v.len() == 14 && v.chars().all(|c| c.is_ascii_digit())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn formats() {
+            assert_eq!(mask_account("99801234567"), "99801234***");
+            assert_eq!(account_type("DEMAND"), "1");
+            assert!(valid_bank_tran_id("M202601234U000000001"));
+            assert!(!valid_bank_tran_id("M202601234X000000001"));
+            assert!(valid_tran_dtime("20260103091244"));
+        }
+    }
+}

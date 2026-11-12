@@ -1,0 +1,6 @@
+{
+  "description": "bank_code_std values used by Saltation. 998 is synthetic and not a real institution.",
+  "institutions": [
+    { "bank_code_std": "998", "name": "살테이션은행", "type": "SALTATION" }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "description": "inout_type and tran_type values in transaction rows (KFTC v3.3.6: inout_type is 입금, 출금, 지급 or 기타).",
+  "inout_type": ["입금", "출금", "지급", "기타"],
+  "tran_type": ["대체", "현금", "타행", "예금", "대출"],
+  "account_type": { "1": "수시입출", "2": "예적금", "4": "대출" }
+}
