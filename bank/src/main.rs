@@ -43,6 +43,33 @@ async fn serve(name: &'static str, addr: SocketAddr, router: axum::Router) -> an
     .with_context(|| format!("{name} listener"))
 }
 
+/// MongoDB connection string: MONGO_URI, or built from MONGO_HOST, MONGO_USER,
+/// MONGO_PASSWORD and MONGO_DB so no credential sits inside a configured URI.
+fn mongo_uri() -> Result<String, std::env::VarError> {
+    if let Ok(uri) = std::env::var("MONGO_URI") {
+        return Ok(uri);
+    }
+    let host = std::env::var("MONGO_HOST")?;
+    let user = std::env::var("MONGO_USER")?;
+    let password = std::env::var("MONGO_PASSWORD")?;
+    let db = std::env::var("MONGO_DB")?;
+    let enc = |v: &str| -> String {
+        v.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    Ok(format!(
+        "mongodb://{}:{}@{host}/{db}",
+        enc(&user),
+        enc(&password)
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let log_dir =
@@ -61,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         db: db.clone(),
         clock,
     };
-    match std::env::var("MONGO_URI") {
+    match mongo_uri() {
         Ok(uri) => {
             tokio::spawn(bank::features::outbox_relay::run(db, uri));
         }

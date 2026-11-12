@@ -7,9 +7,12 @@ name="saltation-oracle-smoke-$$"
 here="$(cd "$(dirname "$0")" && pwd)"
 cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; docker volume rm "$name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# Throwaway credentials, generated per run; the container is removed on exit.
+sys_pw="S$(python3 -c 'import secrets; print(secrets.token_hex(12))')1"
+app_pw="A$(python3 -c 'import secrets; print(secrets.token_hex(12))')1"
 
 docker run -d --name "$name" \
-  -e ORACLE_PWD=SmokeSys_1 -e SALTATION_DB_PASSWORD=SmokeApp_1 \
+  -e ORACLE_PWD="$sys_pw" -e SALTATION_DB_PASSWORD="$app_pw" \
   -e INIT_SGA_SIZE=3584 -e INIT_PGA_SIZE=1024 \
   -v "$name":/opt/oracle/oradata \
   -v "$here/setup":/opt/oracle/scripts/setup:ro \
@@ -39,6 +42,6 @@ SELECT 'outbox_ts max: ' || maxbytes/1024/1024/1024 || ' GB' FROM dba_data_files
 SELECT 'schema user: ' || username FROM dba_users WHERE username = 'SALTATION';
 EXIT
 SQL
-login="$(docker exec -e ORACLE_SID=ORCLCDB "$name" bash -c 'printf "SET HEADING OFF FEEDBACK OFF\nSELECT 40+2 FROM dual;\nEXIT\n" | sqlplus -s saltation/SmokeApp_1@//localhost:1521/ORCLPDB1' | tr -d '[:space:]')"
+login="$(docker exec -e ORACLE_SID=ORCLCDB "$name" bash -c "printf 'SET HEADING OFF FEEDBACK OFF\nSELECT 40+2 FROM dual;\nEXIT\n' | sqlplus -s saltation/$app_pw@//localhost:1521/ORCLPDB1" | tr -d '[:space:]')"
 [ "$login" = 42 ] || { echo "smoke: schema login failed: $login" >&2; exit 1; }
 echo "smoke: schema login ok"

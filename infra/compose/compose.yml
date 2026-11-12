@@ -67,7 +67,10 @@ services:
       SALTATION_DB_USER: saltation
       SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
       SALTATION_DB_CONNECT: oracle:1521/ORCLPDB1
-      MONGO_URI: mongodb://bank:${MONGO_BANK_PASSWORD:?set in .env}@mongo:27017/bank_logs
+      MONGO_HOST: mongo:27017
+      MONGO_USER: bank
+      MONGO_PASSWORD: ${MONGO_BANK_PASSWORD:?set in .env}
+      MONGO_DB: bank_logs
       SALTATION_LOG_DIR: /var/log/saltation
       SALTATION_CORS_ORIGINS: ${SALTATION_CORS_ORIGINS:-http://localhost:8088}
       RUST_LOG: info
@@ -119,7 +122,10 @@ services:
     profiles: [tools]
     environment:
       SALTATION_BANK_URL: http://bank:8081
-      MONGO_TRUTH_URI: mongodb://generator:${MONGO_GENERATOR_PASSWORD:?set in .env}@mongo:27017/truth
+      MONGO_HOST: mongo:27017
+      MONGO_USER: generator
+      MONGO_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?set in .env}
+      MONGO_DB: truth
       SALTATION_GEN_SEED: ${SALTATION_GEN_SEED:-20261112}
     networks: [internal, data]
     deploy:
