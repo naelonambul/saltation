@@ -80,3 +80,7 @@ The `oracle` group needs the locally built Oracle image, which GitHub-hosted run
 
 4. The job selects it with `runs-on: [self-hosted, linux, ARM64, saltation-oracle]`. Stop the service (`sudo ./svc.sh stop`) to take the runner offline; the `oracle-integration` job then stays queued and the `summary` check does not pass, so nothing merges unverified.
 5. Remove it with `./config.sh remove --token <TOKEN>`.
+
+## CI
+
+`.github/workflows/repository.yml` runs one job per check group: `rust`, `web` and `python` on GitHub-hosted runners, and `oracle` on the self-hosted `saltation-oracle` runner. Each job runs `python3 scripts/repo.py verify --full --group <group>`, and `summary` requires all of them. Changes to the workflow file are pushed by the owner (`docs/host-setup.md`, "Workflow changes").
