@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "debit-card",
+  "kind": "intent",
+  "title": "Debit card payments and overseas card misuse",
+  "base": {
+    "ref": "main",
+    "commit": "8165e8a15341b24d93808c33963b5bee5a29176b"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:f55b12289d27b96998a703b1cca14eae623d9a0c5909b65758ffbbdda401bca0"
+  },
+  "write_scope": [
+    "intent.md",
+    "spec.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "intent.md",
+      "sha256": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+      "by": "naelonambul",
+      "at": "2026-11-12T10:53:42Z",
+      "note": "Owner in session: \uc2b9\uc778 (debit-card intent with GPS, dollar anywhere, yuan at 200 won; sha256:802a2659)"
+    },
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd",
+      "by": "naelonambul",
+      "at": "2026-11-12T11:03:53Z",
+      "note": "Owner in session: 6\ubc88 \uba38\uc9c0\ud588\uc5b4 \uc2a4\ud399 \uc2b9\uc778 (spec sha256:09bcb070, baseline refreshed to merged main)"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ffaa0a0626a0db39f799f961756b4a0c46fe16bea771342af08b7fa40c22ac9b",
+      "by": "naelonambul",
+      "at": "2026-11-12T11:04:38Z",
+      "write_scope_sha256": "sha256:38a33b23245be293f9d810ab5bdf8d77b032e7be87cce62a673b591a2b20843a",
+      "note": "Owner in session: \uc2b9\uc778 (debit-card plan sha256:ffaa0a06)"
+    }
+  ]
+}
