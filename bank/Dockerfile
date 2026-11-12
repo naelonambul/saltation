@@ -21,5 +21,7 @@ RUN microdnf -y install oracle-instantclient-release-23ai-el9 \
  && microdnf -y install oracle-instantclient-basiclite libaio ca-certificates \
  && microdnf clean all && rm -rf /var/cache/yum /var/cache/dnf
 COPY --from=build /bank /usr/local/bin/bank
+# app.log directory, owned by the runtime user so a fresh named volume inherits it.
+RUN mkdir -p /var/log/saltation && chown 10001:10001 /var/log/saltation
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/bank"]
