@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "weekly-fresh-oracle",
+  "kind": "implementation",
+  "title": "Run the Oracle integration tests from an empty database every week in CI",
+  "base": {
+    "ref": "main",
+    "commit": "0127b6a320bf7c336df6715f5e854094c8dd2b95"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    ".github/workflows/weekly-fresh.yml",
+    "docs/dev-host.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:28175d47ee0f5bce45420e5607fb23d35214a80b94d8795d0d86f49f551c14de",
+      "by": "naelonambul",
+      "at": "2026-11-12T09:18:49Z",
+      "write_scope_sha256": "sha256:172a75c84db9c47872d4c356a6d09a8726d9c8b0dd142d1e7f7d93ddc95da979",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:28175d47)"
+    }
+  ]
+}
