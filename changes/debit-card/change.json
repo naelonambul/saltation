@@ -29,6 +29,14 @@
       "by": "naelonambul",
       "at": "2026-11-12T11:03:53Z",
       "note": "Owner in session: 6\ubc88 \uba38\uc9c0\ud588\uc5b4 \uc2a4\ud399 \uc2b9\uc778 (spec sha256:09bcb070, baseline refreshed to merged main)"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ffaa0a0626a0db39f799f961756b4a0c46fe16bea771342af08b7fa40c22ac9b",
+      "by": "naelonambul",
+      "at": "2026-11-12T11:04:38Z",
+      "write_scope_sha256": "sha256:38a33b23245be293f9d810ab5bdf8d77b032e7be87cce62a673b591a2b20843a",
+      "note": "Owner in session: \uc2b9\uc778 (debit-card plan sha256:ffaa0a06)"
     }
   ]
 }

@@ -2,7 +2,7 @@
 
 ## Summary
 
-This specification turns the approved intent into a buildable design for the **data foundation**: the Rust bank, its Open-Banking-shaped API, the simulated ATM channel, the customer mobile web app, the analyst admin web app, the Python synthetic generator with ground truth, the Oracle ledger, the MongoDB business event logs, operational monitoring, and the Docker Compose environment on the OCI development host.
+This specification turns the approved intent into a buildable design for the **data foundation**: the Rust bank, its Open-Banking-shaped API, the simulated ATM channel, the simulated card network channel, the customer mobile web app, the analyst admin web app, the Python synthetic generator with ground truth, the Oracle ledger, the MongoDB business event logs, operational monitoring, and the Docker Compose environment on the OCI development host.
 
 Real-time detection is out of scope for the `product-init` change. This specification fixes only the hooks detection will need (a transactional outbox, request and session correlation, an `fds_detect`-shaped alert contract) so that a later change can add detection without reshaping the data foundation.
 
@@ -29,8 +29,8 @@ References used for interface and data shapes:
 - F-7. Opening a demand deposit account assigns an account number, a 4-digit ATM PIN and an Open Banking `fintech_use_num` (24 characters) bound to that account.
 - F-8. Term deposit: opening moves the principal from a linked demand deposit account to the term deposit account. Early close (by the customer) or maturity (by the day rollover) moves exactly the principal back to the linked account and closes the term account. Whichever runs first wins; the other is rejected because the account is closed.
 - F-9. Loan: disbursement credits the principal to a linked demand deposit account and sets the loan account's balance (amount owed) to the principal. Repayment moves the repaid amount from the linked account and reduces the amount owed by exactly that amount. Repayment above the amount owed is rejected; the loan account closes at zero.
-- F-10. All amounts are whole Korean won, `NUMBER(15,0)`, between 1 and 999,999,999,999 per operation. KRW only.
-- F-11. Account status is active, dormant or closed, with a status history. An account with no customer-initiated transaction for 365 business days becomes dormant in the day rollover; a dormant account becomes active again on its next customer-initiated transaction, and both changes are recorded.
+- F-10. All ledger amounts are whole Korean won, `NUMBER(15,0)`, between 1 and 999,999,999,999 per operation. The ledger is KRW only; a card payment's original currency and amount (F-42) are attributes, not ledger money.
+- F-11. Account status is active, dormant or closed, with a status history. An account with no customer-initiated transaction (an approved card payment counts as one) for 365 business days becomes dormant in the day rollover; a dormant account becomes active again on its next customer-initiated transaction, and both changes are recorded.
 
 **Transfers, payees, inbound funds and cash**
 
@@ -40,13 +40,20 @@ References used for interface and data shapes:
 - F-15. Inbound external funds (salaries, merchant settlements, unrelated external senders) arrive through `/v2.0/transfer/deposit/fin_num`, called by a simulated counterparty client authenticated with client credentials (scope `oob`).
 - F-16. Limits (defaults, configurable): mobile transfers 50,000,000 KRW per account per business day; ATM cash withdrawal 1,000,000 KRW per transaction and 6,000,000 KRW per account per business day; no limit on cash deposits. Exceeding a limit rejects the request.
 - F-17. The simulated ATM authenticates an ATM session with terminal ID, account number and PIN (three consecutive wrong PINs lock ATM access for the account until the next business day), then performs cash withdrawal, cash deposit and balance inquiry. ATM sessions expire after 3 minutes of business time.
-- F-18. Every money-moving request carries an idempotency key, scoped by client (customer, counterparty client or ATM terminal); for Open Banking-shaped requests the key is `bank_tran_id`. The bank stores a hash of the canonical request. A repeat with the same key and hash returns the original result; with a different hash it is rejected. Concurrent duplicates resolve through the unique constraint: one executes, the others return its result.
-- F-19. Rejected attempts (insufficient balance, limit exceeded, invalid or closed account, same-account transfer, locked credential, wrong PIN, unauthorized, idempotency conflict) are stored in Oracle with their response codes and no balance effect.
+- F-18. Every money-moving request carries an idempotency key, scoped by client (customer, counterparty client, card network client or ATM terminal); for Open Banking-shaped requests the key is `bank_tran_id`. The bank stores a hash of the canonical request. A repeat with the same key and hash returns the original result; with a different hash it is rejected. Concurrent duplicates resolve through the unique constraint: one executes, the others return its result.
+- F-19. Rejected attempts (insufficient balance, limit exceeded, invalid or closed account, same-account transfer, locked credential, wrong PIN, blocked or unknown card, unauthorized, idempotency conflict) are stored in Oracle with their response codes and no balance effect.
+
+**Debit card**
+
+- F-40. A debit card is bound to one demand deposit account and has a synthetic 16-digit card number, unique in the bank, with a prefix no real issuer uses, and a status (active, blocked). Cards are created by seeding (F-29). There is no PIN, security code, expiry date, card limit or card management by the customer.
+- F-41. A card payment arrives from the simulated card network, a counterparty client authenticated with client credentials (scope `card`; seeded like the inbound-deposit clients of F-15, which have scope `oob`) on the generator listener, as one authorization message: idempotency key, card number, amount, currency, merchant name, merchant category code (4 digits), merchant country (ISO 3166-1 alpha-2), entry mode (`in_person` or `online`) and, for `in_person` only, the latitude and longitude of the place of payment in decimal degrees. The bank keeps no merchant register and stores these attributes exactly as sent. The country and coordinates describe the merchant, not the customer. An approved payment debits the card's account at once; there is no hold, clearing, refund or reversal.
+- F-42. Currencies and fixed rates: KRW; USD at 1,300 KRW per dollar; EUR at 1,400 KRW per euro; JPY at 900 KRW per 100 yen; CNY at 200 KRW per yuan. Amounts are positive integers in whole currency units, and a JPY amount is a multiple of 100, so the KRW amount is exact and computed with integers only; the KRW amount must be within F-10. Another currency, a non-conforming or out-of-range amount, or coordinates that are missing for `in_person`, present for `online` or out of range make the message invalid: it is refused as a malformed request and not stored as a payment attempt. The bank does not check that a currency fits a country.
+- F-43. A well-formed payment is approved when the card exists and is active, its account is active or dormant, and the balance covers the KRW amount; otherwise it is declined (unknown card, blocked card, closed account, insufficient balance). Approved and declined payments are both stored with all their attributes (F-19); a decline for an unknown card has no account and keeps the card number as sent. Apart from F-10 the balance is the only limit. A card payment has channel `CARD` and no customer session or device; its simulated context (F-31) describes the card network client, never the customer.
 
 **Ledger (simple, single-entry)**
 
-- F-20. Every money movement writes one transaction row per in-bank account it affects, with a signed amount and the balance after, and one `TRANSFER` record of a kind: `transfer`, `inbound`, `atm_cash`, `term_open`, `term_close`, `loan_disburse`, `loan_repay`. Counterparty bank code, account number and name are stored where they exist (null for cash).
-- F-21. Sign rules: for demand and term accounts the balance is money held; for loan accounts the balance is money owed. `transfer`, `term_open` and `term_close` rows between two in-bank accounts have equal and opposite amounts; `loan_disburse` and `loan_repay` rows on the demand and the loan account have equal amounts with the same sign.
+- F-20. Every money movement writes one transaction row per in-bank account it affects, with a signed amount and the balance after, and one `TRANSFER` record of a kind: `transfer`, `inbound`, `atm_cash`, `term_open`, `term_close`, `loan_disburse`, `loan_repay`, `card_payment`. Counterparty bank code, account number and name are stored where they exist (null for cash; for a card payment only the name, which is the merchant name).
+- F-21. Sign rules: for demand and term accounts the balance is money held; for loan accounts the balance is money owed. `transfer`, `term_open` and `term_close` rows between two in-bank accounts have equal and opposite amounts; `loan_disburse` and `loan_repay` rows on the demand and the loan account have equal amounts with the same sign; a `card_payment` has one row, on the card's account, with the negative KRW amount.
 - F-22. A single shared ledger component is the only code that writes account balances and transaction rows. Every operation that touches more than one account locks all of them with `SELECT ... FOR UPDATE` in ascending account-ID order, and writes rows, balances, daily totals and outbox events in one database transaction.
 - F-23. Daily close, per business date and account: opening balance plus the sum of that date's rows equals the last `balance_after` of that date; every `TRANSFER` satisfies F-21. Results are stored, and a mismatch is reported in `app.log`, a metric and the admin web app.
 - F-24. Corrections are new reversing rows referencing the original; transaction rows are never updated or deleted.
@@ -60,16 +67,16 @@ References used for interface and data shapes:
 
 **Seeding and generator**
 
-- F-29. The generator creates customers, credentials, accounts, ATM terminals, counterparty clients, counterparties and analyst accounts through the internal seeding interface, not through customer channels.
-- F-30. The generator drives all customer, ATM and counterparty activity through the same public, ATM and inbound-deposit interface contracts the bank exposes, on the generator listener (see Runtime topology), in backfill (365 business days ending before the switch to live) and then in live mode.
+- F-29. The generator creates customers, credentials, accounts, debit cards, ATM terminals (each with the latitude and longitude of its location, decimal degrees, in Korea), counterparty clients, counterparties and analyst accounts through the internal seeding interface, not through customer channels.
+- F-30. The generator drives all customer, ATM, card and counterparty activity through the same public, ATM, card network and inbound-deposit interface contracts the bank exposes, on the generator listener (see Runtime topology), in backfill (365 business days ending before the switch to live) and then in live mode.
 - F-31. Each generator request carries an opaque request ID (ULID) and simulated context: source IP, region and device ID. The bank stores the request ID on every request record, transaction row and log event the request produces, and trusts simulated context only on the generator listener.
-- F-32. Personas: office worker, student, self-employed, elderly, each with a behaviour model (salary days, recurring payments, cash habits, active hours, devices, locations). Fraud actors play scenarios A to F; benign lookalikes play legitimate travel, new phone, one-off large purchase and shared household network (see the scenario matrix).
+- F-32. Personas: office worker, student, self-employed, elderly, each with a behaviour model (salary days, recurring payments, cash habits, card habits, active hours, devices, locations). Fraud actors play scenarios A to G; benign lookalikes play legitimate travel, card payments during a real trip abroad, online shopping at foreign merchants, new phone, one-off large purchase and shared household network (see the scenario matrix). Card payments in Korea are in won. Card payments abroad are never in won: they use yen in Japan, yuan in China, euros in euro-area countries, or dollars, which are valid in every foreign country and are the only currency elsewhere. Lookalike and fraud card payments overlap in amount, hour and country, so that no single attribute separates them. Normal card use is capped in `generator/config` (default: about 100 payments per customer per year) to keep the backfill within N-4.
 - F-33. Scenario frequencies start from published statistics and are scaled by a configurable amplification factor recorded in each run manifest. Defaults: population 20,000 customers; amplification and yearly instance counts as in the scenario matrix, with sources documented in `generator/config`.
-- F-34. Ground truth: before sending a request, the generator records a label for its request ID per subject the request involves. The subject is an account number for account events and the customer number for customer-level events (login, password reset, device, payee). Labels are `normal`, `lookalike` or `A`..`F` with a scenario instance ID. A B-to-C transfer has a B label for the sender's account and a C label for the receiver's account. Bank-originated events (rollover jobs) have no request ID and are not labelled. Requests arriving through the public listener are human sessions and are excluded from labelled datasets.
+- F-34. Ground truth: before sending a request, the generator records a label for its request ID per subject the request involves. The subject is an account number for account events and the customer number for customer-level events (login, password reset, device, payee). Labels are `normal`, `lookalike` or `A`..`G` with a scenario instance ID. A card payment's subject is the card's account; the generator never sends an unknown card number. A B-to-C transfer has a B label for the sender's account and a C label for the receiver's account. Bank-originated events (rollover jobs) have no request ID and are not labelled. Requests arriving through the public listener are human sessions and are excluded from labelled datasets.
 
 **Business event logs**
 
-- F-35. Every business event is written to the `OUTBOX` table in the same Oracle transaction as the state it describes, including rejected attempts and authentication events: login success and failure, logout, session expiry, password reset request and completion, new device, payee change, request outcome (every API request, with channel, endpoint, response codes and duration), ATM session and operation, status changes, rollover jobs.
+- F-35. Every business event is written to the `OUTBOX` table in the same Oracle transaction as the state it describes, including rejected attempts and authentication events: login success and failure, logout, session expiry, password reset request and completion, new device, payee change, request outcome (every API request, with channel, endpoint, response codes and duration), ATM session and operation (with the terminal's region and coordinates), card payment approved and declined (with all F-41 attributes), status changes, rollover jobs.
 - F-36. An outbox relay delivers events to MongoDB `bank_logs` at least once: it reads events in event-ID order in batches of 500, bulk-upserts them on `_id` = `event_id` with journaled write acknowledgement, then deletes the delivered rows in the same batch. Delivered rows are not kept in Oracle. One relay worker to start; more only if measurement shows the backfill rate is not met.
 - F-36a. Outbox capacity: `OUTBOX` lives in a dedicated tablespace with autoextend and a 4 GB maximum, so it can never consume the rest of the database or the host disk. Alerts fire at 10,000 undelivered events or 30 seconds of delivery lag. During backfill the generator stops sending requests and advancing the clock while more than 50,000 events are undelivered, and resumes below 10,000. If the outbox tablespace is full anyway, operations that must write an event fail and roll back with a retryable error; events are never skipped.
 - F-37. Every event uses the versioned JSON envelope (see Interfaces) with string identifiers and ISO-8601 timestamps only.
@@ -80,7 +87,7 @@ References used for interface and data shapes:
 
 **Admin web app (analyst)**
 
-- F-39. Analyst sign-in (analyst accounts, seeded). Search customers by name, phone or customer number; view a customer's accounts and balances, term deposits, loans, payees, devices, recent sessions and login attempts; view an account's transactions with filters (date range, channel, direction, amount); view a transfer's rows and request outcome; view daily close results. Analysts cannot move money.
+- F-39. Analyst sign-in (analyst accounts, seeded). Search customers by name, phone or customer number; view a customer's accounts and balances, debit cards, term deposits, loans, payees, devices, recent sessions and login attempts; view an account's transactions with filters (date range, channel, direction, amount); view a transfer's rows and request outcome; view an account's card payments, declined ones included, with merchant name and category, country, currency, original amount, entry mode and coordinates; view an ATM transaction's terminal with its coordinates; view daily close results. Analysts cannot move money.
 
 ### Non-functional
 
@@ -89,7 +96,7 @@ All performance figures are server-side (request received to response sent) on t
 - N-1. **Transfer latency:** at a sustained 50 transfers per second for 10 minutes between random in-bank accounts: p50 ≤ 50 ms, p95 ≤ 300 ms, p99 ≤ 1,000 ms; row-lock wait p95 ≤ 50 ms; at least 99.9% of requests succeed (business rejections excluded).
 - N-2. **Hot account:** 50 transfers per second into one account from at least 200 sender accounts for 5 minutes: p95 ≤ 500 ms, same success rate.
 - N-3. **Saturation point:** stepped load of 25, 50, 100 and 200 transfers per second, 3 minutes per step; the first step whose p95 exceeds 300 ms is above 100 per second; the limiting resource (lock wait, disk, CPU, connection pool) is recorded.
-- N-4. **Backfill throughput:** at least 200 generated operations per second sustained, where an operation is one API request; the default population produces about 7.5 million requests per business year (about 375 per customer, including logins and inquiries), so the backfill completes within 24 hours.
+- N-4. **Backfill throughput:** at least 200 generated operations per second sustained, where an operation is one API request; the default population produces about 9.5 million requests per business year (about 475 per customer, including logins, inquiries and about 100 card payments), so the backfill completes within 24 hours.
 - N-5. **Correctness:** zero daily-close mismatches, zero duplicate money movements and zero `TRANSFER` records violating F-21, after every load test and run.
 - N-6. **Security cost settings:** password and PIN hashing uses Argon2id with parameters fixed in configuration and sized so that login stays within N-4 (the plan measures and records them).
 - N-7. **Resource budget:** Saltation containers together have CPU limits of at most 3 vCPU and memory limits of at most 14 GB; each container has its own CPU and memory limit. Initial memory: Oracle 6 GB (SGA 3.5 GB, `PGA_AGGREGATE_LIMIT` 2 GB, the minimum Oracle 19c accepts), MongoDB 3 GB (WiredTiger cache 1.5 GB), bank 1 GB, generator 1 GB, nginx 128 MB, cloudflared 128 MB, Alloy 256 MB, Loki 768 MB, Prometheus 768 MB, Grafana 256 MB. Oracle redo logs are sized for the backfill write rate (initially three groups of 1 GB); the database runs in NOARCHIVELOG mode (development system; crash recovery only); the undo tablespace has a 4 GB maximum.
@@ -110,16 +117,17 @@ Counts are scenario instances. "Year" is the 365-day backfill at the default amp
 | B voice-phishing victim | elderly-leaning victim, own device; early close of a term deposit or a loan; transfers to new payees that are mule accounts; large ATM withdrawals | `TRANSFER` (`term_close` or `loan_disburse`), `transfer` rows to C accounts, `atm_cash` rows, `ATM_SESSION`; events as above plus `atm.*` | 200 | 2 |
 | C money mule | new or dormant account; inbound transfers from B victims and external senders; ATM withdrawals soon after; devices or IPs shared with other mules | inbound `transfer` and `inbound` rows, `atm_cash` rows, `ACCOUNT_STATUS_HISTORY` (dormant→active), shared `DEVICE` IDs | 100 accounts | 2 |
 | D structuring | cash deposits split across at least 3 business days and at least 2 accounts, each account's daily cash total between 9,000,000 and 9,999,999 KRW (simulated reporting threshold 10,000,000 KRW per account per business day) | `atm_cash` rows, `DAILY_ACCOUNT_TOTAL` cash-in | 100 | 2 |
-| E velocity or amount anomaly | standalone: a burst of transfers or one amount far above the customer's baseline, no A–D pattern | `transfer` rows | 300 | 2 |
-| F time or location anomaly | standalone: activity at hours the persona never uses, or from a foreign or unusual region, no A–D pattern | `LOGIN_ATTEMPT`, `AUTH_SESSION` with region, `request.completed` events | 300 | 2 |
-| Benign lookalikes | travel (foreign region), new phone, one-off large purchase, shared household network | as for E/F and A without fraud steps | 1,500 | 5 |
+| E velocity or amount anomaly | standalone: a burst of transfers or one amount far above the customer's baseline, no A–D or G pattern | `transfer` rows | 300 | 2 |
+| F time or location anomaly | standalone: activity at hours the persona never uses, or from a foreign or unusual region, no A–D or G pattern | `LOGIN_ATTEMPT`, `AUTH_SESSION` with region, `request.completed` events | 300 | 2 |
+| G card misuse abroad | card payments in a foreign country, in person or online, in a currency valid for the country (F-32), at merchants the customer never paid before, while the customer's own sessions and ATM use within a configured window (default 24 hours) around the payments are in Korea; in some instances small test payments before large ones, in some a declined payment | `CARD_AUTHORIZATION` approved (and declined where played), `card_payment` rows, the customer's `AUTH_SESSION` or `ATM_SESSION` in Korea within the window; events `card.authorized`, `card.declined` | 200 | 2 |
+| Benign lookalikes | travel (foreign region), trip abroad with in-person card payments (with or without a foreign login), foreign online shopping by card, new phone, one-off large purchase, shared household network | as for E/F/G and A without fraud steps | 2,000 | 7 |
 
 Scenario instances never overlap a single subject at the same time; every instance has one primary label.
 
 ## User experience and behavior
 
 - **Mobile web (customer, Korean UI):** login (phone, password) and password reset; home with account cards and balances; account detail with transaction list (date, time, `print_content`, amount, balance after); transfer flow: choose payee or enter bank and account → recipient inquiry shows holder name → amount → confirm → result with response message; payees; products (open term deposit, take loan); term deposit and loan detail with early close and repay.
-- **Admin web (analyst, Korean UI):** login; customer search; customer 360 view (profile, accounts, deposits, loans, payees, devices, recent sessions and login attempts); account transactions with filters and CSV export; transfer detail with rows and request outcome; daily close report.
+- **Admin web (analyst, Korean UI):** login; customer search; customer 360 view (profile, accounts, deposits, loans, payees, devices, recent sessions and login attempts); account transactions with filters and CSV export; transfer detail with rows and request outcome; card payments of an account, approved and declined, with their attributes; daily close report.
 - **Errors:** every response carries `rsp_code` and `rsp_message`; bank-level outcomes also carry `bank_rsp_code` and `bank_rsp_message`. Messages are Korean.
 - **Time display:** KST; customers and analysts see business time.
 
@@ -131,7 +139,7 @@ The code is organised **by feature** (vertical slices): the Rust server follows 
 
 | Module | Path | Owns | Language |
 |---|---|---|---|
-| Contracts | `contracts/` | OpenAPI documents for the public, inbound-deposit, ATM, admin and internal interfaces; the log envelope JSON Schema; code tables | YAML, JSON |
+| Contracts | `contracts/` | OpenAPI documents for the public, inbound-deposit, ATM, card network, admin and internal interfaces; the log envelope JSON Schema; code tables | YAML, JSON |
 | Bank server | `bank/` | The Rust API server (layout below) | Rust, SQL |
 | Web | `web/apps/mobile`, `web/apps/admin`, `web/packages/api-client` | Customer and analyst SPAs; a typed client generated from `contracts/` | TypeScript, React |
 | Generator | `generator/` | Personas, scenario engine, seed, backfill and live drivers, truth writer, run manifests | Python |
@@ -165,6 +173,7 @@ bank/
         ├── deposits/      # term deposits, maturity rollover job
         ├── loans/
         ├── atm/           # ATM sessions and cash
+        ├── cards/         # debit cards and card network payments
         ├── accounts_lifecycle/  # dormancy rollover job, status history
         ├── daily_close/   # daily close rollover job and reports
         ├── admin/         # analyst login and read-only queries
@@ -190,7 +199,7 @@ Each feature folder holds its router, handlers, rules, repository and its own `s
 ```text
 browser ─HTTPS─▶ Cloudflare (TLS, Workers VPC) ─tunnel─▶ nginx: mobile web, admin web (static only)
 browser ─HTTPS─▶ Cloudflare (TLS, Workers VPC) ─tunnel─▶ bank public listener: /oauth, /v2.0 (customer), /admin
-generator ─HTTP─▶ bank generator listener: /oauth, /v2.0, /atm, /internal (internal network only)
+generator ─HTTP─▶ bank generator listener: /oauth, /v2.0, /atm, /card, /internal (internal network only)
 bank ─▶ Oracle (structured data, outbox) ─ relay ─▶ MongoDB bank_logs (business events)
 bank ─ app.log ─▶ Alloy ─▶ Loki ─▶ Grafana;  bank metrics listener ─▶ Prometheus ─▶ Grafana
 generator ─▶ MongoDB truth database (same instance, separate user)
@@ -201,7 +210,7 @@ generator ─▶ MongoDB truth database (same instance, separate user)
 | Listener | Network | Routes | Context |
 |---|---|---|---|
 | Public (8080) | `edge` | `/oauth/2.0/revoke`, customer `/v2.0/**` except `/v2.0/transfer/deposit/fin_num`, `/admin/v1/**` | IP and region from Cloudflare headers; every session is human |
-| Generator (8081) | `internal` | everything on the public listener plus `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/internal/v1/**` | Simulated context headers trusted; sessions are not human |
+| Generator (8081) | `internal` | everything on the public listener plus `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/card/v1/**`, `/internal/v1/**` | Simulated context headers trusted; sessions are not human |
 | Metrics (9100) | `obs` | `/metrics` | — |
 
 **Compose services**
@@ -267,13 +276,17 @@ Common response envelope: `api_tran_id` aNS(40), `api_tran_dtm` N(17), `rsp_code
 
 `POST /atm/v1/session` (terminal ID, account number, PIN) → ATM session token; `POST /atm/v1/cash/withdraw`, `POST /atm/v1/cash/deposit` (idempotency key per terminal), `GET /atm/v1/balance`, `POST /atm/v1/session/end`.
 
+### Card network interface (generator listener only)
+
+`POST /card/v1/authorize` (card network client, scope `card`): `idempotency_key`, `card_no`, `amount`, `currency` (`KRW`, `USD`, `EUR`, `JPY`, `CNY`), `merchant_name`, `mcc`, `country`, `entry_mode`, `latitude`, `longitude` → approved or declined with a response code, the KRW amount and `request_id`. Amounts are JSON strings of integers; coordinates are JSON strings of decimal degrees with at most 6 decimal places.
+
 ### Admin interface (public listener, behind Cloudflare Access)
 
 `POST /admin/v1/login`, then read-only endpoints backing F-39.
 
 ### Internal interface (generator listener only)
 
-`POST /internal/v1/seed/{customers,accounts,atm_terminals,counterparty_clients,counterparties,analysts}`; `GET /internal/v1/sms/{phone}` (latest reset code); `GET /internal/v1/clock`; `POST /internal/v1/clock/set`, `/clock/advance` (backfill only); `POST /internal/v1/mode/live`.
+`POST /internal/v1/seed/{customers,accounts,cards,atm_terminals,counterparty_clients,counterparties,analysts}`; `GET /internal/v1/sms/{phone}` (latest reset code); `GET /internal/v1/clock`; `POST /internal/v1/clock/set`, `/clock/advance` (backfill only); `POST /internal/v1/mode/live`.
 
 ### Simulated context headers (generator listener only)
 
@@ -298,7 +311,7 @@ Korean logical names follow the MyData-based model; physical names are English. 
 | 문자발송함 (`SMS_OUTBOX`) | phone, message, business time |
 | 분석가 (`ANALYST`) | analyst ID, name, password hash |
 | 기관 (`INSTITUTION`) | `institution_code` (bank_code_std), name, type |
-| 이용기관 (`COUNTERPARTY_CLIENT`) | client ID, secret hash, institution code |
+| 이용기관 (`COUNTERPARTY_CLIENT`) | client ID, secret hash, institution code, scope (`oob` or `card`) |
 | 외부거래처 (`COUNTERPARTY`) | counterparty ID, type (employer, merchant, individual), industry code, institution code, account number, name |
 | 상품 (`PRODUCT`), 상품조건버전 (`PRODUCT_TERMS`) | product type (demand, term, loan), terms version |
 | 통합계좌 (`ACCOUNT`) | `account_id`; `account_no` unique, customer, product terms, subtype, status, opened at, last customer activity at, balance (held or owed), next sequence |
@@ -309,7 +322,9 @@ Korean logical names follow the MyData-based model; physical names are English. 
 | 핀테크이용번호 (`FINTECH_ACCOUNT`) | `fintech_use_num` unique, account, `user_seq_no` |
 | 토큰 (`ACCESS_TOKEN`) | token hash, subject (customer, client, analyst), scope, session, expires |
 | 수취인 (`PAYEE`) | customer, bank code, account number, holder name, alias, registered at, channel, session, deleted at |
-| 자동화기기 (`ATM_TERMINAL`) | terminal ID, region code, location |
+| 자동화기기 (`ATM_TERMINAL`) | terminal ID, region code, location, latitude, longitude |
+| 체크카드 (`CARD`) | card ID; card number unique, account, status, issued at |
+| 카드승인 (`CARD_AUTHORIZATION`) | request; card (null when unknown), card number as sent, KRW amount, currency, original amount, merchant name, merchant category code, country, entry mode, latitude and longitude (null when online) |
 | ATM세션 (`ATM_SESSION`) | ATM session ID, terminal, account, started, ended, request ID |
 | 거래요청 (`TRANSACTION_REQUEST`) | `request_id` (generator or bank ULID); type, channel, listener, idempotency scope and key (unique), request hash, `bank_tran_id`, status, rsp_code, bank_rsp_code, session, device, terminal, IP, region, business time, system time |
 | 이체 (`TRANSFER`) | transfer ID, kind, request, `bank_tran_id`, amount, debit row, credit row, business time |
@@ -320,7 +335,7 @@ Korean logical names follow the MyData-based model; physical names are English. 
 | 이벤트발행함 (`OUTBOX`) | event ID, event JSON, created system time, delivered at |
 | 공통코드 (`CODE`), 코드매핑 (`CODE_MAP`) | internal codes and their Open Banking and MyData mappings (`inout_type`, `tran_type`, `account_type`, response codes) |
 
-Indexes support the access paths: transaction rows by (account, business date, account sequence); requests by idempotency scope and key and by request ID; login attempts by phone and time; sessions by customer; payees by customer; outbox by delivered state.
+Indexes support the access paths: transaction rows by (account, business date, account sequence); requests by idempotency scope and key and by request ID; login attempts by phone and time; sessions by customer; payees by customer; cards by card number and by account; outbox by delivered state.
 
 ### Log envelope (MongoDB `bank_logs`, portable to PostgreSQL JSONB)
 
@@ -345,7 +360,7 @@ No ObjectId, BSON Date or Decimal128 in the envelope or payload; `_id` equals `e
 
 ### Truth store (MongoDB `truth` database)
 
-`labels`: `{request_id, subject_type, subject_id, label, scenario, scenario_instance_id, run_id}`, unique on (`request_id`, `subject_type`, `subject_id`); `subject_type` is `account` or `customer`; `label` is `normal`, `lookalike` or `A`..`F`. `runs`: run manifest with seed, population, amplification factor, scenario counts, code version and clock range.
+`labels`: `{request_id, subject_type, subject_id, label, scenario, scenario_instance_id, run_id}`, unique on (`request_id`, `subject_type`, `subject_id`); `subject_type` is `account` or `customer`; `label` is `normal`, `lookalike` or `A`..`G`. `runs`: run manifest with seed, population, amplification factor, scenario counts, code version and clock range.
 
 ### Dependencies
 
@@ -356,8 +371,9 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 - Synthetic data only; `ci_hash` hashes synthetic data. No resident registration numbers in any form.
 - Passwords, PINs and reset codes are stored as Argon2id hashes; tokens and client secrets are stored hashed. None is logged.
 - The truth store is the `truth` database in the same MongoDB instance. The bank's MongoDB user is granted only `bank_logs`; the generator's MongoDB user is granted only `truth`. The generator has no Oracle credentials.
-- The generator listener, ATM routes, inbound deposits, internal routes and metrics are never reachable through the tunnel; tunnel ingress allows only `web` and the public listener.
-- Negative tests prove: the tunnel route cannot reach `/atm`, `/internal`, `/v2.0/transfer/deposit/fin_num` or `/metrics`; simulated context headers are ignored on the public listener; the bank's MongoDB user is denied on `truth`; the generator's MongoDB user is denied on `bank_logs`.
+- Card numbers are synthetic, with a prefix no real issuer uses, and are stored and logged in full; no real card data is ever accepted.
+- The generator listener, ATM routes, card network routes, inbound deposits, internal routes and metrics are never reachable through the tunnel; tunnel ingress allows only `web` and the public listener.
+- Negative tests prove: the tunnel route cannot reach `/atm`, `/card`, `/internal`, `/v2.0/transfer/deposit/fin_num` or `/metrics`; simulated context headers are ignored on the public listener; the bank's MongoDB user is denied on `truth`; the generator's MongoDB user is denied on `bank_logs`.
 - Secrets come from an untracked `.env`; no secret is committed.
 - Oracle binaries and the KFTC specification PDF are never committed. Oracle use is limited to development and demonstration of this personal portfolio project, subject to the owner's license check at download.
 
@@ -375,17 +391,18 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 
 ## Delivery
 
-The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold. UI work starts only after the API server is developed: stages 2 to 4 change no web app, and stage 6 builds the screens on the finished interfaces. The stage-1 mobile flow stays as it is until then; contract changes before stage 6 only add to what it uses.
+The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold. UI work starts only after the API server is developed: stages 2 to 5 change no web app, and stage 7 builds the screens on the finished interfaces. The stage-1 mobile flow stays as it is until then; contract changes before stage 7 only add to what it uses.
 
 | Stage | Change | Delivers |
 |---|---|---|
 | 1 | `product-init` | Establishes this intent and specification as the baseline, and a walking skeleton: repository layout and registered checks; Compose stack (`local` profile) with Oracle, MongoDB, bank, nginx, Alloy, Loki, Prometheus and Grafana; migrations for customers, credentials, sessions, login attempts, accounts, transaction requests, transfers, transaction rows, daily totals, clock and outbox; login, balance, transaction history and in-bank transfer; outbox relay; `app.log` and metrics; seeding of customers and demand accounts; a minimal mobile web flow (login, balance, history, transfer); a generator that seeds and drives normal transfers |
 | 2 | ledger and products (API server) | payees, recipient inquiry, limits, inbound deposits, term deposits, loans, password reset, devices, simulated clock modes and day rollover, daily close |
-| 3 | ATM channel (API server) | ATM interface, terminals, PIN credentials and sessions |
-| 4 | admin interface (API server) | analyst login and the read-only endpoints behind every F-39 lookup |
-| 5 | generator scenarios | personas, scenarios A to F, lookalikes, truth labels, backfill and live drivers, run manifests |
-| 6 | web UI | the mobile screens of F-38 that stage 1 did not build (password reset, payees, recipient inquiry in the transfer flow, products, term deposits, loans); the admin web app with every F-39 lookup |
-| 7 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
+| 3 | ATM channel (API server) | ATM interface, terminals with coordinates, PIN credentials and sessions |
+| 4 | card channel (API server) | debit cards, card network client, card payments with fixed-rate conversion and merchant attributes |
+| 5 | admin interface (API server) | analyst login and the read-only endpoints behind every F-39 lookup |
+| 6 | generator scenarios | personas, scenarios A to G, lookalikes, truth labels, backfill and live drivers, run manifests |
+| 7 | web UI | the mobile screens of F-38 that stage 1 did not build (password reset, payees, recipient inquiry in the transfer flow, products, term deposits, loans); the admin web app with every F-39 lookup |
+| 8 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
 
 ## Acceptance criteria
 
@@ -394,7 +411,7 @@ The data foundation is accepted when:
 1. `docker compose up` on the development host starts every service, and all health checks report healthy within 10 minutes (N-11).
 2. The generator seeds 20,000 customers, backfills 365 business days within 24 hours, switches to live mode and runs 24 hours with no manual intervention; N-8 holds throughout.
 3. The run manifest shows every persona type active, the scenario matrix's yearly counts met in the backfill, its live minimums met in the live run, and the amplification factor.
-4. For every scenario instance, the scenario matrix's required records exist in Oracle, and the corresponding events exist in `bank_logs`, including rejected attempts.
+4. For every scenario instance, the scenario matrix's required records exist in Oracle, and the corresponding events exist in `bank_logs`, including rejected attempts; every card payment carries its merchant name, category, country, currency, original amount and, in person, coordinates.
 5. Every generator request ID with a label has, for each labelled subject, exactly one label, and every non-human request in Oracle has labels for all its subjects; B-to-C transfers carry B for the sender's account and C for the receiver's account; human sessions have no labels.
 6. Daily close reports zero mismatches for every business date of the run, and N-5 holds.
 7. Transfer load tests meet N-1, N-2 and N-3; their reports are stored as evidence.
