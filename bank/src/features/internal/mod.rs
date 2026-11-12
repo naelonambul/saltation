@@ -2,11 +2,12 @@
 //! only on the generator listener. Stage 1: clock read, customer and demand
 //! account seeding.
 
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -15,7 +16,8 @@ use crate::app::AppState;
 use crate::shared::api::fields::BANK_CODE;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth;
-use crate::shared::context::RequestContext;
+use crate::shared::clock::ClockError;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
 use crate::shared::outbox;
@@ -45,6 +47,9 @@ const MAX_BATCH: usize = 500;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/internal/v1/clock", get(read_clock))
+        .route("/internal/v1/clock/set", post(set_clock))
+        .route("/internal/v1/clock/advance", post(advance_clock))
+        .route("/internal/v1/mode/live", post(go_live))
         .route("/internal/v1/outbox", get(read_outbox))
         .route("/internal/v1/seed/customers", post(seed_customers))
         .route("/internal/v1/seed/accounts", post(seed_accounts))
@@ -118,6 +123,7 @@ fn ci_hash(c: &SeedCustomer) -> String {
 }
 
 async fn seed_customers(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -126,7 +132,7 @@ async fn seed_customers(
     if req.customers.is_empty() || req.customers.len() > MAX_BATCH {
         return Err(bad_request(&ctx, "customers must contain 1 to 500 entries"));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let mut rows = Vec::with_capacity(req.customers.len());
     for c in req.customers {
         let hash = auth::hash_secret(c.password.clone())
@@ -181,6 +187,7 @@ fn fintech_use_num(account_id: i64) -> String {
 }
 
 async fn seed_accounts(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -196,7 +203,7 @@ async fn seed_accounts(
     {
         return Err(bad_request(&ctx, "account_no must be up to 16 digits"));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let accounts = req.accounts;
     let created = state
         .db
@@ -259,4 +266,62 @@ mod tests {
         assert_eq!(fintech_use_num(7), "998000000000000000000007");
         assert_eq!(fintech_use_num(7).len(), 24);
     }
+}
+
+fn clock_error(ctx: &RequestContext, error: ClockError) -> ApiError {
+    match error {
+        ClockError::Busy => ApiError::busy(ctx),
+        ClockError::Db(e) => db_error(ctx, &e),
+        other => bad_request(ctx, &other.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClockSet {
+    business_time: DateTime<FixedOffset>,
+}
+
+#[derive(Deserialize)]
+struct ClockAdvance {
+    seconds: i64,
+}
+
+async fn set_clock(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    body: Result<Json<ClockSet>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|_| bad_request(&ctx, "invalid business_time"))?;
+    let clock = state
+        .clock
+        .set(body.business_time)
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
+}
+
+async fn advance_clock(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    body: Result<Json<ClockAdvance>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|_| bad_request(&ctx, "invalid seconds"))?;
+    if body.seconds < 1 {
+        return Err(bad_request(&ctx, "seconds must be at least 1"));
+    }
+    let clock = state
+        .clock
+        .advance(body.seconds)
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
+}
+
+async fn go_live(State(state): State<AppState>, ctx: RequestContext) -> Result<Response, ApiError> {
+    let clock = state
+        .clock
+        .go_live()
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
 }

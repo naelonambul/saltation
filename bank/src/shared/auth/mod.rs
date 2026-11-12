@@ -11,14 +11,14 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::Duration;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::app::AppState;
 use crate::shared::api::{ApiError, codes};
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::SqlStmt;
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
@@ -140,11 +140,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             .get::<RequestStats>()
             .cloned()
             .unwrap_or_default();
-        let now: DateTime<FixedOffset> = state
-            .clock
-            .now()
-            .await
-            .map_err(|_| ApiError::internal(&ctx))?;
+        let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
         let found = state
             .db
             .run_in(&stats, move |s| {

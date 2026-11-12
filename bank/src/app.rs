@@ -4,8 +4,10 @@
 //! - metrics: `/metrics` only
 
 use axum::Router;
+use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method};
-use axum::middleware::from_fn;
+use axum::middleware::{Next, from_fn, from_fn_with_state};
+use axum::response::Response;
 use axum::routing::get;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -32,6 +34,7 @@ fn public_routes() -> Router<AppState> {
 
 fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) -> Router {
     router
+        .layer(from_fn_with_state(state.clone(), operation_routes))
         .layer(from_fn(move |req, next| {
             telemetry::request_log(listener, req, next)
         }))
@@ -76,4 +79,21 @@ pub fn generator_router(state: AppState) -> Router {
 
 pub fn metrics_router(handle: PrometheusHandle) -> Router {
     Router::new().route("/metrics", get(move || std::future::ready(handle.render())))
+}
+
+async fn operation_routes(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    let bypass = matches!(
+        (req.method().as_str(), req.uri().path()),
+        (_, "/healthz")
+            | ("GET", "/internal/v1/clock" | "/internal/v1/outbox")
+            | (
+                "POST",
+                "/internal/v1/clock/set" | "/internal/v1/clock/advance" | "/internal/v1/mode/live"
+            )
+    );
+    if bypass {
+        next.run(req).await
+    } else {
+        context::operation(State(state), req, next).await
+    }
 }

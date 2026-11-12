@@ -81,12 +81,22 @@ async fn customer(api: &Api, accounts: usize, opening: i64) -> Customer {
 fn transfer_body(btid: &str, from_fin: &str, to_account: &str, amount: i64) -> Value {
     json!({
         "bank_tran_id": btid, "fintech_use_num": from_fin, "tran_amt": amount.to_string(),
-        "tran_dtime": "20260101000000", "transfer_purpose": "TR",
+        "transfer_purpose": "TR",
         "recv_client_name": "수취인", "recv_client_bank_code": "998", "recv_client_account_num": to_account,
     })
 }
 
-async fn transfer(api: &Api, token: &str, body: Value) -> (StatusCode, Value, String) {
+async fn transfer(api: &Api, token: &str, mut body: Value) -> (StatusCode, Value, String) {
+    body["tran_dtime"] = json!(
+        api.state
+            .clock
+            .state()
+            .await
+            .expect("clock")
+            .business_time
+            .format("%Y%m%d%H%M%S")
+            .to_string()
+    );
     let r = new_id();
     let (status, json) = call(
         &api.generator,
@@ -228,10 +238,11 @@ async fn transfers_rejections_limit_and_idempotency() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["bank_rsp_code"], "406");
 
+    let business_time = api.state.clock.state().await.expect("clock").business_time;
     // Transfer result by bank_tran_id.
     let (status, body) = call(&api.generator, "POST", "/v2.0/transfer/result", &new_id(), Some(&a.token), Some(json!({
-        "check_type": "1", "tran_dtime": "20260101000000", "req_cnt": "1",
-        "req_list": [{ "tran_no": "1", "org_bank_tran_id": btid, "org_bank_tran_date": "20260101", "org_tran_amt": "10000" }]
+        "check_type": "1", "tran_dtime": business_time.format("%Y%m%d%H%M%S").to_string(), "req_cnt": "1",
+        "req_list": [{ "tran_no": "1", "org_bank_tran_id": btid, "org_bank_tran_date": business_time.format("%Y%m%d").to_string(), "org_tran_amt": "10000" }]
     })))
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");

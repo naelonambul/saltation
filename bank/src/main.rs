@@ -6,6 +6,7 @@ use anyhow::Context;
 use bank::app::{self, AppState};
 use bank::shared::clock::Clock;
 use bank::shared::db::{Db, DbConfig};
+use bank::shared::rollover::Registry;
 use bank::shared::telemetry;
 use tokio::net::TcpListener;
 
@@ -81,9 +82,11 @@ async fn main() -> anyhow::Result<()> {
         .context("connect to Oracle")?;
     let applied = db.migrate().await.context("apply migrations")?;
     tracing::info!(applied, "migrations up to date");
-    let clock = Clock::init(db.clone())
+    let clock = Clock::init(db.clone(), Registry::default())
         .await
         .context("initialise the clock")?;
+    clock.catch_up().await.context("catch up rollover")?;
+    clock.spawn_live_scheduler();
     let state = AppState {
         db: db.clone(),
         clock,

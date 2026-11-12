@@ -3,13 +3,20 @@
 //! Simulated-context headers are trusted only on the generator listener.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use axum::extract::{ConnectInfo, FromRequestParts, Request};
+use axum::body::{Body, to_bytes};
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, FixedOffset};
 use ulid::Ulid;
+
+use crate::app::AppState;
+use crate::shared::api::ApiError;
+use crate::shared::db::DbError;
 
 pub const REQUEST_ID: &str = "x-request-id";
 const SIM_IP: &str = "x-sim-ip";
@@ -26,6 +33,13 @@ pub enum Listener {
 }
 
 impl Listener {
+    pub fn event_label(self) -> &'static str {
+        match self {
+            Listener::Public => "public",
+            Listener::Generator => "generator",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Listener::Public => "PUBLIC",
@@ -169,5 +183,66 @@ mod tests {
         );
         assert!(Ulid::from_string(&ctx.request_id).is_ok());
         assert_ne!(ctx.request_id, "not-a-ulid");
+    }
+}
+
+/// One immutable business time for authentication and the entire operation.
+#[derive(Clone, Copy)]
+pub struct BusinessTime(pub DateTime<FixedOffset>);
+
+impl<S: Send + Sync> FromRequestParts<S> for BusinessTime {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let ctx = RequestContext::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|e| match e {});
+        parts
+            .extensions
+            .get::<Self>()
+            .copied()
+            .ok_or_else(|| ApiError::internal(&ctx))
+    }
+}
+
+pub async fn operation(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+    let ctx = req
+        .extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_else(|| RequestContext::from_headers(Listener::Public, req.headers(), None));
+    let (parts, body) = req.into_parts();
+    let bytes = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 1_048_576)).await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(_)) => {
+            return ApiError::new(&ctx, StatusCode::PAYLOAD_TOO_LARGE, "A0002", "invalid body")
+                .into_response();
+        }
+        Err(_) => {
+            return ApiError::new(&ctx, StatusCode::REQUEST_TIMEOUT, "A0002", "body timeout")
+                .into_response();
+        }
+    };
+    req = Request::from_parts(parts, Body::from(bytes));
+    let ticket = match state.clock.enter().await {
+        Ok(ticket) => ticket,
+        Err(DbError::Busy) => {
+            tracing::warn!(request_id = %ctx.request_id, "operation clock read is busy");
+            return ApiError::busy(&ctx).into_response();
+        }
+        Err(_) => return ApiError::internal(&ctx).into_response(),
+    };
+    req.extensions_mut().insert(BusinessTime(ticket.now));
+    // Detach on cancellation: blocking database work must retain the read guard.
+    match tokio::spawn(async move {
+        let response = next.run(req).await;
+        drop(ticket);
+        response
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => ApiError::internal(&ctx).into_response(),
     }
 }

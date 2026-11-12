@@ -20,7 +20,7 @@ use crate::shared::api::fields::{self, BANK_CODE, BANK_NAME};
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer};
 use crate::shared::clock::business_date;
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, Session, SqlStmt};
 use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
 use crate::shared::outbox::{self, Event};
@@ -113,6 +113,7 @@ fn invalid(ctx: &RequestContext, message: &str) -> ApiError {
 }
 
 fn map_db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
+    tracing::warn!(request_id = %ctx.request_id, error = %e, "transfer database failure");
     match e.ora_code() {
         // Lock wait expired, or the outbox tablespace is full (spec F-36a).
         Some(30006) | Some(1653) | Some(1654) | Some(1691) => {
@@ -550,6 +551,7 @@ fn replay(ctx: &RequestContext, plan_hash: &str, a: Attempt) -> Result<Response,
 }
 
 async fn withdraw(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -588,11 +590,7 @@ async fn withdraw(
             ));
         }
     };
-    let now = state
-        .clock
-        .now()
-        .await
-        .map_err(|e| map_db_error(&ctx, &e))?;
+
     let plan = std::sync::Arc::new(Plan {
         hash: req.hash(),
         req,

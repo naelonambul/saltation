@@ -6,10 +6,9 @@
 mod common;
 
 use axum::http::StatusCode;
-use bank::shared::clock::kst;
 use bank::shared::db::SqlStmt;
 use bank::sql_stmt;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset};
 use common::{api, assert_contract, bank_tran_id, call, contract_errors, new_id, unique_digits};
 use serde_json::{Value, json};
 
@@ -74,14 +73,18 @@ async fn login(api: &common::Api, c: &Customer) -> String {
 }
 
 /// Inserts `count` rows: odd sequences are deposits of 10,000, even ones withdrawals of 3,000.
-async fn insert_rows(api: &common::Api, account_no: &str, count: i64) -> i64 {
+async fn insert_rows(
+    api: &common::Api,
+    account_no: &str,
+    count: i64,
+    now: DateTime<FixedOffset>,
+) -> i64 {
     let account_no = account_no.to_owned();
     api.state
         .db
         .run(move |s| {
             let account_id: i64 = s.query_row(&ACCOUNT_ID, &[&account_no])?;
             let request_id = new_id();
-            let now = Utc::now().with_timezone(&kst());
             s.execute(&INSERT_REQUEST, &[&request_id, &request_id, &now])?;
             let mut balance = 0i64;
             for seq in 1..=count {
@@ -112,26 +115,20 @@ async fn insert_rows(api: &common::Api, account_no: &str, count: i64) -> i64 {
         .expect("insert rows")
 }
 
-fn today() -> String {
-    Utc::now()
-        .with_timezone(&kst())
-        .format("%Y%m%d")
-        .to_string()
-}
-
-fn yesterday() -> String {
-    (Utc::now().with_timezone(&kst()) - Duration::days(1))
-        .format("%Y%m%d")
-        .to_string()
-}
-
-fn history_path(fin: &str, inquiry_type: &str, sort: &str, trace: Option<&str>) -> String {
+fn history_path(
+    now: DateTime<FixedOffset>,
+    fin: &str,
+    inquiry_type: &str,
+    sort: &str,
+    trace: Option<&str>,
+) -> String {
     let mut p = format!(
         "/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={fin}&inquiry_type={inquiry_type}\
-         &inquiry_base=D&from_date={}&to_date={}&sort_order={sort}&tran_dtime=20260101000000",
+         &inquiry_base=D&from_date={}&to_date={}&sort_order={sort}&tran_dtime={}",
         bank_tran_id(),
-        yesterday(),
-        today()
+        (now - Duration::days(1)).format("%Y%m%d"),
+        now.format("%Y%m%d"),
+        now.format("%Y%m%d%H%M%S")
     );
     if let Some(t) = trace {
         p.push_str(&format!("&befor_inquiry_trace_info={t}"));
@@ -142,6 +139,8 @@ fn history_path(fin: &str, inquiry_type: &str, sort: &str, trace: Option<&str>) 
 #[tokio::test]
 async fn inquiries_follow_the_contract() {
     let api = api().await;
+    let now = api.state.clock.state().await.expect("clock").business_time;
+    let tran_dtime = now.format("%Y%m%d%H%M%S").to_string();
     let me = seed(&api, 2).await;
     let other = seed(&api, 1).await;
     let token = login(&api, &me).await;
@@ -178,7 +177,7 @@ async fn inquiries_follow_the_contract() {
 
     let balance_path = |fin: &str| {
         format!(
-            "/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={fin}&tran_dtime=20260101000000",
+            "/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={fin}&tran_dtime={tran_dtime}",
             bank_tran_id()
         )
     };
@@ -210,18 +209,18 @@ async fn inquiries_follow_the_contract() {
 
     // Malformed bank_tran_id is rejected.
     let bad = format!(
-        "/v2.0/account/balance/fin_num?bank_tran_id=BAD&fintech_use_num={fin}&tran_dtime=20260101000000"
+        "/v2.0/account/balance/fin_num?bank_tran_id=BAD&fintech_use_num={fin}&tran_dtime={tran_dtime}"
     );
     let (status, body) = call(&api.generator, "GET", &bad, &new_id(), Some(&token), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["rsp_code"], "A0002");
 
     // 30 rows: page 1 has 25 newest first, page 2 the remaining 5.
-    let expected_balance = insert_rows(&api, &me.accounts[0], 30).await;
+    let expected_balance = insert_rows(&api, &me.accounts[0], 30, now).await;
     let (status, page1) = call(
         &api.generator,
         "GET",
-        &history_path(&fin, "A", "D", None),
+        &history_path(now, &fin, "A", "D", None),
         &new_id(),
         Some(&token),
         None,
@@ -243,7 +242,7 @@ async fn inquiries_follow_the_contract() {
     let (status, page2) = call(
         &api.generator,
         "GET",
-        &history_path(&fin, "A", "D", Some(&trace)),
+        &history_path(now, &fin, "A", "D", Some(&trace)),
         &new_id(),
         Some(&token),
         None,
@@ -259,7 +258,7 @@ async fn inquiries_follow_the_contract() {
     let (_, asc) = call(
         &api.generator,
         "GET",
-        &history_path(&fin, "A", "A", None),
+        &history_path(now, &fin, "A", "A", None),
         &new_id(),
         Some(&token),
         None,
@@ -271,7 +270,7 @@ async fn inquiries_follow_the_contract() {
     let (_, deposits) = call(
         &api.generator,
         "GET",
-        &history_path(&fin, "I", "D", None),
+        &history_path(now, &fin, "I", "D", None),
         &new_id(),
         Some(&token),
         None,

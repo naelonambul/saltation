@@ -7,14 +7,18 @@ use axum::http::{Request, StatusCode};
 use bank::app::{self, AppState};
 use bank::shared::clock::Clock;
 use bank::shared::db::{Db, DbConfig};
+use bank::shared::rollover::Registry;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
 pub async fn state() -> AppState {
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrate");
-    let clock = Clock::init(db.clone()).await.expect("clock");
+    let clock = Clock::init(db.clone(), Registry::default())
+        .await
+        .expect("clock");
     AppState { db, clock }
 }
 
@@ -108,4 +112,17 @@ pub fn assert_contract(schema_name: &str, value: &Value) {
 /// A valid `bank_tran_id` for tests.
 pub fn bank_tran_id() -> String {
     format!("T{}U{}", unique_digits(9), unique_digits(9))
+}
+
+/// Validates a business event against the shared log envelope schema.
+pub fn envelope_errors(event: &Value) -> Vec<String> {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
+    let text = std::fs::read_to_string(format!("{dir}/schemas/log-envelope.schema.json"))
+        .expect("read the log envelope contract");
+    let schema: Value = serde_json::from_str(&text).expect("envelope JSON");
+    let validator = jsonschema::draft202012::new(&schema).expect("valid envelope schema");
+    validator
+        .iter_errors(event)
+        .map(|e| format!("{} at {}", e, e.instance_path()))
+        .collect()
 }

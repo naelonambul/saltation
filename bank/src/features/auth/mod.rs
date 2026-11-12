@@ -15,7 +15,7 @@ use ulid::Ulid;
 use crate::app::AppState;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer, CUSTOMER_SCOPE, SESSION_IDLE};
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
@@ -82,12 +82,12 @@ fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
 }
 
 async fn login(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
     let device_id = req.device_id.clone().or_else(|| ctx.device_id.clone());
     let phone = req.phone.clone();
     let found: Option<LoginRow> = state
@@ -249,12 +249,12 @@ async fn login(
 }
 
 async fn logout(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
 ) -> Result<Response, ApiError> {
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
     let c = ctx.clone();
     state
         .db

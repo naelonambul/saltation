@@ -15,7 +15,7 @@ use crate::shared::api::fields::{self, BANK_CODE, BANK_NAME};
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer};
 use crate::shared::clock::kst;
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
@@ -193,6 +193,7 @@ fn merge(mut a: Value, b: Value) -> Value {
 }
 
 async fn balance(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -206,7 +207,7 @@ async fn balance(
             "bank_tran_id 또는 tran_dtime 형식이 올바르지 않습니다",
         ));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let fin = q.fintech_use_num.clone();
     let customer_id = who.customer_id;
     let row: Option<BalanceRow> = state
@@ -277,6 +278,7 @@ fn parse_bound(date: &str, time: Option<&str>, end: bool) -> Option<DateTime<Fix
 }
 
 async fn transaction_list(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -327,7 +329,7 @@ async fn transaction_list(
         ),
         None => None,
     };
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let fin = q.fintech_use_num.clone();
     let customer_id = who.customer_id;
     let itype = q.inquiry_type.clone();

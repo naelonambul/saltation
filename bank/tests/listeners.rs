@@ -11,6 +11,7 @@ use axum::http::{Request, StatusCode};
 use bank::app::{self, AppState};
 use bank::shared::clock::Clock;
 use bank::shared::db::{Db, DbConfig};
+use bank::shared::rollover::Registry;
 use bank::shared::telemetry;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -18,7 +19,9 @@ use tower::ServiceExt;
 async fn state() -> AppState {
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrate");
-    let clock = Clock::init(db.clone()).await.expect("clock");
+    let clock = Clock::init(db.clone(), Registry::default())
+        .await
+        .expect("clock");
     AppState { db, clock }
 }
 
@@ -50,6 +53,8 @@ async fn get(
 #[tokio::test]
 async fn listeners_expose_only_their_routes() {
     let state = state().await;
+    let expected_mode =
+        serde_json::to_value(state.clock.state().await.expect("clock").mode).expect("mode");
     let public = app::public_router(state.clone());
     let generator = app::generator_router(state);
     let metrics = app::metrics_router(telemetry::metrics_handle());
@@ -60,7 +65,7 @@ async fn listeners_expose_only_their_routes() {
     assert_eq!(header.as_deref(), Some(id.as_str()), "X-Request-Id echoed");
     assert_eq!(body["rsp_code"], "A0000");
     assert_eq!(body["request_id"], id.as_str());
-    assert_eq!(body["mode"], "LIVE");
+    assert_eq!(body["mode"], expected_mode);
     assert_eq!(
         body["api_tran_dtm"].as_str().map(str::len),
         Some(17),

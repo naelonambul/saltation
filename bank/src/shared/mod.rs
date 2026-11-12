@@ -7,4 +7,5 @@ pub mod context;
 pub mod db;
 pub mod ledger;
 pub mod outbox;
+pub mod rollover;
 pub mod telemetry;

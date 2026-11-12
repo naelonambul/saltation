@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, listeners, auth, accounts, transfers, outbox, outbox-outage, observability, e2e (more are added per plan step)
+#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, outbox, outbox-outage, observability, e2e (more are added per plan step)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -228,6 +228,7 @@ e2e() {
 run_target() {
   case "$1" in
     migrations)  reset_schema; cargo_test migrations ;;
+    backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
     auth)        cargo_test auth ;;
     accounts)    cargo_test accounts ;;
@@ -244,6 +245,8 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
+  cargo_test listeners auth accounts transfers outbox
+  run_target backfill
   cargo_test listeners auth accounts transfers outbox
   run_target observability
 else
