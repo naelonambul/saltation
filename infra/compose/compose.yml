@@ -12,8 +12,8 @@ services:
     image: saltation/oracle-ee:19.19
     profiles: [local, ci]
     environment:
-      ORACLE_PWD: ${ORACLE_PWD:?set in .env}
-      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
+      ORACLE_PWD: ${ORACLE_PWD:?}
+      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?}
       INIT_SGA_SIZE: "3584"
       INIT_PGA_SIZE: "1024"
     volumes:
@@ -38,9 +38,9 @@ services:
     command: ["--auth", "--wiredTigerCacheSizeGB", "1.5"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set in .env}
-      MONGO_BANK_PASSWORD: ${MONGO_BANK_PASSWORD:?set in .env}
-      MONGO_GENERATOR_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?set in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?}
+      MONGO_BANK_PASSWORD: ${MONGO_BANK_PASSWORD:?}
+      MONGO_GENERATOR_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?}
     volumes:
       - mongodata:/data/db
       - ../mongo/init:/docker-entrypoint-initdb.d:ro
@@ -65,11 +65,11 @@ services:
     profiles: [local, ci]
     environment:
       SALTATION_DB_USER: saltation
-      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
+      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?}
       SALTATION_DB_CONNECT: oracle:1521/ORCLPDB1
       MONGO_HOST: mongo:27017
       MONGO_USER: bank
-      MONGO_PASSWORD: ${MONGO_BANK_PASSWORD:?set in .env}
+      MONGO_PASSWORD: ${MONGO_BANK_PASSWORD:?}
       MONGO_DB: bank_logs
       SALTATION_LOG_DIR: /var/log/saltation
       SALTATION_CORS_ORIGINS: ${SALTATION_CORS_ORIGINS:-http://localhost:8088}
@@ -124,7 +124,7 @@ services:
       SALTATION_BANK_URL: http://bank:8081
       MONGO_HOST: mongo:27017
       MONGO_USER: generator
-      MONGO_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?set in .env}
+      MONGO_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?}
       MONGO_DB: truth
       SALTATION_GEN_SEED: ${SALTATION_GEN_SEED:-20261112}
     networks: [internal, data]
@@ -191,7 +191,7 @@ services:
     image: grafana/grafana:12.1.1
     profiles: [local, ci]
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
       GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
       - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
