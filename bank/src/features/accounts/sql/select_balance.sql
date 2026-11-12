@@ -1,6 +1,7 @@
 -- accounts.select_balance: one of the customer's accounts by fintech number.
--- Access path: FINTECH_ACCOUNT primary key, then ACCOUNT primary key.
-SELECT a.account_id, a.account_no, a.balance, a.subtype, p.name, a.opened_at, a.last_activity_at
+-- Access path: FINTECH_ACCOUNT and ACCOUNT primary keys; account_transaction_date_ix for latest date.
+SELECT a.account_id, a.account_no, a.balance, a.subtype, p.name, a.opened_at, (SELECT TO_CHAR(MAX(tx.business_date), 'YYYYMMDD')
+       FROM account_transaction tx WHERE tx.account_id = a.account_id)
 FROM fintech_account f
 JOIN account a ON a.account_id = f.account_id
 JOIN product_terms t ON t.terms_id = a.terms_id

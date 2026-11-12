@@ -162,7 +162,7 @@ type BalanceRow = (
     String,
     String,
     DateTime<FixedOffset>,
-    Option<DateTime<FixedOffset>>,
+    Option<String>,
 );
 
 fn not_found(ctx: &RequestContext) -> ApiError {
@@ -230,7 +230,7 @@ async fn balance(
                 "product_name": product,
                 "account_issue_date": fields::date(opened),
                 "maturity_date": "",
-                "last_tran_date": last.map(fields::date).unwrap_or_default(),
+                "last_tran_date": last.unwrap_or_default(),
             }),
         ),
     ))

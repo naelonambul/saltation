@@ -2,6 +2,7 @@
 //! a feature is private to it, so one feature cannot use another's internals.
 
 pub mod accounts;
+pub mod accounts_lifecycle;
 pub mod auth;
 pub mod internal;
 pub mod outbox_relay;

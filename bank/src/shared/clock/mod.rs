@@ -35,6 +35,8 @@ pub struct ClockState {
     pub mode: ClockMode,
     pub business_time: DateTime<FixedOffset>,
     pub rolled_through: NaiveDate,
+    #[serde(skip)]
+    pub pending_rollover: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +88,7 @@ impl Clock {
     }
 
     pub async fn state(&self) -> Result<ClockState, DbError> {
-        let (mode, stored, rolled): (String, DateTime<FixedOffset>, String) =
+        let (mode, stored, rolled, pending): (String, DateTime<FixedOffset>, String, i64) =
             self.db.run(|s| s.query_row(&SELECT_CLOCK, &[])).await?;
         let mode = if mode == "BACKFILL" {
             ClockMode::Backfill
@@ -103,31 +105,40 @@ impl Clock {
             mode,
             business_time,
             rolled_through,
+            pending_rollover: pending > 0,
         })
     }
 
     pub async fn enter(&self) -> Result<Ticket, DbError> {
+        let mut caught_up = false;
         loop {
             let guard = self.barrier.clone().read_owned().await;
             let state = self.state().await?;
-            if state.mode == ClockMode::Backfill
-                && business_date(state.business_time) <= state.rolled_through
+            let overdue =
+                business_date(state.business_time) > state.rolled_through.succ_opt().expect("date");
+            if state.mode == ClockMode::Live && (state.pending_rollover || overdue) && !caught_up {
+                drop(guard);
+                if let Err(error) = self.catch_up().await {
+                    if self.state().await?.pending_rollover {
+                        return Err(DbError::Busy);
+                    }
+                    return Err(error);
+                }
+                caught_up = true;
+                continue;
+            }
+            if state.pending_rollover
+                || (state.mode == ClockMode::Backfill
+                    && business_date(state.business_time) <= state.rolled_through)
+                || (state.mode == ClockMode::Live && overdue)
             {
                 drop(guard);
                 return Err(DbError::Busy);
             }
-            if state.mode == ClockMode::Live
-                && business_date(state.business_time)
-                    > state.rolled_through.succ_opt().expect("date")
-            {
-                drop(guard);
-                self.catch_up().await?;
-            } else {
-                return Ok(Ticket {
-                    now: state.business_time,
-                    _guard: guard,
-                });
-            }
+            return Ok(Ticket {
+                now: state.business_time,
+                _guard: guard,
+            });
         }
     }
 
@@ -248,8 +259,9 @@ impl Clock {
         tokio::spawn(async move {
             let state = clock.state().await?;
             if state.mode != ClockMode::Live
-                || business_date(state.business_time)
-                    <= state.rolled_through.succ_opt().expect("date")
+                || (!state.pending_rollover
+                    && business_date(state.business_time)
+                        <= state.rolled_through.succ_opt().expect("date"))
             {
                 return Ok(());
             }

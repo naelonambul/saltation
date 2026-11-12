@@ -37,10 +37,6 @@ const INSERT_STATUS: SqlStmt = sql_stmt!(
     "internal.insert_status_history",
     "sql/insert_status_history.sql"
 );
-const INSERT_SEED_REQUEST: SqlStmt = sql_stmt!(
-    "internal.insert_seed_request",
-    "sql/insert_seed_request.sql"
-);
 
 const MAX_BATCH: usize = 500;
 
@@ -220,18 +216,18 @@ async fn seed_accounts(
                 )?;
                 s.execute(&INSERT_STATUS, &[&account_id, &now])?;
                 if a.opening_balance > 0 {
-                    let request_id = ulid::Ulid::new().to_string();
-                    s.execute(&INSERT_SEED_REQUEST, &[&request_id, &a.account_no, &now])?;
                     let mut locks = ledger::lock_accounts(s, &[account_id])?;
                     let movement = Movement {
                         kind: Kind::Inbound,
-                        request_id: &request_id,
+                        request_id: None,
+                        ctx: None,
                         bank_tran_id: None,
                         amount: a.opening_balance,
                         channel: "SYSTEM",
                         occurred_at: now,
                         legs: vec![Leg {
                             account_id,
+                            customer_initiated: false,
                             amount: a.opening_balance,
                             inout_type: "입금",
                             tran_type: "대체",

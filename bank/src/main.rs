@@ -82,7 +82,11 @@ async fn main() -> anyhow::Result<()> {
         .context("connect to Oracle")?;
     let applied = db.migrate().await.context("apply migrations")?;
     tracing::info!(applied, "migrations up to date");
-    let clock = Clock::init(db.clone(), Registry::default())
+    let mut registry = Registry::default();
+    for job in bank::features::accounts_lifecycle::jobs() {
+        registry.register(job);
+    }
+    let clock = Clock::init(db.clone(), registry)
         .await
         .context("initialise the clock")?;
     clock.catch_up().await.context("catch up rollover")?;

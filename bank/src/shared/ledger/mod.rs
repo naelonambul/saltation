@@ -11,13 +11,16 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, FixedOffset, NaiveDate};
 
 use crate::shared::clock::business_date;
+use crate::shared::context::RequestContext;
 use crate::shared::db::{DbError, Session, SqlStmt};
+use crate::shared::outbox::{self, Event};
 use crate::sql_stmt;
+use serde_json::json;
 
 const LOCK_ACCOUNT: SqlStmt = sql_stmt!("ledger.lock_account", "sql/lock_account.sql");
 const INSERT_TRANSFER: SqlStmt = sql_stmt!("ledger.insert_transfer", "sql/insert_transfer.sql");
-const SELECT_TRANSFER_ID: SqlStmt =
-    sql_stmt!("ledger.select_transfer_id", "sql/select_transfer_id.sql");
+const UPDATE_STATUS: SqlStmt = sql_stmt!("ledger.update_status", "sql/update_status.sql");
+const INSERT_STATUS: SqlStmt = sql_stmt!("ledger.insert_status", "sql/insert_status.sql");
 const INSERT_ROW: SqlStmt = sql_stmt!("ledger.insert_row", "sql/insert_row.sql");
 const UPDATE_ACCOUNT: SqlStmt = sql_stmt!("ledger.update_account", "sql/update_account.sql");
 const ENSURE_DAILY: SqlStmt = sql_stmt!("ledger.ensure_daily", "sql/ensure_daily.sql");
@@ -27,6 +30,7 @@ const ADD_DAILY: SqlStmt = sql_stmt!("ledger.add_daily", "sql/add_daily.sql");
 /// A locked account's current state.
 #[derive(Debug, Clone)]
 pub struct Locked {
+    pub account_no: String,
     pub balance: i64,
     pub next_sequence: i64,
     pub status: String,
@@ -52,11 +56,17 @@ pub fn lock_accounts(s: &mut Session, account_ids: &[i64]) -> Result<LockSet, Db
     ids.dedup();
     let mut set = LockSet::default();
     for id in ids {
-        let (balance, next_sequence, status, subtype): (i64, i64, String, String) =
-            s.query_row(&LOCK_ACCOUNT, &[&id])?;
+        let (balance, next_sequence, status, subtype, account_no): (
+            i64,
+            i64,
+            String,
+            String,
+            String,
+        ) = s.query_row(&LOCK_ACCOUNT, &[&id])?;
         set.accounts.insert(
             id,
             Locked {
+                account_no,
                 balance,
                 next_sequence,
                 status,
@@ -92,6 +102,10 @@ pub fn lock_daily(s: &mut Session, account_id: i64, date: NaiveDate) -> Result<D
 pub enum Kind {
     Transfer,
     Inbound,
+    TermOpen,
+    TermClose,
+    LoanDisburse,
+    LoanRepay,
 }
 
 impl Kind {
@@ -99,6 +113,10 @@ impl Kind {
         match self {
             Kind::Transfer => "transfer",
             Kind::Inbound => "inbound",
+            Kind::TermOpen => "term_open",
+            Kind::TermClose => "term_close",
+            Kind::LoanDisburse => "loan_disburse",
+            Kind::LoanRepay => "loan_repay",
         }
     }
 }
@@ -106,6 +124,7 @@ impl Kind {
 /// One in-bank account's side of a movement.
 #[derive(Debug, Clone)]
 pub struct Leg {
+    pub customer_initiated: bool,
     pub account_id: i64,
     /// Signed: positive credits the account, negative debits it.
     pub amount: i64,
@@ -123,7 +142,8 @@ pub struct Leg {
 #[derive(Debug, Clone)]
 pub struct Movement<'a> {
     pub kind: Kind,
-    pub request_id: &'a str,
+    pub request_id: Option<&'a str>,
+    pub ctx: Option<&'a RequestContext>,
     pub bank_tran_id: Option<&'a str>,
     pub amount: i64,
     pub channel: &'static str,
@@ -133,6 +153,8 @@ pub struct Movement<'a> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
+    #[error("invalid movement shape: {0}")]
+    Shape(&'static str),
     #[error("account {0} was not locked by this operation")]
     NotLocked(i64),
     #[error("account {0} would go below zero")]
@@ -151,6 +173,11 @@ pub struct Posted {
 /// Writes the movement: `TRANSFER`, one row per leg, balances, sequences and
 /// daily totals. Every leg's account must be in `locks`.
 pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Posted, LedgerError> {
+    check_shape(
+        m.kind,
+        m.amount,
+        &m.legs.iter().map(|leg| leg.amount).collect::<Vec<_>>(),
+    )?;
     for leg in &m.legs {
         let locked = locks
             .accounts
@@ -160,7 +187,7 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
             return Err(LedgerError::Negative(leg.account_id));
         }
     }
-    s.execute(
+    let transfer_id = s.insert_returning_id(
         &INSERT_TRANSFER,
         &[
             &m.kind.as_str(),
@@ -170,7 +197,6 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
             &m.occurred_at,
         ],
     )?;
-    let transfer_id: i64 = s.query_row(&SELECT_TRANSFER_ID, &[&m.request_id])?;
     let date = business_date(m.occurred_at);
     let mut balances_after = Vec::with_capacity(m.legs.len());
     for leg in &m.legs {
@@ -203,7 +229,13 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
         )?;
         s.execute(
             &UPDATE_ACCOUNT,
-            &[&balance, &(sequence + 1), &m.occurred_at, &leg.account_id],
+            &[
+                &balance,
+                &(sequence + 1),
+                &i64::from(leg.customer_initiated),
+                &m.occurred_at,
+                &leg.account_id,
+            ],
         )?;
         locked.balance = balance;
         locked.next_sequence = sequence + 1;
@@ -216,8 +248,121 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
         }
         balances_after.push((leg.account_id, balance));
     }
+    for leg in &m.legs {
+        if leg.customer_initiated
+            && locks
+                .get(leg.account_id)
+                .is_some_and(|a| a.status == "DORMANT")
+        {
+            set_status(
+                s,
+                locks,
+                leg.account_id,
+                "ACTIVE",
+                "customer_activity",
+                m.occurred_at,
+                m.ctx,
+                m.channel,
+            )?;
+        }
+    }
     Ok(Posted {
         transfer_id,
         balances_after,
     })
+}
+
+/// Checks F-21 without accessing a database. Use wide sums to avoid overflow.
+fn check_shape(kind: Kind, amount: i64, amounts: &[i64]) -> Result<(), LedgerError> {
+    let offsets = amounts.len() == 2 && i128::from(amounts[0]) + i128::from(amounts[1]) == 0;
+    let valid = match kind {
+        Kind::Transfer => (amounts.len() == 1 && amounts[0] < 0) || offsets,
+        Kind::Inbound => amounts.len() == 1 && amounts[0] > 0,
+        Kind::TermOpen | Kind::TermClose => offsets,
+        Kind::LoanDisburse => amounts.len() == 2 && amounts[0] > 0 && amounts[0] == amounts[1],
+        Kind::LoanRepay => amounts.len() == 2 && amounts[0] < 0 && amounts[0] == amounts[1],
+    };
+    if valid
+        && amounts
+            .iter()
+            .all(|leg| *leg != 0 && i128::from(*leg).abs() == i128::from(amount))
+    {
+        Ok(())
+    } else {
+        Err(LedgerError::Shape(
+            "leg count, signs or amounts do not match kind",
+        ))
+    }
+}
+
+/// Changes a locked account's status, history and event atomically. Never commits.
+#[allow(clippy::too_many_arguments)]
+pub fn set_status(
+    s: &mut Session,
+    locks: &mut LockSet,
+    account_id: i64,
+    to: &'static str,
+    reason: &'static str,
+    at: DateTime<FixedOffset>,
+    ctx: Option<&RequestContext>,
+    channel: &'static str,
+) -> Result<(), LedgerError> {
+    let account = locks
+        .accounts
+        .get_mut(&account_id)
+        .ok_or(LedgerError::NotLocked(account_id))?;
+    if account.status == to {
+        return Ok(());
+    }
+    s.execute(&UPDATE_STATUS, &[&to, &account_id])?;
+    s.execute(
+        &INSERT_STATUS,
+        &[&account_id, &account.status, &to, &reason, &at],
+    )?;
+    let event = match ctx {
+        Some(ctx) => Event::for_request(ctx, "account.status_changed", at, channel, "completed"),
+        None => Event::system("account.status_changed", at, "completed"),
+    }
+    .account(&account.account_no)
+    .payload(json!({"from": account.status, "to": to, "reason": reason}));
+    outbox::record(s, &event)?;
+    account.status = to.to_owned();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_kind_checks_its_shape() {
+        for (kind, accepted, rejected) in [
+            (Kind::Transfer, vec![-10, 10], vec![-10, 9]),
+            (Kind::Inbound, vec![10], vec![-10]),
+            (Kind::TermOpen, vec![-10, 10], vec![10]),
+            (Kind::TermClose, vec![10, -10], vec![10, 10]),
+            (Kind::LoanDisburse, vec![10, 10], vec![-10, -10]),
+            (Kind::LoanRepay, vec![-10, -10], vec![10, 10]),
+        ] {
+            assert!(check_shape(kind, 10, &accepted).is_ok(), "{kind:?}");
+            assert!(
+                matches!(check_shape(kind, 10, &rejected), Err(LedgerError::Shape(_))),
+                "{kind:?}"
+            );
+            assert!(check_shape(kind, 10, &[0]).is_err());
+            assert!(check_shape(kind, 10, &[0, 0]).is_err());
+            assert!(check_shape(kind, 11, &accepted).is_err());
+            assert!(check_shape(kind, 10, &[]).is_err(), "{kind:?}");
+            assert!(check_shape(kind, 10, &[1, 1, 1]).is_err(), "{kind:?}");
+        }
+        assert!(check_shape(Kind::Transfer, 10, &[-10]).is_ok());
+        assert!(check_shape(Kind::Transfer, 10, &[10]).is_err());
+        for kind in [Kind::LoanDisburse, Kind::LoanRepay] {
+            assert!(check_shape(kind, 10, &[0, 0]).is_err());
+            assert!(check_shape(kind, 10, &[10, 9]).is_err());
+            assert!(check_shape(kind, 10, &[-10, -9]).is_err());
+        }
+        assert!(check_shape(Kind::Inbound, 10, &[0]).is_err());
+        assert!(check_shape(Kind::TermOpen, 10, &[i64::MAX, 1]).is_err());
+    }
 }

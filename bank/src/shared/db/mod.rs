@@ -17,6 +17,9 @@ use crate::shared::telemetry::RequestStats;
 pub use migrations::{MIGRATIONS, Migration};
 
 /// A named SQL statement loaded from a file at compile time.
+/// How long warming the pool at start may take.
+const WARM_UP_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy)]
 pub struct SqlStmt {
     pub name: &'static str,
@@ -110,13 +113,30 @@ pub struct Db {
 
 impl Db {
     pub fn connect(config: &DbConfig) -> Result<Self, DbError> {
+        // The pool is created empty and warmed here. Oracle client 23 would open a non-zero
+        // minimum in background threads (kpuspExtendStartup), and that wait can hang forever
+        // when another pool in the process is active.
         let pool = PoolBuilder::new(&config.user, &config.password, &config.connect_string)
-            .min_connections(config.min_sessions)
+            .min_connections(0)
             .max_connections(config.max_sessions)
             .connection_increment(1)
             .stmt_cache_size(config.stmt_cache_size)
             .get_mode(GetMode::TimedWait(config.acquire_timeout))
             .build()?;
+        // The get mode cannot change after creation (ORA-24499), so a get that times out
+        // while the pool is still opening the session (ORA-24459) is retried.
+        let deadline = Instant::now() + WARM_UP_WAIT;
+        let mut held: Vec<Connection> = Vec::new();
+        while held.len() < config.min_sessions.min(config.max_sessions) as usize {
+            match pool.get() {
+                Ok(conn) => held.push(conn),
+                Err(e)
+                    if e.db_error().is_some_and(|d| d.code() == 24459)
+                        && Instant::now() < deadline => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        drop(held);
         Ok(Self {
             pool: Arc::new(pool),
             gate: Arc::new(Semaphore::new(config.max_sessions as usize)),
@@ -250,6 +270,28 @@ impl Session {
         self.timed(stmt, |c| {
             c.execute(stmt.sql, params).and_then(|s| s.row_count())
         })
+    }
+
+    /// Inserts one row and reads its RETURNING ID out bind.
+    pub fn insert_returning_id(
+        &mut self,
+        stmt: &SqlStmt,
+        params: &[&dyn ToSql],
+    ) -> Result<i64, DbError> {
+        let ids = self.timed(stmt, |c| {
+            let mut statement = c.statement(stmt.sql).build()?;
+            statement.bind("id", &None::<i64>)?;
+            statement.execute(params)?;
+            statement.returned_values::<_, i64>("id")
+        })?;
+        match ids.as_slice() {
+            [id] => Ok(*id),
+            _ => Err(DbError::Config(format!(
+                "{} returned {} IDs, expected one",
+                stmt.name,
+                ids.len()
+            ))),
+        }
     }
 
     /// Executes a query expected to return exactly one row.

@@ -332,7 +332,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     }
     let receiver: Option<(i64, String, String)> =
         s.query_opt(&SELECT_RECEIVER, &[&req.recv_client_account_num])?;
-    let Some((receiver_id, _receiver_customer, receiver_name)) = receiver else {
+    let Some((receiver_id, receiver_customer, receiver_name)) = receiver else {
         return reject(
             s,
             plan,
@@ -366,7 +366,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         (Some(f), Some(t)) => (f.clone(), t.clone()),
         _ => return Err(DbError::Config("locked accounts missing".into())),
     };
-    if from.status != "ACTIVE"
+    if from.status == "CLOSED"
         || from.subtype != "DEMAND"
         || to.status == "CLOSED"
         || to.subtype != "DEMAND"
@@ -426,7 +426,8 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     };
     let movement = Movement {
         kind: Kind::Transfer,
-        request_id: &ctx.request_id,
+        request_id: Some(&ctx.request_id),
+        ctx: Some(ctx),
         bank_tran_id: Some(&req.bank_tran_id),
         amount: plan.amount,
         channel: "MOBILE",
@@ -434,6 +435,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         legs: vec![
             Leg {
                 account_id: sender_id,
+                customer_initiated: true,
                 amount: -plan.amount,
                 inout_type: "출금",
                 tran_type: "대체",
@@ -445,6 +447,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             },
             Leg {
                 account_id: receiver_id,
+                customer_initiated: receiver_customer == customer_no,
                 amount: plan.amount,
                 inout_type: "입금",
                 tran_type: "대체",

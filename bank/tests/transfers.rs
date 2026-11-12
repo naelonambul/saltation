@@ -166,6 +166,24 @@ async fn transfers_rejections_limit_and_idempotency() {
         10_000
     );
 
+    let time = api.state.clock.state().await.expect("clock").business_time;
+    let path = format!(
+        "/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={b1_fin}&tran_dtime={}",
+        bank_tran_id(),
+        time.format("%Y%m%d%H%M%S")
+    );
+    let (status, balance) = call(
+        &api.generator,
+        "GET",
+        &path,
+        &new_id(),
+        Some(&b.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{balance}");
+    assert_eq!(balance["last_tran_date"], time.format("%Y%m%d").to_string());
+
     // Replay: same key and payload returns the stored result; no second movement.
     let (status, replay, _) =
         transfer(&api, &a.token, transfer_body(&btid, &a1_fin, &b1, 10_000)).await;
