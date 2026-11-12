@@ -23,10 +23,16 @@ export function TransferScreen(props: { accounts: SourceAccount[]; onDone: () =>
 
   async function send() {
     setBusy(true);
-    const r = await transfer({ fintechUseNum: from, toAccount, toName, amount, memo }, bankTranId);
-    setBusy(false);
-    setResult(r);
-    if (r.ok || !r.retryable) setBankTranId(newBankTranId());
+    try {
+      const r = await transfer({ fintechUseNum: from, toAccount, toName, amount, memo }, bankTranId);
+      setResult(r);
+      if (r.ok || !r.retryable) setBankTranId(newBankTranId());
+    } catch {
+      // Network failure: keep the bank_tran_id so a retry cannot transfer twice.
+      setResult({ ok: false, message: "서버에 연결하지 못했습니다. 다시 보내도 중복 이체되지 않습니다.", retryable: true });
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (result?.ok) {

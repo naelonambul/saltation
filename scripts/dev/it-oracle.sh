@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, listeners, auth, accounts, transfers, outbox, outbox-outage, observability (more are added per plan step)
+#   targets: mongo-users, migrations, listeners, auth, accounts, transfers, outbox, outbox-outage, observability, e2e (more are added per plan step)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -20,6 +20,8 @@ MONGO_ROOT_PASSWORD=$(gen)
 MONGO_BANK_PASSWORD=$(gen)
 MONGO_GENERATOR_PASSWORD=$(gen)
 GRAFANA_ADMIN_PASSWORD=$(gen)
+SALTATION_API_BASE=http://bank:8080
+SALTATION_CORS_ORIGINS=http://web:8088
 ENV
 fi
 set -a; . "$env_file"; set +a
@@ -30,7 +32,7 @@ target="${1:-all}"
 "${compose[@]}" up -d --wait --wait-timeout 3600 oracle mongo
 # Database tests inspect the outbox directly; a running bank container's relay
 # would drain it under them. Only the observability target runs the bank.
-[ "$target" = observability ] || "${compose[@]}" stop bank >/dev/null 2>&1 || true
+[ "$target" = observability ] || [ "$target" = e2e ] || "${compose[@]}" stop bank >/dev/null 2>&1 || true
 
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
@@ -40,6 +42,7 @@ reset_schema() {
 cargo_test() {
   local extra_env=()
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
+  [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI)
   docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null
   docker run --rm --network "${project}_data" \
     -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
@@ -104,6 +107,38 @@ observability() {
   echo "observability: Grafana serves the Saltation bank dashboard"
 }
 
+# Plan step 10: the whole stack, 1,000 seeded customers, 10 minutes of normal
+# transfers from the generator, the Rust end-to-end checks, Prometheus data,
+# then a person's flow in the mobile web app with Playwright.
+e2e() {
+  local since start gen roster phone password to_account
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  start=$(( ($(date +%s) % 90000) * 1000 ))
+  gen=("${compose[@]}" --profile tools run --rm generator)
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800
+  "${compose[@]}" --profile tools build generator >/dev/null
+  echo "e2e: seeding 1,000 customers from #$start"
+  "${gen[@]}" seed --customers 1000 --start "$start"
+  echo "e2e: 10 minutes of normal transfers at 5 per second"
+  "${gen[@]}" run-normal --minutes "${E2E_MINUTES:-10}" --rate 5
+  MONGO_TRUTH_URI="mongodb://generator:${MONGO_GENERATOR_PASSWORD}@mongo:27017/truth" E2E_SINCE="$since" \
+    cargo_test e2e generator_run_is_labelled_logged_and_consistent --nocapture
+  local count
+  count=$(docker run --rm --network "${project}_obs" curlimages/curl:8.15.0 -fsS -G http://prometheus:9090/api/v1/query \
+    --data-urlencode 'query=sum(bank_http_request_duration_seconds_count{endpoint="/v2.0/transfer/withdraw/fin_num"})' \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else 0)')
+  [ "$count" -ge 2000 ] || { echo "e2e: Prometheus counted only $count transfers" >&2; return 1; }
+  echo "e2e: Prometheus counted $count transfers"
+  roster=$("${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
+    --eval "const r = db.getSiblingDB('truth').roster.find({customer_no: {\$gte: 'C' + String($start).padStart(8, '0')}}).sort({customer_no: 1}).limit(2).toArray(); print(r[0].phone + ' ' + r[0].password + ' ' + r[1].account_no)")
+  read -r phone password to_account <<<"$roster"
+  echo "e2e: browser flow as $phone"
+  docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
+    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true \
+    -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
+    mcr.microsoft.com/playwright:v1.55.0-noble sh -c "corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test"
+}
+
 run_target() {
   case "$1" in
     migrations)  reset_schema; cargo_test migrations ;;
@@ -114,6 +149,7 @@ run_target() {
     outbox)      cargo_test outbox ;;
     outbox-outage) outbox_outage ;;
     observability) observability ;;
+    e2e)         e2e ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
   esac

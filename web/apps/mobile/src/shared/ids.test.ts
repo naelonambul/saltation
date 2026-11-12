@@ -20,3 +20,10 @@ describe("format", () => {
     expect(dateTime("20260103", "091244")).toBe("2026.01.03 09:12");
   });
 });
+
+describe("session", () => {
+  it("random IDs do not need a secure context", async () => {
+    const { randomHex } = await import("./session");
+    expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/);
+  });
+});

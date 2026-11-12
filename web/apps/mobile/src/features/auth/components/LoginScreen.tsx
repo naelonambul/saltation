@@ -13,10 +13,15 @@ export function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
     e.preventDefault();
     setBusy(true);
     setMessage(undefined);
-    const result = await login(phone, password);
-    setBusy(false);
-    if (result.ok) onLoggedIn();
-    else setMessage(result.message);
+    try {
+      const result = await login(phone, password);
+      if (result.ok) onLoggedIn();
+      else setMessage(result.message);
+    } catch {
+      setMessage("서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
