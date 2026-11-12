@@ -67,16 +67,29 @@ ENV
 fi
 set -a; . "$env_file"; set +a
 
+# set_env NAME VALUE: replaces one line of the env file.
+set_env() {
+  python3 - "$env_file" "$1" "$2" <<'PY'
+import pathlib, sys
+p, name, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+lines = [l for l in p.read_text().splitlines() if not l.startswith(name + "=")]
+p.write_text("\n".join(lines + [f"{name}={value}"]) + "\n")
+PY
+}
+
+# Identity of the database volumes. Volumes created by anything else (another
+# version of this script, a manual `down -v`) hold other passwords, so a
+# mismatch also recreates them.
+volumes_key() {
+  docker volume inspect -f '{{.Name}} {{.CreatedAt}}' "${project}_oradata" "${project}_mongodata" 2>/dev/null | cksum | cut -d' ' -f1
+}
+
 target="${1:-all}"
-if [ "${2:-}" = "--fresh" ] || [ "$recreate" = yes ] || [ "${SETUP_KEY:-}" != "$setup_key" ]; then
+if [ "${2:-}" = "--fresh" ] || [ "$recreate" = yes ] || [ "${SETUP_KEY:-}" != "$setup_key" ] \
+  || [ "${VOLUMES_KEY:-}" != "$(volumes_key)" ]; then
   echo "it-oracle: creating fresh test volumes"
   "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  python3 - "$env_file" "$setup_key" <<'PY'
-import pathlib, sys
-p = pathlib.Path(sys.argv[1])
-lines = [l for l in p.read_text().splitlines() if not l.startswith("SETUP_KEY=")]
-p.write_text("\n".join(lines + [f"SETUP_KEY={sys.argv[2]}"]) + "\n")
-PY
+  set_env SETUP_KEY "$setup_key"
 else
   echo "it-oracle: reusing the test database"
 fi
@@ -90,6 +103,7 @@ case "$target" in
   *) "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true ;;
 esac
 "${compose[@]}" up -d --wait --wait-timeout 3600 oracle mongo
+[ "${VOLUMES_KEY:-}" = "$(volumes_key)" ] || set_env VOLUMES_KEY "$(volumes_key)"
 
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
