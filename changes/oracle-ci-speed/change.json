@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "oracle-ci-speed",
+  "kind": "implementation",
+  "title": "Reuse the Oracle test database between CI runs",
+  "base": {
+    "ref": "main",
+    "commit": "48b1de80d8a04b86c33b477a911a1522ecb3f837"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    "scripts/dev/it-oracle.sh",
+    "bank/.dockerignore",
+    "web/Dockerfile.dockerignore",
+    "docs/dev-host.md"
+  ],
+  "approvals": []
+}
