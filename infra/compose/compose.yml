@@ -32,7 +32,7 @@ services:
     logging: *logging
 
   mongo:
-    image: mongo:8.0
+    image: mongo:8.0.38
     profiles: [local, ci]
     command: ["--auth", "--wiredTigerCacheSizeGB", "1.5"]
     environment:
