@@ -2,24 +2,24 @@
 
 ## Summary
 
-This plan delivers **stage 2** of the spec's Delivery table (ledger and products) in one change: payees, recipient inquiry, transfers to external counterparties, configurable limits, inbound deposits, term deposits, loans, password reset, the simulated clock's backfill and live modes, the day rollover (maturity, dormancy, daily close), and the mobile screens for them. ATM (stage 3), the admin web (stage 4), generator personas and scenarios (stage 5) and operations (stage 6) stay out.
+This plan delivers **stage 2** of the spec's Delivery table (ledger and products) in one change: payees, recipient inquiry, transfers to external counterparties, configurable limits, inbound deposits, term deposits, loans, password reset, the simulated clock's backfill and live modes, the day rollover (maturity, dormancy, daily close). It is API server work only: by the owner's decision, UI work starts after the API server is developed, so the mobile screens for these features are not in this change. ATM (stage 3), the admin web (stage 4), generator personas and scenarios (stage 5) and operations (stage 6) stay out.
 
-Stage 1 left the bank with login, balance, history and in-bank transfer in live mode only. After this change a customer can do everything in acceptance criterion 8's mobile half, and the generator can drive a backfill clock across business days with the books verified each day.
+Stage 1 left the bank with login, balance, history and in-bank transfer in live mode only. After this change the API serves everything in acceptance criterion 8's mobile half, and the generator can drive a backfill clock across business days with the books verified each day.
 
 ### Spec acceptance criteria proved by this change
 
 At test scale (integration tests, no 365-day backfill):
 
 - **AC 6 (part):** daily close reports zero mismatches for every business date the tests cross, including after the concurrent-transfer test; a seeded mismatch is reported.
-- **AC 8 (mobile half):** sign in, reset the password, view balances and history, manage payees, transfer, open and early-close a term deposit, take and repay a loan.
+- **AC 8 (mobile half, API side only):** the interfaces to sign in, reset the password, view balances and history, manage payees, transfer, open and early-close a term deposit, take and repay a loan. The screens that complete AC 8 come with the UI work.
 - **AC 9 (part):** in backfill mode every record's business time comes from the simulated clock; a test asserts `occurred_at` inside the clock range and `recorded_at` inside the wall-clock window.
 
-Functional requirements covered: F-5, F-6, F-8, F-9, F-11 to F-16 (mobile limit only), F-18 and F-19 for the new operations, F-20 to F-23, F-25 to F-28, F-35 for the new events, F-38. F-7's ATM PIN, F-17 and F-24 (no correction interface exists yet) wait for their stages.
+Functional requirements covered: F-5, F-6, F-8, F-9, F-11 to F-16 (mobile limit only), F-18 and F-19 for the new operations, F-20 to F-23, F-25 to F-28, F-35 for the new events. F-7's ATM PIN, F-17, F-24 (no correction interface exists yet) and F-38's new screens wait for their stages.
 
 ### Decisions
 
-- **One change for the whole stage,** as the spec's Delivery section says. It is large; the order of work below is cut into 13 units, each with its own proof, committed one by one.
-- **Mobile screens are in this stage.** No Delivery row names them, and AC 8 needs them with the bank features.
+- **One change for the whole stage,** as the spec's Delivery section says. It is large; the order of work below is cut into 12 units, each with its own proof, committed one by one.
+- **No UI work in this change** (owner, 2026-11-12: UI work starts once the API server is developed). The stage-1 mobile app is left as it is; contract changes only add to what it uses, so the web checks keep passing untouched. The new mobile screens (F-38) and the admin screens follow the API server stages; no Delivery row names the mobile screens, so the UI work gets its own change.
 - **The generator only gains what the tests need:** client methods for the new interfaces, seeding of counterparties and counterparty clients, and clock commands. Personas, scenarios and the backfill driver are stage 5.
 - **A new database starts in `backfill` mode** (F-26), with business time set to the wall-clock time of first start. Stage 1 started in live mode; that changes here. `clock/set` and `clock/advance` only move forward, with one exception: while the bank has no customer, `clock/set` may also move the clock back. That is how a backfill starts a year in the past: set the clock, then seed. The local stack and the end-to-end test switch to live with a generator command; switching when already live is accepted and does nothing.
 - **One business time and one barrier per request.** Today the token check and the handler each read the clock. A request middleware now takes the barrier's shared side and reads business time once, before authentication; the token check, the handler and every record use that value. The rest of the request runs in its own task that owns the guard, so a dropped connection cannot release the barrier while database work continues. A clock advance, the live switch and every rollover take the exclusive side (an advance is rejected after waiting 10 seconds). The barrier is in-process, which assumes one bank process; that is what Compose runs.
@@ -60,9 +60,8 @@ Functional requirements covered: F-5, F-6, F-8, F-9, F-11 to F-16 (mobile limit 
 | `bank/src/features/internal/` | seed counterparties and counterparty clients; SMS read; clock set, advance and live switch |
 | `bank/src/app.rs`, `bank/src/main.rs` | routes per listener; rollover registration; configuration |
 | `bank/tests/` | new suites `payees`, `inbound`, `password_reset`, `deposits`, `loans`, `backfill`; the shared helpers start logging and metrics so tests can read them; existing suites take time from the clock, accept either mode, and check transfers by kind |
-| `web/packages/api-client/`, `web/apps/mobile/src/features/{auth,accounts,transfers,payees,deposits,loans}/`, `web/apps/mobile/e2e/` | regenerated types; screens from the spec's mobile UX; smoke test extended |
 | `generator/saltation_gen/{client,drivers,cli.py}`, `generator/tests/` | client methods, seeding of counterparties and clients, `clock` commands |
-| `scripts/dev/it-oracle.sh` | new targets; `all` runs the phases below; `e2e` switches to live and lets the browser test read the SMS code |
+| `scripts/dev/it-oracle.sh` | new targets; `all` runs the phases below; `e2e` switches to live |
 | `infra/compose/compose.yml`, `infra/compose/.env.example` | the limit setting, if it needs a variable |
 | `docs/dev-host.md` | new test targets; starting the local stack in live mode |
 
@@ -73,7 +72,7 @@ Each unit names its proof, run from the repository root. Commit after each unit.
 Test layout: the **ordinary suites** (stage 1's and `payees`, `inbound`, `password_reset`, `deposits`, `loans`) never move the clock and pass in either mode. Every test that moves the clock lives in the `backfill` suite, whose target resets the schema, sets the clock 400 days back, runs its tests in a fixed order and ends with the switch to live. The refusal to go live with a wall clock behind business time is a unit test of the clock rule with an injected wall time.
 
 1. **Contracts and schema.** The contract files and code tables above; migrations for every new table, column and seed row.
-   - Proof: `scripts/dev/it-oracle.sh migrations` (applies to an empty schema and is idempotent), and `scripts/dev/ci-web.sh typecheck` after regenerating `api-client`.
+   - Proof: `scripts/dev/it-oracle.sh migrations` (applies to an empty schema and is idempotent), and `python3 scripts/repo.py verify --change ledger-products --group web` (the existing mobile app still builds against the extended contract).
 2. **Clock modes and rollover registry.** `shared/clock`: persisted mode, set, advance, barrier, live switch. `shared/rollover`: registry and `ROLLOVER_RUN`; the advance and the live scheduler call it for each crossed date. `features/internal`: `clock/set`, `clock/advance`, `mode/live`.
    - Proof: `scripts/dev/it-oracle.sh backfill` and `scripts/dev/ci-rust.sh test`. At this unit they cover: forward only, and backward only while there is no customer; an advance waits for an in-flight operation and is rejected after 10 seconds; operations wait during an advance; a request cancelled mid-transaction keeps the barrier until its database work ends; a registered test job runs once per crossed date, in order; after a job fails midway, the clock has not moved and the retry skips the finished jobs and completes; the token check and the handler see the same business time; the live switch is one-way and rolls the dates it crosses.
 3. **Ledger and account lifecycle.** New kinds and the same-sign rule for loans; customer-initiated flag; dormant reactivation. `features/accounts_lifecycle`: the dormancy job.
@@ -94,9 +93,7 @@ Test layout: the **ordinary suites** (stage 1's and `payees`, `inbound`, `passwo
     - Proof: `scripts/dev/it-oracle.sh accounts`, responses validated against the contract.
 11. **Generator.** Client methods, seeding, `clock show|set|advance|live`.
     - Proof: `python3 scripts/repo.py verify --change ledger-products --group python`.
-12. **Mobile web.** Password reset; payees; transfer flow with payee choice and recipient inquiry; products; term deposit and loan detail with early close and repay.
-    - Proof: `python3 scripts/repo.py verify --change ledger-products --group web`.
-13. **Whole run.** `it-oracle.sh all` runs: `mongo-users`; `migrations` (reset, so backfill mode); the ordinary suites; `backfill` (reset, ends in live); the ordinary suites again, now in live mode; `observability`. `e2e` seeds counterparties, switches to live, and its browser test also resets the password (the Playwright container joins the internal network to read the code from the generator listener), adds a payee, opens and closes a term deposit, and takes and repays a loan. Docs.
+12. **Whole run.** `it-oracle.sh all` runs: `mongo-users`; `migrations` (reset, so backfill mode); the ordinary suites; `backfill` (reset, ends in live); the ordinary suites again, now in live mode; `observability`. `e2e` seeds counterparties, switches to live, and runs the stage-1 browser test unchanged. Docs.
     - Proof: `scripts/dev/it-oracle.sh all`, `scripts/dev/it-oracle.sh e2e`, then `python3 scripts/repo.py verify --change ledger-products --full`.
 
 Implementation is delegated as in `weekly-fresh-oracle`: Mac Claude (Fable) leads, writes one closed brief per unit and reviews each result; coding workers run as `codex exec --yolo -m gpt-6.1-sol -c model_reasoning_effort=low`, stay inside `write_scope` and never commit. Mac Claude reruns each proof before committing. Units run one at a time, because they share `app.rs`, the ledger and the migrations.
@@ -107,7 +104,7 @@ The unit proofs above; every event written by the new suites validates against t
 
 ## Risks and mitigations
 
-- **Size of the change.** Thirteen units, each proved and committed separately; the pull request description lists them so the review can follow commit by commit.
+- **Size of the change.** Twelve units, each proved and committed separately; the pull request description lists them so the review can follow commit by commit.
 - **Clock barrier stalls or deadlocks.** The barrier is taken once per request, before any database work, and never while holding a row lock; unit 2 tests both waiting directions, the timeout and cancellation.
 - **Existing suites assumed live mode and wall-clock time.** They change to read the clock; `all` runs them once in each mode.
 - **Nullable request links** weaken a constraint that stage 1 relied on. The daily close and the consistency tests check that only `SYSTEM` rows lack a request.

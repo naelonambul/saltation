@@ -14,7 +14,6 @@
   "write_scope": [
     "contracts/**",
     "bank/**",
-    "web/**",
     "generator/**",
     "scripts/dev/it-oracle.sh",
     "infra/compose/**",
