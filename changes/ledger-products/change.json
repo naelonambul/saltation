@@ -5,11 +5,11 @@
   "title": "Stage 2: ledger and products",
   "base": {
     "ref": "main",
-    "commit": "ed1fb8566a4bf0ad9c64a092b445356ef36c85bc"
+    "commit": "11c50ebe72e38dcb94bf2f65acdc78df57b9d98b"
   },
   "baseline": {
-    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
-    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
   },
   "write_scope": [
     "contracts/**",
