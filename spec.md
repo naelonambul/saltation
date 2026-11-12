@@ -375,16 +375,17 @@ Rust (axum, tokio, the `oracle` crate over Oracle Instant Client for Linux arm64
 
 ## Delivery
 
-The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold.
+The data foundation is delivered in stages, one change per stage, so each pull request stays reviewable. Each change's plan states which acceptance criteria below it proves; the data foundation is complete when all of them hold. UI work starts only after the API server is developed: stages 2 to 4 change no web app, and stage 6 builds the screens on the finished interfaces. The stage-1 mobile flow stays as it is until then; contract changes before stage 6 only add to what it uses.
 
 | Stage | Change | Delivers |
 |---|---|---|
 | 1 | `product-init` | Establishes this intent and specification as the baseline, and a walking skeleton: repository layout and registered checks; Compose stack (`local` profile) with Oracle, MongoDB, bank, nginx, Alloy, Loki, Prometheus and Grafana; migrations for customers, credentials, sessions, login attempts, accounts, transaction requests, transfers, transaction rows, daily totals, clock and outbox; login, balance, transaction history and in-bank transfer; outbox relay; `app.log` and metrics; seeding of customers and demand accounts; a minimal mobile web flow (login, balance, history, transfer); a generator that seeds and drives normal transfers |
-| 2 | ledger and products | payees, recipient inquiry, limits, inbound deposits, term deposits, loans, password reset, devices, simulated clock modes and day rollover, daily close |
-| 3 | ATM channel | ATM interface, terminals, PIN credentials and sessions |
-| 4 | admin web | analyst login and every F-39 lookup |
+| 2 | ledger and products (API server) | payees, recipient inquiry, limits, inbound deposits, term deposits, loans, password reset, devices, simulated clock modes and day rollover, daily close |
+| 3 | ATM channel (API server) | ATM interface, terminals, PIN credentials and sessions |
+| 4 | admin interface (API server) | analyst login and the read-only endpoints behind every F-39 lookup |
 | 5 | generator scenarios | personas, scenarios A to F, lookalikes, truth labels, backfill and live drivers, run manifests |
-| 6 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
+| 6 | web UI | the mobile screens of F-38 that stage 1 did not build (password reset, payees, recipient inquiry in the transfer flow, products, term deposits, loans); the admin web app with every F-39 lookup |
+| 7 | operations | Cloudflare tunnel exposure and negative tests, Grafana dashboards, retention, load tests, the 365-day backfill and 24-hour live run |
 
 ## Acceptance criteria
 
