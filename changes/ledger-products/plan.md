@@ -96,7 +96,7 @@ Test layout: the **ordinary suites** (stage 1's and `payees`, `inbound`, `passwo
 12. **Whole run.** `it-oracle.sh all` runs: `mongo-users`; `migrations` (reset, so backfill mode); the ordinary suites; `backfill` (reset, ends in live); the ordinary suites again, now in live mode; `observability`. `e2e` seeds counterparties, switches to live, and runs the stage-1 browser test unchanged. Docs.
     - Proof: `scripts/dev/it-oracle.sh all`, `scripts/dev/it-oracle.sh e2e`, then `python3 scripts/repo.py verify --change ledger-products --full`.
 
-Implementation is delegated as in `weekly-fresh-oracle`: Mac Claude (Fable) leads, writes one closed brief per unit and reviews each result; coding workers run as `codex exec --yolo -m gpt-6.1-sol -c model_reasoning_effort=low`, stay inside `write_scope` and never commit. Mac Claude reruns each proof before committing. Units run one at a time, because they share `app.rs`, the ledger and the migrations.
+Implementation is delegated as in `weekly-fresh-oracle`: the lead agent (Claude, model Fable, working on the OCI development host) writes one closed brief per unit and reviews each result; coding workers run as `codex exec --yolo -m gpt-6.1-sol -c model_reasoning_effort=low`, stay inside `write_scope` and never commit. The lead reruns each proof before committing. Units run one at a time, because they share `app.rs`, the ledger and the migrations. On the OCI host the integration suites share the CI runner's test database and lock, so a local run and a CI `oracle` job wait for each other.
 
 ## Tests and proof
 
