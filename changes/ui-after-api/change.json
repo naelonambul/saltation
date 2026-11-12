@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "ui-after-api",
+  "kind": "behavior",
+  "title": "Deliver UI work after the API server stages",
+  "base": {
+    "ref": "main",
+    "commit": "ed1fb8566a4bf0ad9c64a092b445356ef36c85bc"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    "spec.md"
+  ],
+  "approvals": []
+}
