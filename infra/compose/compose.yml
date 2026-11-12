@@ -1,5 +1,6 @@
 # Saltation stack. Stage 1 services; `cloudflared` arrives in stage 6.
-# Limits follow spec N-7; the `local` profile publishes ports on localhost only.
+# Limits follow spec N-7. Ports are published on localhost; *_PUBLISH set to
+# `127.0.0.1:` picks a free host port (used by the test project on shared hosts).
 name: saltation
 
 x-logging: &logging
@@ -19,7 +20,7 @@ services:
       - oradata:/opt/oracle/oradata
       - ../oracle/setup:/opt/oracle/scripts/setup:ro
     networks: [data]
-    ports: ["127.0.0.1:1521:1521"]
+    ports: ["${ORACLE_PUBLISH:-127.0.0.1:1521}:1521"]
     healthcheck:
       test: ["CMD-SHELL", "test -f /opt/oracle/oradata/.saltation-ready && /opt/oracle/checkDBStatus.sh"]
       interval: 30s
@@ -44,7 +45,7 @@ services:
       - mongodata:/data/db
       - ../mongo/init:/docker-entrypoint-initdb.d:ro
     networks: [data]
-    ports: ["127.0.0.1:27017:27017"]
+    ports: ["${MONGO_PUBLISH:-127.0.0.1:27017}:27017"]
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
@@ -73,7 +74,7 @@ services:
     volumes:
       - applogs:/var/log/saltation
     networks: [data, edge, internal, obs]
-    ports: ["127.0.0.1:8080:8080"]
+    ports: ["${BANK_PUBLISH:-127.0.0.1:8080}:8080"]
     depends_on:
       oracle: { condition: service_healthy }
       mongo: { condition: service_healthy }
@@ -99,7 +100,7 @@ services:
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     networks: [edge]
-    ports: ["127.0.0.1:8088:8088"]
+    ports: ["${WEB_PUBLISH:-127.0.0.1:8088}:8088"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8088/healthz | grep -q ok"]
       interval: 10s
@@ -191,7 +192,7 @@ services:
       - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafanadata:/var/lib/grafana
     networks: [obs]
-    ports: ["127.0.0.1:3000:3000"]
+    ports: ["${GRAFANA_PUBLISH:-127.0.0.1:3000}:3000"]
     depends_on: [loki, prometheus]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
