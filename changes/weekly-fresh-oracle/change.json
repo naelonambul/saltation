@@ -15,5 +15,14 @@
     ".github/workflows/weekly-fresh.yml",
     "docs/dev-host.md"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:28175d47ee0f5bce45420e5607fb23d35214a80b94d8795d0d86f49f551c14de",
+      "by": "naelonambul",
+      "at": "2026-11-12T09:18:49Z",
+      "write_scope_sha256": "sha256:172a75c84db9c47872d4c356a6d09a8726d9c8b0dd142d1e7f7d93ddc95da979",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:28175d47)"
+    }
+  ]
 }
