@@ -110,6 +110,22 @@ services:
         limits: { cpus: "0.25", memory: 128m }
     logging: *logging
 
+  # Run on demand: docker compose --profile tools run --rm generator <command>
+  generator:
+    build:
+      context: ../../generator
+    image: saltation/generator:local
+    profiles: [tools]
+    environment:
+      SALTATION_BANK_URL: http://bank:8081
+      MONGO_TRUTH_URI: mongodb://generator:${MONGO_GENERATOR_PASSWORD:?set in .env}@mongo:27017/truth
+      SALTATION_GEN_SEED: ${SALTATION_GEN_SEED:-20261112}
+    networks: [internal, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 1g }
+    logging: *logging
+
   alloy:
     image: grafana/alloy:v1.9.2
     profiles: [local, ci]
