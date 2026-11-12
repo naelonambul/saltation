@@ -1,0 +1,7 @@
+# Build context is the repository root (see web/Dockerfile).
+**/node_modules
+**/dist
+bank
+generator
+infra/oracle
+.git
