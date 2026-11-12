@@ -14,5 +14,14 @@
   "write_scope": [
     "infra/compose/compose.yml"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ae027753278f2a541abab1c1362635f72d1e6e2d44d11a1b0dfa4e2979297a1b",
+      "by": "naelonambul",
+      "at": "2026-11-12T05:49:04Z",
+      "write_scope_sha256": "sha256:19cdf57a47155210afab40b92fee4bceb99031629d769f61ea077bfed366d4cd",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:ae027753)"
+    }
+  ]
 }
