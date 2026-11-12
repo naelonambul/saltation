@@ -15,5 +15,13 @@
     "intent.md",
     "spec.md"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "intent.md",
+      "sha256": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+      "by": "naelonambul",
+      "at": "2026-11-12T10:53:42Z",
+      "note": "Owner in session: \uc2b9\uc778 (debit-card intent with GPS, dollar anywhere, yuan at 200 won; sha256:802a2659)"
+    }
+  ]
 }
