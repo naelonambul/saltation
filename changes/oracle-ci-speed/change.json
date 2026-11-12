@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "oracle-ci-speed",
+  "kind": "implementation",
+  "title": "Reuse the Oracle test database between CI runs",
+  "base": {
+    "ref": "main",
+    "commit": "48b1de80d8a04b86c33b477a911a1522ecb3f837"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    "scripts/dev/it-oracle.sh",
+    "bank/.dockerignore",
+    "web/Dockerfile.dockerignore",
+    "docs/dev-host.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:28f20a1902d37119fe4f95f2a1cd9583b56cf8685bd9f9bfc8985c455d5e4520",
+      "by": "naelonambul",
+      "at": "2026-11-12T06:02:24Z",
+      "write_scope_sha256": "sha256:a80635b40376f4f8d892e43aa72cfce83671cb63319f2a895698c50d9cfe201e",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:28f20a19)"
+    }
+  ]
+}

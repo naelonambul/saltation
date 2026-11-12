@@ -62,7 +62,7 @@ Registered in `checks.json`; run them all with `python3 scripts/repo.py verify -
 | `python` | `scripts/dev/ci-py.sh lint\|test` | Docker |
 | `oracle` | `scripts/dev/it-oracle.sh all`, Compose config check | Docker and the `saltation/oracle-ee:19.19` image |
 
-`scripts/dev/it-oracle.sh` runs Oracle and MongoDB in a separate Compose project (`saltation-it`) and accepts a single target: `mongo-users`, `migrations`, `listeners`, `auth`, `accounts`, `transfers`, `outbox`, `outbox-outage` (stops MongoDB for 120 s during load; about 5 minutes), `observability` or `all`. `--fresh` recreates its volumes.
+`scripts/dev/it-oracle.sh` runs Oracle and MongoDB in a separate Compose project (`saltation-it`). Its credentials and lock live in `$SALTATION_IT_DIR` (default `~/.cache/saltation-it`), outside the checkout, so the test database is created once and reused: a typical run skips database creation. The volumes are recreated when the env file is new, when `--fresh` is given, or when the setup key changes (a hash of `infra/oracle/setup/*`, `infra/mongo/init/*`, `infra/oracle/build.sh` and the Oracle image ID), or when the database volumes are not the ones this state created (for example volumes recreated by an older version of the script). Each run resets the schema and `bank_logs.events`, stops application containers before the database targets, and holds a per-host lock. To recover by hand, run `scripts/dev/it-oracle.sh all --fresh` or delete the state directory. It accepts a single target: `mongo-users`, `migrations`, `listeners`, `auth`, `accounts`, `transfers`, `outbox`, `outbox-outage` (stops MongoDB for 120 s during load; about 5 minutes), `observability` or `all`. `--fresh` recreates its volumes.
 
 ## Self-hosted runner on the OCI host (owner)
 
