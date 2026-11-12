@@ -17,5 +17,14 @@
     "bank/src/main.rs",
     "generator/saltation_gen/config/__init__.py"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:d4cfce1646655e83792a644f0a0ab0c0b998d33b5f24fef9b3d4b25e83522fb3",
+      "by": "naelonambul",
+      "at": "2026-11-12T05:20:18Z",
+      "write_scope_sha256": "sha256:811e4eaab1bd111505e35e2beab23d406838b62c3032aac5eff584c283c02b35",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:d4cfce16)"
+    }
+  ]
 }
