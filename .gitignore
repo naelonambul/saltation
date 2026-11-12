@@ -105,3 +105,14 @@ test-results/
 # repo.py verify evidence (raw logs + evidence.json per run)
 # -----------------------------------------------------------------------------
 .evidence/
+
+# Saltation
+target/
+node_modules/
+dist/
+.venv/
+infra/compose/.env
+infra/compose/.env.it
+*_db_home.zip
+web/packages/api-client/src/schema.ts
+playwright-report/

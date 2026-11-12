@@ -5,11 +5,234 @@
     {
       "id": "control-plane",
       "group": "core",
-      "argv": ["python3", "scripts/tests/run.py"],
+      "argv": [
+        "python3",
+        "scripts/tests/run.py"
+      ],
       "cwd": ".",
       "timeout_seconds": 600,
-      "paths": ["scripts/**", "checks.json", "changes/**", ".github/**", ".claude/**", ".agents/**", "AGENTS.md", "intent.md", "spec.md", ".gitattributes"],
-      "requires": ["python3", "git"]
+      "paths": [
+        "scripts/**",
+        "checks.json",
+        "changes/**",
+        ".github/**",
+        ".claude/**",
+        ".agents/**",
+        "AGENTS.md",
+        "intent.md",
+        "spec.md",
+        ".gitattributes"
+      ],
+      "requires": [
+        "python3",
+        "git"
+      ]
+    },
+    {
+      "id": "rust-fmt",
+      "group": "rust",
+      "argv": [
+        "scripts/dev/ci-rust.sh",
+        "fmt"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "bank/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "rust-clippy",
+      "group": "rust",
+      "argv": [
+        "scripts/dev/ci-rust.sh",
+        "clippy"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "bank/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "rust-unit",
+      "group": "rust",
+      "argv": [
+        "scripts/dev/ci-rust.sh",
+        "test"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "bank/**",
+        "contracts/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "web-lint",
+      "group": "web",
+      "argv": [
+        "scripts/dev/ci-web.sh",
+        "lint"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "web/**",
+        "contracts/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "web-typecheck",
+      "group": "web",
+      "argv": [
+        "scripts/dev/ci-web.sh",
+        "typecheck"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "web/**",
+        "contracts/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "web-test",
+      "group": "web",
+      "argv": [
+        "scripts/dev/ci-web.sh",
+        "test"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "web/**",
+        "contracts/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "web-build",
+      "group": "web",
+      "argv": [
+        "scripts/dev/ci-web.sh",
+        "build"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "web/**",
+        "contracts/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "py-lint",
+      "group": "python",
+      "argv": [
+        "scripts/dev/ci-py.sh",
+        "lint"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "generator/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "py-test",
+      "group": "python",
+      "argv": [
+        "scripts/dev/ci-py.sh",
+        "test"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1800,
+      "paths": [
+        "generator/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
+    },
+    {
+      "id": "compose-config",
+      "group": "oracle",
+      "argv": [
+        "docker",
+        "compose",
+        "-f",
+        "infra/compose/compose.yml",
+        "--env-file",
+        "infra/compose/.env.example",
+        "--profile",
+        "local",
+        "--profile",
+        "tools",
+        "config",
+        "-q"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 120,
+      "paths": [
+        "infra/**"
+      ],
+      "requires": [
+        "docker"
+      ]
+    },
+    {
+      "id": "oracle-integration",
+      "group": "oracle",
+      "argv": [
+        "scripts/dev/it-oracle.sh",
+        "all"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 5400,
+      "paths": [
+        "bank/**",
+        "infra/**",
+        "contracts/**",
+        "generator/**",
+        "web/**",
+        "scripts/dev/**"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
     }
   ]
 }

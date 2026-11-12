@@ -1,0 +1,22 @@
+{
+  "name": "saltation-web",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "gen": "pnpm --filter @saltation/api-client gen",
+    "lint": "pnpm gen && eslint .",
+    "typecheck": "pnpm gen && pnpm -r typecheck",
+    "test": "pnpm gen && pnpm -r test",
+    "build": "pnpm gen && pnpm -r build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "eslint-plugin-import-x": "^4.18.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.2"
+  }
+}

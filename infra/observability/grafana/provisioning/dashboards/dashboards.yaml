@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: saltation
+    folder: Saltation
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

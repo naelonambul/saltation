@@ -1,0 +1,26 @@
+// Tails the bank's app.log (JSON lines, rotated daily as app.YYYY-MM-DD.log)
+// and ships it to Loki. Low-cardinality labels only; request_id stays in the line.
+local.file_match "bank" {
+  path_targets = [{ "__path__" = "/var/log/saltation/app*.log", "job" = "bank" }]
+}
+
+loki.source.file "bank" {
+  targets    = local.file_match.bank.targets
+  forward_to = [loki.process.bank.receiver]
+}
+
+loki.process "bank" {
+  stage.json {
+    expressions = { level = "level", listener = "listener" }
+  }
+  stage.labels {
+    values = { level = "", listener = "" }
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

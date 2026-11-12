@@ -1,0 +1,220 @@
+# Saltation stack. Stage 1 services; `cloudflared` arrives in stage 6.
+# Limits follow spec N-7. Ports are published on localhost; *_PUBLISH set to
+# `127.0.0.1:` picks a free host port (used by the test project on shared hosts).
+name: saltation
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  oracle:
+    image: saltation/oracle-ee:19.19
+    profiles: [local, ci]
+    environment:
+      ORACLE_PWD: ${ORACLE_PWD:?set in .env}
+      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
+      INIT_SGA_SIZE: "3584"
+      INIT_PGA_SIZE: "1024"
+    volumes:
+      - oradata:/opt/oracle/oradata
+      - ../oracle/setup:/opt/oracle/scripts/setup:ro
+    networks: [data]
+    ports: ["${ORACLE_PUBLISH:-127.0.0.1:1521}:1521"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /opt/oracle/oradata/.saltation-ready && /opt/oracle/checkDBStatus.sh"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 30m
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 6g }
+    logging: *logging
+
+  mongo:
+    image: mongo:8.0.38
+    profiles: [local, ci]
+    command: ["--auth", "--wiredTigerCacheSizeGB", "1.5"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?set in .env}
+      MONGO_BANK_PASSWORD: ${MONGO_BANK_PASSWORD:?set in .env}
+      MONGO_GENERATOR_PASSWORD: ${MONGO_GENERATOR_PASSWORD:?set in .env}
+    volumes:
+      - mongodata:/data/db
+      - ../mongo/init:/docker-entrypoint-initdb.d:ro
+    networks: [data]
+    ports: ["${MONGO_PUBLISH:-127.0.0.1:27017}:27017"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 3g }
+    logging: *logging
+
+  bank:
+    build:
+      context: ../../bank
+      target: runtime
+    image: saltation/bank:local
+    profiles: [local, ci]
+    environment:
+      SALTATION_DB_USER: saltation
+      SALTATION_DB_PASSWORD: ${SALTATION_DB_PASSWORD:?set in .env}
+      SALTATION_DB_CONNECT: oracle:1521/ORCLPDB1
+      MONGO_URI: mongodb://bank:${MONGO_BANK_PASSWORD:?set in .env}@mongo:27017/bank_logs
+      SALTATION_LOG_DIR: /var/log/saltation
+      SALTATION_CORS_ORIGINS: ${SALTATION_CORS_ORIGINS:-http://localhost:8088}
+      RUST_LOG: info
+    volumes:
+      - applogs:/var/log/saltation
+    networks: [data, edge, internal, obs]
+    ports: ["${BANK_PUBLISH:-127.0.0.1:8080}:8080"]
+    depends_on:
+      oracle: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+    logging: *logging
+
+  web:
+    build:
+      context: ../..
+      dockerfile: web/Dockerfile
+      args:
+        VITE_API_BASE: ${SALTATION_API_BASE:-http://localhost:8080}
+    image: saltation/web:local
+    profiles: [local, ci]
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [edge]
+    ports: ["${WEB_PUBLISH:-127.0.0.1:8088}:8088"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8088/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+    logging: *logging
+
+  # Run on demand: docker compose --profile tools run --rm generator <command>
+  generator:
+    build:
+      context: ../../generator
+    image: saltation/generator:local
+    profiles: [tools]
+    environment:
+      SALTATION_BANK_URL: http://bank:8081
+      MONGO_TRUTH_URI: mongodb://generator:${MONGO_GENERATOR_PASSWORD:?set in .env}@mongo:27017/truth
+      SALTATION_GEN_SEED: ${SALTATION_GEN_SEED:-20261112}
+    networks: [internal, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 1g }
+    logging: *logging
+
+  alloy:
+    image: grafana/alloy:v1.9.2
+    profiles: [local, ci]
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ../observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - applogs:/var/log/saltation:ro
+      - alloydata:/var/lib/alloy/data
+    networks: [obs]
+    depends_on: [loki]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256m }
+    logging: *logging
+
+  loki:
+    image: grafana/loki:3.5.3
+    profiles: [local, ci]
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ../observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - lokidata:/loki
+    networks: [obs]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 768m }
+    logging: *logging
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [local, ci]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    networks: [obs]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready | grep -q Ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 768m }
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [local, ci]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    networks: [obs]
+    ports: ["${GRAFANA_PUBLISH:-127.0.0.1:3000}:3000"]
+    depends_on: [loki, prometheus]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256m }
+    logging: *logging
+
+networks:
+  data: {}
+  edge: {}
+  internal: {}
+  obs: {}
+
+volumes:
+  oradata: {}
+  mongodata: {}
+  applogs: {}
+  alloydata: {}
+  lokidata: {}
+  promdata: {}
+  grafanadata: {}

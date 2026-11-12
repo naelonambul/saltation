@@ -1,0 +1,39 @@
+:root {
+  --ink: #12201f;
+  --muted: #5d6b6a;
+  --brand: #0f3d3e;
+  --accent: #e2a03f;
+  --line: #e3e7e6;
+  --bg: #f5f3ee;
+  font-family: "Pretendard", -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.screen { max-width: 480px; min-height: 100dvh; margin: 0 auto; background: #fff; display: flex; flex-direction: column; }
+.bar { display: grid; grid-template-columns: 48px 1fr 48px; align-items: center; height: 56px; background: var(--brand); color: #fff; }
+.bar h1 { margin: 0; font-size: 17px; text-align: center; font-weight: 600; }
+.back { background: none; border: 0; color: #fff; font-size: 28px; cursor: pointer; }
+.content { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.lead { margin: 4px 0 8px; color: var(--muted); }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }
+.field input, .field select { font-size: 17px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: #fff; }
+.primary { font-size: 17px; padding: 14px; border: 0; border-radius: 12px; background: var(--brand); color: #fff; font-weight: 600; cursor: pointer; }
+.primary:disabled { opacity: 0.45; cursor: default; }
+.link { background: none; border: 0; color: var(--brand); padding: 10px; cursor: pointer; font-size: 15px; }
+.notice { margin: 0; padding: 12px; border-radius: 10px; font-size: 15px; }
+.notice.error { background: #fdecea; color: #8a1c13; }
+.notice.ok { background: #eaf4ef; color: #1d4d36; }
+.muted { color: var(--muted); font-size: 13px; }
+.cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.card { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 4px; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fff; cursor: pointer; font-size: 15px; }
+.amount { font-size: 22px; margin-top: 6px; }
+.balance { font-size: 28px; font-weight: 700; margin: 4px 0 8px; }
+.rows { list-style: none; margin: 0; padding: 0; }
+.rows li { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.rows li div { display: flex; flex-direction: column; gap: 4px; }
+.right { text-align: right; align-items: flex-end; }
+.in { color: #1f5fbf; }
+.out { color: var(--ink); }
