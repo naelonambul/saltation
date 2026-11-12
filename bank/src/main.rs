@@ -57,7 +57,16 @@ async fn main() -> anyhow::Result<()> {
     let clock = Clock::init(db.clone())
         .await
         .context("initialise the clock")?;
-    let state = AppState { db, clock };
+    let state = AppState {
+        db: db.clone(),
+        clock,
+    };
+    match std::env::var("MONGO_URI") {
+        Ok(uri) => {
+            tokio::spawn(bank::features::outbox_relay::run(db, uri));
+        }
+        Err(_) => tracing::warn!("MONGO_URI is not set; the outbox relay is not running"),
+    }
 
     let public = serve(
         "public",

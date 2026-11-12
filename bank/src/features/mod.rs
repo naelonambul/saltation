@@ -4,4 +4,5 @@
 pub mod accounts;
 pub mod auth;
 pub mod internal;
+pub mod outbox_relay;
 pub mod transfers;

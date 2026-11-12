@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, listeners, auth, accounts, transfers (more are added per plan step)
+#   targets: mongo-users, migrations, listeners, auth, accounts, transfers, outbox, outbox-outage (more are added per plan step)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -34,12 +34,14 @@ reset_schema() {
 }
 
 cargo_test() {
+  local extra_env=()
+  [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null
   docker run --rm --network "${project}_data" \
     -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 \
-    -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
+    -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
     -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
-    saltation/bank-dev:local cargo test --locked --test "$1" -- --test-threads=1
+    saltation/bank-dev:local cargo test --locked --test "$1" -- --test-threads=1 "${@:2}"
 }
 
 mongo_users() {
@@ -57,6 +59,15 @@ mongo_users() {
   echo "mongo-users: each user is denied on the other database"
 }
 
+# Stops MongoDB 10 s into the outage test for 120 s, then starts it again.
+outbox_outage() {
+  ( sleep 10; "${compose[@]}" stop mongo >/dev/null; echo "outage: mongo stopped";
+    sleep 120; "${compose[@]}" start mongo >/dev/null; echo "outage: mongo started" ) &
+  local chaos=$!
+  OUTBOX_OUTAGE_TEST=1 cargo_test outbox outage_then_full_delivery --nocapture
+  wait "$chaos"
+}
+
 run_target() {
   case "$1" in
     migrations)  reset_schema; cargo_test migrations ;;
@@ -64,13 +75,15 @@ run_target() {
     auth)        cargo_test auth ;;
     accounts)    cargo_test accounts ;;
     transfers)   cargo_test transfers ;;
+    outbox)      cargo_test outbox ;;
+    outbox-outage) outbox_outage ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
 }
 
 if [ "$target" = all ]; then
-  for t in mongo-users migrations listeners auth accounts transfers; do run_target "$t"; done
+  for t in mongo-users migrations listeners auth accounts transfers outbox; do run_target "$t"; done
 else
   run_target "$target"
 fi

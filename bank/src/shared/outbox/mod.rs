@@ -10,10 +10,11 @@ use serde_json::Value;
 use ulid::Generator;
 
 use crate::shared::context::RequestContext;
-use crate::shared::db::{DbError, Session, SqlStmt};
+use crate::shared::db::{Db, DbError, Session, SqlStmt};
 use crate::sql_stmt;
 
 const INSERT_EVENT: SqlStmt = sql_stmt!("outbox.insert_event", "sql/insert_event.sql");
+const SELECT_BACKLOG: SqlStmt = sql_stmt!("outbox.select_backlog", "sql/select_backlog.sql");
 const SCHEMA: &str = "saltation.log/1";
 
 /// Monotonic ULIDs, so event IDs sort in creation order within the process.
@@ -123,6 +124,11 @@ pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
         serde_json::to_string(event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
     session.execute(&INSERT_EVENT, &[&event.event_id, &json])?;
     Ok(())
+}
+
+/// Undelivered event count and the oldest event's age in seconds (spec F-36a).
+pub async fn backlog(db: &Db) -> Result<(i64, f64), DbError> {
+    db.run(|s| s.query_row(&SELECT_BACKLOG, &[])).await
 }
 
 #[cfg(test)]

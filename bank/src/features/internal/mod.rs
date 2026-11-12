@@ -18,6 +18,7 @@ use crate::shared::auth;
 use crate::shared::context::RequestContext;
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
+use crate::shared::outbox;
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
@@ -44,6 +45,7 @@ const MAX_BATCH: usize = 500;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/internal/v1/clock", get(read_clock))
+        .route("/internal/v1/outbox", get(read_outbox))
         .route("/internal/v1/seed/customers", post(seed_customers))
         .route("/internal/v1/seed/accounts", post(seed_accounts))
 }
@@ -77,6 +79,20 @@ async fn read_clock(
 ) -> Result<Response, ApiError> {
     let clock = state.clock.state().await.map_err(|e| db_error(&ctx, &e))?;
     Ok(api::ok(&ctx, clock))
+}
+
+/// Outbox backlog, used by the generator for backpressure (spec F-36a).
+async fn read_outbox(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+) -> Result<Response, ApiError> {
+    let (undelivered, oldest) = outbox::backlog(&state.db)
+        .await
+        .map_err(|e| db_error(&ctx, &e))?;
+    Ok(api::ok(
+        &ctx,
+        json!({ "undelivered": undelivered, "oldest_age_seconds": oldest }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

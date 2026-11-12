@@ -287,6 +287,25 @@ impl Session {
         self.timed(stmt, |c| c.query_as::<T>(stmt.sql, params)?.collect())
     }
 
+    /// Executes a statement once per row of binds in one round trip (array DML).
+    pub fn execute_batch(
+        &mut self,
+        stmt: &SqlStmt,
+        rows: &[Vec<&dyn ToSql>],
+    ) -> Result<(), DbError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let size = rows.len();
+        self.timed(stmt, |c| {
+            let mut batch = c.batch(stmt.sql, size).build()?;
+            for row in rows {
+                batch.append_row(row)?;
+            }
+            batch.execute()
+        })
+    }
+
     pub fn commit(&mut self) -> Result<(), DbError> {
         self.conn.commit()?;
         Ok(())
