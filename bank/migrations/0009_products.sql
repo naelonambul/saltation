@@ -25,7 +25,8 @@ CREATE TABLE deposit_detail (
   principal          NUMBER(15)   NOT NULL CHECK (principal >= 1),
   maturity_date      DATE         NOT NULL,
   closed_at          TIMESTAMP(6) WITH TIME ZONE,
-  close_type         VARCHAR2(10) CHECK (close_type IN ('EARLY', 'MATURITY'))
+  close_type         VARCHAR2(10) CHECK (close_type IN ('EARLY', 'MATURITY')),
+  recorded_at        TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL
 )
 /
 CREATE INDEX deposit_detail_maturity_ix ON deposit_detail (maturity_date, closed_at)
@@ -35,5 +36,6 @@ CREATE TABLE loan_detail (
   linked_account_id  NUMBER(12)   NOT NULL REFERENCES account (account_id),
   principal          NUMBER(15)   NOT NULL CHECK (principal >= 1),
   disbursed_at       TIMESTAMP(6) WITH TIME ZONE NOT NULL,
-  maturity_date      DATE         NOT NULL
+  maturity_date      DATE         NOT NULL,
+  recorded_at        TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL
 )

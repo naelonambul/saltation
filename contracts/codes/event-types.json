@@ -4,6 +4,7 @@
     "request.completed": "every API request, with endpoint, response codes and duration",
     "login.succeeded": "customer login",
     "login.failed": "rejected login",
+    "logout": "customer logout",
     "device.new": "first login from a device",
     "password_reset.requested": "reset code issued, or a request for an unknown phone",
     "password_reset.completed": "password changed with a valid code",

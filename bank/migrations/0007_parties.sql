@@ -12,6 +12,7 @@ CREATE TABLE counterparty_client (
   secret_hash             VARCHAR2(200)  NOT NULL,
   institution_code        VARCHAR2(3)    NOT NULL REFERENCES institution (institution_code),
   scope                   VARCHAR2(10)   NOT NULL CHECK (scope IN ('oob', 'card')),
+  created_at              TIMESTAMP(6) WITH TIME ZONE NOT NULL,
   recorded_at             TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL
 )
 /
@@ -22,6 +23,7 @@ CREATE TABLE counterparty (
   institution_code   VARCHAR2(3)    NOT NULL REFERENCES institution (institution_code),
   account_no         VARCHAR2(16)   NOT NULL,
   name               VARCHAR2(60 CHAR) NOT NULL,
+  created_at         TIMESTAMP(6) WITH TIME ZONE NOT NULL,
   recorded_at        TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
   CONSTRAINT counterparty_account_uk UNIQUE (institution_code, account_no)
 )
