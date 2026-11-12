@@ -36,5 +36,8 @@ async fn migrations_apply_once_and_are_recorded() {
         outbox_ts, "OUTBOX_TS/OUTBOX_TS",
         "outbox and its index live in the capped tablespace"
     );
-    assert!(tables >= 20, "expected the stage-1 tables, found {tables}");
+    assert!(
+        tables >= 29,
+        "expected the stage-1 and stage-2 tables, found {tables}"
+    );
 }

@@ -1,0 +1,16 @@
+{
+  "description": "event_type values of business events (spec F-35) written through the outbox to bank_logs. Bank-originated events have channel SYSTEM and a null request_id.",
+  "event_types": {
+    "request.completed": "every API request, with endpoint, response codes and duration",
+    "login.succeeded": "customer login",
+    "login.failed": "rejected login",
+    "device.new": "first login from a device",
+    "password_reset.requested": "reset code issued, or a request for an unknown phone",
+    "password_reset.completed": "password changed with a valid code",
+    "password_reset.failed": "wrong, expired or voided code",
+    "payee.registered": "payee added",
+    "payee.deleted": "payee removed",
+    "account.status_changed": "account became dormant, active or closed",
+    "rollover.job_completed": "a day-rollover job (maturity, dormancy, daily_close) finished for a business date"
+  }
+}

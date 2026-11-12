@@ -3,7 +3,7 @@ info:
   title: Saltation public interface (Open Banking-shaped)
   version: 0.1.0
   description: >
-    Stage-1 subset of the customer interface. Paths, field names, types and
+    The customer interface through stage 2 (ledger and products). Paths, field names, types and
     lengths follow KFTC Open Banking v3.3.6 where an equivalent exists; /v2.0/ext
     paths are Saltation extensions. Numeric values are JSON strings, as in KFTC.
     Every response carries the common envelope and an X-Request-Id header.
@@ -184,6 +184,15 @@ components:
           properties:
             rsp_code: { enum: [A0003, A0004] }
             bank_rsp_code: { enum: ["403", "404", "405", "406"] }
+    BankRejected:
+      description: A bank-level rejection of a product, payee or inquiry request.
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - type: object
+          properties:
+            rsp_code: { enum: [A0003, A0004] }
+            bank_rsp_code: { enum: ["403", "404", "405", "406", "407", "408"] }
     TransferResultResponse:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -201,6 +210,184 @@ components:
                   bank_tran_id: { type: string }
                   bank_rsp_code: { type: string, pattern: "^[0-9]{3}$" }
                   tran_amt: { $ref: "#/components/schemas/AmountString" }
+    BankTranId: { type: string, pattern: "^[A-Za-z0-9]{10}[UM][A-Za-z0-9]{9}$" }
+    FintechUseNum: { type: string, minLength: 24, maxLength: 24 }
+    NumericId: { type: string, pattern: "^[0-9]{1,12}$" }
+    DateString: { type: string, pattern: "^[0-9]{8}$" }
+    OptionalDateString: { type: string, pattern: "^([0-9]{8})?$" }
+    DateTimeString: { type: string, pattern: "^[0-9]{14}$" }
+    PasswordResetRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone: { type: string, maxLength: 20 }
+    PasswordResetConfirm:
+      type: object
+      required: [phone, code, new_password]
+      properties:
+        phone: { type: string, maxLength: 20 }
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        new_password: { type: string, minLength: 8, maxLength: 128 }
+    InquiryReceiveRequest:
+      type: object
+      required: [bank_tran_id, bank_code_std, account_num, tran_amt, tran_dtime]
+      properties:
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+        account_num: { type: string, pattern: "^[0-9]{1,16}$" }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+        tran_dtime: { $ref: "#/components/schemas/DateTimeString" }
+        print_content: { type: string, maxLength: 20 }
+    InquiryReceiveResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - type: object
+          required: [bank_code_std, account_num_masked, account_holder_name, tran_amt]
+          properties:
+            rsp_code: { const: A0000 }
+            bank_rsp_code: { const: "000" }
+            bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+            account_num_masked: { type: string, maxLength: 20 }
+            account_holder_name: { type: string, maxLength: 50 }
+            tran_amt: { $ref: "#/components/schemas/AmountString" }
+    Payee:
+      type: object
+      required: [payee_id, bank_code_std, bank_name, account_num, account_holder_name, alias, registered_dtime]
+      properties:
+        payee_id: { $ref: "#/components/schemas/NumericId" }
+        bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+        bank_name: { type: string, maxLength: 20 }
+        account_num: { type: string, pattern: "^[0-9]{1,16}$" }
+        account_holder_name: { type: string, maxLength: 50 }
+        alias: { type: string, maxLength: 40 }
+        registered_dtime: { $ref: "#/components/schemas/DateTimeString" }
+    PayeeCreateRequest:
+      description: The bank resolves the holder name from the account; an unknown account is rejected.
+      type: object
+      required: [bank_code_std, account_num]
+      properties:
+        bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+        account_num: { type: string, pattern: "^[0-9]{1,16}$" }
+        alias: { type: string, maxLength: 40 }
+    PayeeResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/Payee"
+    PayeeListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [res_cnt, res_list]
+          properties:
+            res_cnt: { type: string, pattern: "^[0-9]{1,5}$" }
+            res_list: { type: array, items: { $ref: "#/components/schemas/Payee" } }
+    ProductTerms:
+      type: object
+      required: [terms_id, term_months, min_amt, max_amt, early_close_yn]
+      properties:
+        terms_id: { $ref: "#/components/schemas/NumericId" }
+        term_months: { type: string, pattern: "^([0-9]{1,4})?$", description: Empty for a product without a term. }
+        min_amt: { $ref: "#/components/schemas/AmountString" }
+        max_amt: { $ref: "#/components/schemas/AmountString" }
+        early_close_yn: { enum: ["Y", "N"] }
+    ProductItem:
+      type: object
+      required: [product_id, product_type, product_name, terms_list]
+      properties:
+        product_id: { $ref: "#/components/schemas/NumericId" }
+        product_type: { enum: [DEMAND, TERM, LOAN] }
+        product_name: { type: string, maxLength: 100 }
+        terms_list: { type: array, items: { $ref: "#/components/schemas/ProductTerms" } }
+    ProductListResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [res_cnt, res_list]
+          properties:
+            res_cnt: { type: string, pattern: "^[0-9]{1,5}$" }
+            res_list: { type: array, items: { $ref: "#/components/schemas/ProductItem" } }
+    ProductOpenRequest:
+      description: >
+        Opens a term deposit or takes a loan. fintech_use_num is the customer's
+        demand deposit account that pays the principal (deposit) or receives it (loan).
+      type: object
+      required: [bank_tran_id, fintech_use_num, terms_id, tran_amt, tran_dtime]
+      properties:
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        fintech_use_num: { $ref: "#/components/schemas/FintechUseNum" }
+        terms_id: { $ref: "#/components/schemas/NumericId" }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+        tran_dtime: { $ref: "#/components/schemas/DateTimeString" }
+    DepositCloseRequest:
+      type: object
+      required: [bank_tran_id, tran_dtime]
+      properties:
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        tran_dtime: { $ref: "#/components/schemas/DateTimeString" }
+    LoanRepayRequest:
+      type: object
+      required: [bank_tran_id, tran_amt, tran_dtime]
+      properties:
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+        tran_dtime: { $ref: "#/components/schemas/DateTimeString" }
+    DepositDetail:
+      type: object
+      required: [deposit_id, fintech_use_num, account_num_masked, product_name, principal_amt, balance_amt, account_issue_date, maturity_date, account_state, linked_fintech_use_num, close_type, close_date]
+      properties:
+        deposit_id: { $ref: "#/components/schemas/NumericId" }
+        fintech_use_num: { $ref: "#/components/schemas/FintechUseNum" }
+        account_num_masked: { type: string, maxLength: 20 }
+        product_name: { type: string, maxLength: 100 }
+        principal_amt: { $ref: "#/components/schemas/AmountString" }
+        balance_amt: { $ref: "#/components/schemas/AmountString" }
+        account_issue_date: { $ref: "#/components/schemas/DateString" }
+        maturity_date: { $ref: "#/components/schemas/DateString" }
+        account_state: { type: string, pattern: "^[0-9]{2}$" }
+        linked_fintech_use_num: { $ref: "#/components/schemas/FintechUseNum" }
+        close_type: { enum: ["", EARLY, MATURITY] }
+        close_date: { $ref: "#/components/schemas/OptionalDateString" }
+    DepositResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/DepositDetail"
+    DepositTranResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - $ref: "#/components/schemas/DepositDetail"
+        - type: object
+          properties:
+            rsp_code: { const: A0000 }
+            bank_rsp_code: { const: "000" }
+    LoanDetail:
+      type: object
+      required: [loan_id, fintech_use_num, account_num_masked, product_name, principal_amt, balance_amt, account_issue_date, maturity_date, account_state, linked_fintech_use_num]
+      properties:
+        loan_id: { $ref: "#/components/schemas/NumericId" }
+        fintech_use_num: { $ref: "#/components/schemas/FintechUseNum" }
+        account_num_masked: { type: string, maxLength: 20 }
+        product_name: { type: string, maxLength: 100 }
+        principal_amt: { $ref: "#/components/schemas/AmountString" }
+        balance_amt: { $ref: "#/components/schemas/AmountString", description: Amount still owed. }
+        account_issue_date: { $ref: "#/components/schemas/DateString" }
+        maturity_date: { $ref: "#/components/schemas/DateString" }
+        account_state: { type: string, pattern: "^[0-9]{2}$" }
+        linked_fintech_use_num: { $ref: "#/components/schemas/FintechUseNum" }
+    LoanResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/LoanDetail"
+    LoanTranResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - $ref: "#/components/schemas/BankPart"
+        - $ref: "#/components/schemas/LoanDetail"
+        - type: object
+          properties:
+            rsp_code: { const: A0000 }
+            bank_rsp_code: { const: "000" }
 paths:
   /v2.0/ext/auth/login:
     post:
@@ -263,7 +450,7 @@ paths:
         "404": { description: Not the customer's account, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v2.0/transfer/withdraw/fin_num:
     post:
-      summary: In-bank transfer (stage 1); completes to the recipient in one call
+      summary: Transfer to an in-bank account or a simulated external counterparty account; completes to the recipient in one call
       security: [{ bearer: [] }]
       parameters: [{ $ref: "#/components/parameters/RequestId" }]
       requestBody:
@@ -280,3 +467,137 @@ paths:
       security: [{ bearer: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TransferResultResponse" } } } }
+  /v2.0/ext/auth/password_reset/request:
+    post:
+      summary: Request a password reset code (extension); answers the same for known and unknown phones
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PasswordResetRequest" } } }
+      responses:
+        "200": { description: Accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } }
+  /v2.0/ext/auth/password_reset/confirm:
+    post:
+      summary: Set a new password with the code (extension); unlocks the credential and ends the customer's sessions
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PasswordResetConfirm" } } }
+      responses:
+        "200": { description: Password changed, content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } }
+        "401": { description: Wrong, expired or voided code (rsp_code O0002), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/inquiry/receive:
+    post:
+      summary: Recipient inquiry; returns the destination holder name
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/InquiryReceiveRequest" } } }
+      responses:
+        "200": { description: Found, content: { application/json: { schema: { $ref: "#/components/schemas/InquiryReceiveResponse" } } } }
+        "422": { description: Unknown or closed account (bank_rsp_code 403, 404), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+  /v2.0/ext/payees:
+    get:
+      summary: The customer's payees, newest first (extension)
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PayeeListResponse" } } } }
+    post:
+      summary: Register a payee (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PayeeCreateRequest" } } }
+      responses:
+        "200": { description: Registered, content: { application/json: { schema: { $ref: "#/components/schemas/PayeeResponse" } } } }
+        "409": { description: Already registered (rsp_code A0007), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Unknown or closed account (bank_rsp_code 403, 404), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+    delete:
+      summary: Delete a payee (extension)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/RequestId" }
+        - { name: payee_id, in: query, required: true, schema: { $ref: "#/components/schemas/NumericId" } }
+      responses:
+        "200": { description: Deleted, content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } }
+        "404": { description: Not the customer's payee, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/products:
+    get:
+      summary: Products and their terms (extension)
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ProductListResponse" } } } }
+  /v2.0/ext/deposits:
+    post:
+      summary: Open a term deposit from a demand deposit account (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProductOpenRequest" } } }
+      responses:
+        "200": { description: Done, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/DepositTranResponse" } } } }
+        "404": { description: Not the customer's account or product, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank (bank_rsp_code), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+        "503": { description: Busy; retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/deposits/{id}:
+    get:
+      summary: A term deposit of the customer (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { $ref: "#/components/schemas/NumericId" } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/DepositResponse" } } } }
+        "404": { description: Not the customer's, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/deposits/{id}/close:
+    post:
+      summary: Close a term deposit early; the principal returns to the linked account (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }, { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/NumericId" } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DepositCloseRequest" } } }
+      responses:
+        "200": { description: Done, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/DepositTranResponse" } } } }
+        "404": { description: Not the customer's account or product, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank (bank_rsp_code), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+        "503": { description: Busy; retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/loans:
+    post:
+      summary: Take a loan; the principal is credited to a demand deposit account (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProductOpenRequest" } } }
+      responses:
+        "200": { description: Done, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/LoanTranResponse" } } } }
+        "404": { description: Not the customer's account or product, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank (bank_rsp_code), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+        "503": { description: Busy; retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/loans/{id}:
+    get:
+      summary: A loan of the customer (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { $ref: "#/components/schemas/NumericId" } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/LoanResponse" } } } }
+        "404": { description: Not the customer's, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/ext/loans/{id}/repay:
+    post:
+      summary: Repay part or all of a loan from the linked account (extension)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/RequestId" }, { name: id, in: path, required: true, schema: { $ref: "#/components/schemas/NumericId" } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LoanRepayRequest" } } }
+      responses:
+        "200": { description: Done, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/LoanTranResponse" } } } }
+        "404": { description: Not the customer's account or product, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank (bank_rsp_code), content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } } }
+        "503": { description: Busy; retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

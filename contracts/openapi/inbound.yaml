@@ -1,0 +1,145 @@
+openapi: 3.1.0
+info:
+  title: Saltation inbound interface (counterparty clients)
+  version: 0.1.0
+  description: >
+    Served on the generator listener only. A simulated counterparty client
+    (another bank's system) gets a token with client credentials and sends
+    inbound deposits to Saltation accounts. Shapes follow KFTC Open Banking
+    v3.3.6 (token issue and deposit transfer) as a subset; numeric values are
+    JSON strings. Every response carries the common envelope of public.yaml.
+servers:
+  - url: http://localhost:8081
+components:
+  securitySchemes:
+    client:
+      type: http
+      scheme: bearer
+      description: A client-credential token with scope oob.
+  schemas:
+    Envelope:
+      type: object
+      required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
+      properties:
+        api_tran_id: { type: string, maxLength: 40 }
+        api_tran_dtm: { type: string, pattern: "^[0-9]{17}$" }
+        rsp_code: { type: string, pattern: "^[A-Z][0-9]{4}$" }
+        rsp_message: { type: string, maxLength: 300 }
+        request_id: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+    Error:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            rsp_code: { not: { const: A0000 } }
+    AmountString: { type: string, pattern: "^[0-9]{1,12}$" }
+    BankTranId: { type: string, pattern: "^[A-Za-z0-9]{10}[UM][A-Za-z0-9]{9}$" }
+    TokenRequest:
+      type: object
+      required: [client_id, client_secret, scope, grant_type]
+      properties:
+        client_id: { type: string, maxLength: 40 }
+        client_secret: { type: string, maxLength: 128 }
+        scope: { enum: [oob] }
+        grant_type: { const: client_credentials }
+    TokenResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [access_token, token_type, expires_in, scope, client_use_code]
+          properties:
+            access_token: { type: string, minLength: 43, maxLength: 43 }
+            token_type: { const: Bearer }
+            expires_in: { type: integer, minimum: 1 }
+            scope: { enum: [oob] }
+            client_use_code: { type: string, maxLength: 40, description: The client_id. }
+    DepositItem:
+      type: object
+      required: [tran_no, bank_tran_id, fintech_use_num, print_content, tran_amt, req_client_name, transfer_purpose]
+      properties:
+        tran_no: { const: "1" }
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        fintech_use_num: { type: string, minLength: 24, maxLength: 24, description: The receiving Saltation account. }
+        print_content: { type: string, maxLength: 20 }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+        req_client_name: { type: string, maxLength: 20, description: The sender's name. }
+        transfer_purpose: { const: TR }
+    DepositRequest:
+      description: >
+        cntr_account_num is the sending account at the client's institution; it
+        must be a seeded counterparty of that institution.
+      type: object
+      required: [cntr_account_type, cntr_account_num, wd_print_content, name_check_option, tran_dtime, req_cnt, req_list]
+      properties:
+        cntr_account_type: { const: N }
+        cntr_account_num: { type: string, pattern: "^[0-9]{1,16}$" }
+        wd_print_content: { type: string, maxLength: 20 }
+        name_check_option: { const: "off" }
+        tran_dtime: { type: string, pattern: "^[0-9]{14}$" }
+        req_cnt: { const: "1" }
+        req_list:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items: { $ref: "#/components/schemas/DepositItem" }
+    DepositResult:
+      type: object
+      required: [tran_no, bank_tran_id, bank_tran_date, bank_code_tran, bank_rsp_code, bank_rsp_message, fintech_use_num, tran_amt]
+      properties:
+        tran_no: { const: "1" }
+        bank_tran_id: { $ref: "#/components/schemas/BankTranId" }
+        bank_tran_date: { type: string, pattern: "^[0-9]{8}$" }
+        bank_code_tran: { type: string, pattern: "^[0-9]{3}$" }
+        bank_rsp_code: { type: string, pattern: "^[0-9]{3}$" }
+        bank_rsp_message: { type: string, maxLength: 100 }
+        fintech_use_num: { type: string, minLength: 24, maxLength: 24 }
+        account_num_masked: { type: string, maxLength: 20 }
+        print_content: { type: string, maxLength: 20 }
+        account_holder_name: { type: string, maxLength: 50 }
+        tran_amt: { $ref: "#/components/schemas/AmountString" }
+    DepositResponse:
+      description: >
+        rsp_code A0000 with the item's bank_rsp_code 000 when deposited. A
+        bank-level rejection answers 422 with rsp_code A0003 or A0004 and the
+        item's bank_rsp_code (403 account state, 404 unknown account).
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [wd_bank_code_std, wd_bank_name, wd_account_num_masked, wd_print_content, wd_account_holder_name, res_cnt, res_list]
+          properties:
+            wd_bank_code_std: { type: string, pattern: "^[0-9]{3}$" }
+            wd_bank_name: { type: string, maxLength: 20 }
+            wd_account_num_masked: { type: string, maxLength: 20 }
+            wd_print_content: { type: string, maxLength: 20 }
+            wd_account_holder_name: { type: string, maxLength: 50 }
+            res_cnt: { const: "1" }
+            res_list:
+              type: array
+              minItems: 1
+              maxItems: 1
+              items: { $ref: "#/components/schemas/DepositResult" }
+paths:
+  /oauth/2.0/token:
+    post:
+      summary: Client-credential token for a counterparty client
+      requestBody:
+        required: true
+        content: { application/x-www-form-urlencoded: { schema: { $ref: "#/components/schemas/TokenRequest" } } }
+      responses:
+        "200": { description: Issued, content: { application/json: { schema: { $ref: "#/components/schemas/TokenResponse" } } } }
+        "401": { description: Unknown client or wrong secret (rsp_code O0001), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: Scope not granted to the client (rsp_code O0003), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /v2.0/transfer/deposit/fin_num:
+    post:
+      summary: Inbound deposit from an external counterparty to a Saltation account
+      security: [{ client: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/DepositRequest" } } }
+      responses:
+        "200": { description: Deposited, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/DepositResponse" } } } }
+        "401": { description: Missing, expired or revoked token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: Token without scope oob (rsp_code O0003), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Rejected by the bank, content: { application/json: { schema: { $ref: "#/components/schemas/DepositResponse" } } } }
+        "503": { description: Busy; retry with the same bank_tran_id, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

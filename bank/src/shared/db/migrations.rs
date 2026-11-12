@@ -30,6 +30,10 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(4, "0004_ledger"),
     migration!(5, "0005_reference_data"),
     migration!(6, "0006_transfer_indexes"),
+    migration!(7, "0007_parties"),
+    migration!(8, "0008_payees_reset"),
+    migration!(9, "0009_products"),
+    migration!(10, "0010_rollover"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

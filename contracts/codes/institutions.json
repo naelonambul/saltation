@@ -1,6 +1,9 @@
 {
-  "description": "bank_code_std values used by Saltation. 998 is synthetic and not a real institution.",
+  "description": "bank_code_std values used by Saltation. All are synthetic: 998 is Saltation, 901 to 903 are simulated external banks; none is a real institution.",
   "institutions": [
-    { "bank_code_std": "998", "name": "살테이션은행", "type": "SALTATION" }
+    { "bank_code_std": "998", "name": "살테이션은행", "type": "SALTATION" },
+    { "bank_code_std": "901", "name": "가람은행", "type": "BANK" },
+    { "bank_code_std": "902", "name": "누리은행", "type": "BANK" },
+    { "bank_code_std": "903", "name": "한빛은행", "type": "BANK" }
   ]
 }
