@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "ui-after-api",
+  "kind": "behavior",
+  "title": "Deliver UI work after the API server stages",
+  "base": {
+    "ref": "main",
+    "commit": "ed1fb8566a4bf0ad9c64a092b445356ef36c85bc"
+  },
+  "baseline": {
+    "intent.md": "sha256:d387c7578c6584df5582175ca467f33df5a105799f2d186931aa48eeee213a98",
+    "spec.md": "sha256:bdbb3134b647a96905b4e4c6f5ae629d9f07d527f99b871f318eefdd078f82b3"
+  },
+  "write_scope": [
+    "spec.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:f55b12289d27b96998a703b1cca14eae623d9a0c5909b65758ffbbdda401bca0",
+      "by": "naelonambul",
+      "at": "2026-11-12T10:19:32Z",
+      "note": "Owner in session: \uc2ac\uc778 (typo of \uc2b9\uc778; spec sha256:f55b1228 and plan sha256:0e0e6084 presented together)"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:0e0e6084e87e4185d30c14118378f20597fe285d2039b3557e79ae0420b843f3",
+      "by": "naelonambul",
+      "at": "2026-11-12T10:19:32Z",
+      "write_scope_sha256": "sha256:62c90a57ee64f0da65d1e24bbdb1beefb5d8237bed24d6c62639a4cd2592a58c",
+      "note": "Owner in session: \uc2ac\uc778 (typo of \uc2b9\uc778; spec sha256:f55b1228 and plan sha256:0e0e6084 presented together)"
+    }
+  ]
+}
