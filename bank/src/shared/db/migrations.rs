@@ -28,6 +28,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(2, "0002_customers"),
     migration!(3, "0003_accounts"),
     migration!(4, "0004_ledger"),
+    migration!(5, "0005_reference_data"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

@@ -261,6 +261,23 @@ impl Session {
         self.timed(stmt, |c| c.query_row_as::<T>(stmt.sql, params))
     }
 
+    /// Executes a query expected to return at most one row.
+    pub fn query_opt<T: oracle::RowValue>(
+        &mut self,
+        stmt: &SqlStmt,
+        params: &[&dyn ToSql],
+    ) -> Result<Option<T>, DbError> {
+        match self.query_row(stmt, params) {
+            Ok(row) => Ok(Some(row)),
+            Err(DbError::Oracle { source, .. })
+                if source.kind() == oracle::ErrorKind::NoDataFound =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Executes a query returning any number of rows.
     pub fn query_all<T: oracle::RowValue>(
         &mut self,

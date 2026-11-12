@@ -21,7 +21,9 @@ pub struct AppState {
 }
 
 fn public_routes() -> Router<AppState> {
-    Router::new().route("/healthz", get(|| async { "ok" }))
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .merge(features::auth::router())
 }
 
 fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) -> Router {

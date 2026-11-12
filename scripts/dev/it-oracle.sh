@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, listeners (more are added per plan step)
+#   targets: mongo-users, migrations, listeners, auth (more are added per plan step)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -61,13 +61,14 @@ run_target() {
   case "$1" in
     migrations)  reset_schema; cargo_test migrations ;;
     listeners)   cargo_test listeners ;;
+    auth)        cargo_test auth ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
 }
 
 if [ "$target" = all ]; then
-  for t in mongo-users migrations listeners; do run_target "$t"; done
+  for t in mongo-users migrations listeners auth; do run_target "$t"; done
 else
   run_target "$target"
 fi
