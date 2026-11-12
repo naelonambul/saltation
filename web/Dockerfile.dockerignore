@@ -1,7 +1,13 @@
 # Build context is the repository root (see web/Dockerfile).
 **/node_modules
 **/dist
+**/test-results
+**/playwright-report
 bank
 generator
 infra/oracle
 .git
+.evidence
+changes
+scripts
+docs

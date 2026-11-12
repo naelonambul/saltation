@@ -1,0 +1,5 @@
+# The release image needs only Cargo files, src and migrations.
+target
+tests
+*.md
+.DS_Store
