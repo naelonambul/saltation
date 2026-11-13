@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "request-outcomes",
+  "kind": "implementation",
+  "title": "Record every request's outcome (F-19, F-35)",
+  "base": {
+    "ref": "main",
+    "commit": "0d5703e1198355d67e65ac3f7106e309dfbfcaf2"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/**",
+    "contracts/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/dev-host.md"
+  ],
+  "approvals": []
+}
