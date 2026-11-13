@@ -22,6 +22,7 @@ use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
 const SELECT_LOGIN: SqlStmt = sql_stmt!("auth.select_login", "sql/select_login.sql");
+const LOCK_CREDENTIAL: SqlStmt = sql_stmt!("auth.lock_credential", "sql/lock_credential.sql");
 const RECORD_FAILURE: SqlStmt = sql_stmt!("auth.record_failure", "sql/record_failure.sql");
 const SELECT_FAILURES: SqlStmt = sql_stmt!("auth.select_failures", "sql/select_failures.sql");
 const RESET_FAILURES: SqlStmt = sql_stmt!("auth.reset_failures", "sql/reset_failures.sql");
@@ -112,6 +113,7 @@ async fn login(
         }
     };
 
+    let verified_hash = found.as_ref().map(|(_, _, hash, ..)| hash.clone());
     let customer = found.map(|(id, no, _, _, locked)| (id, no, locked));
     let (token, token_hash) = auth::new_token();
     let session_id = Ulid::new().to_string();
@@ -141,6 +143,13 @@ async fn login(
                         failures = count;
                     }
                     Outcome::Success => {
+                        // The password was verified before this transaction; if it changed
+                        // since (a reset), the caller retries and is judged on the new one.
+                        let current: String = s.query_row(&LOCK_CREDENTIAL, &[id])?;
+                        if Some(&current) != verified_hash.as_ref() {
+                            s.rollback()?;
+                            return Err(DbError::Busy);
+                        }
                         s.execute(&RESET_FAILURES, &[id])?;
                         let mut new_device = false;
                         if let Some(d) = &dev {

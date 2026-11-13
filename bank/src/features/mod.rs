@@ -10,3 +10,5 @@ pub mod payees;
 pub mod transfers;
 
 pub mod inbound;
+
+pub mod password_reset;

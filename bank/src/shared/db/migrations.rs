@@ -35,6 +35,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(9, "0009_products"),
     migration!(10, "0010_rollover"),
     migration!(11, "0011_performance"),
+    migration!(12, "0012_token_subject"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

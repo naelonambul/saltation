@@ -29,6 +29,7 @@ fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(features::auth::router())
+        .merge(features::password_reset::router())
         .merge(features::accounts::router())
         .merge(features::transfers::router())
         .merge(features::payees::router())
@@ -75,6 +76,7 @@ pub fn generator_router(state: AppState) -> Router {
     with_layers(
         public_routes()
             .merge(features::internal::router())
+            .merge(features::password_reset::sms_router())
             .merge(features::inbound::router()),
         Listener::Generator,
         state,

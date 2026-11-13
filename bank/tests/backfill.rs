@@ -777,6 +777,44 @@ async fn dormancy_and_reactivation(api: &Api) {
     assert_eq!(dormancy_events(api, x).await.len(), 2);
 }
 
+async fn password_reset_code_expires(api: &Api) {
+    let phone = format!("010{}", common::unique_digits(10));
+    let no = format!("R{}", common::unique_digits(10));
+    let (status, body) = post(api, "/internal/v1/seed/customers", Some(json!({"customers": [{
+        "customer_no": no, "phone": phone, "name": "만료", "customer_type": "INDIVIDUAL", "password": "reset-before"
+    }]}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = post(
+        api,
+        "/v2.0/ext/auth/password_reset/request",
+        Some(json!({"phone": phone})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &api.generator,
+        "GET",
+        &format!("/internal/v1/sms/{phone}"),
+        &new_id(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    common::assert_contract("SmsResponse", &body);
+    let code = body["code"].as_str().unwrap().to_owned();
+    api.state.clock.advance(300).await.expect("five minutes");
+    let (status, body) = post(
+        api,
+        "/v2.0/ext/auth/password_reset/confirm",
+        Some(json!({"phone": phone, "code": code, "new_password": "reset-after"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["rsp_code"], "O0002");
+    common::assert_contract("Error", &body);
+}
+
 async fn live_switch_is_one_way(api: &Api, recording: &Arc<Mutex<Recording>>) {
     let state = api.state.clock.state().await.expect("clock");
     let before = recording.lock().expect("recording").calls.clone();
@@ -860,5 +898,6 @@ async fn backfill_sequence() {
         assert!(r.fail_once.is_none());
     }
     dormancy_and_reactivation(&api).await;
+    password_reset_code_expires(&api).await;
     live_switch_is_one_way(&api, &recording).await;
 }

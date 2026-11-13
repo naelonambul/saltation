@@ -87,6 +87,9 @@ async fn listeners_expose_only_their_routes() {
         "a generated request ID is echoed even on 404"
     );
 
+    let (status, _, _) = get(&public, "/internal/v1/sms/01000000000", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     for path in ["/oauth/2.0/token", "/v2.0/transfer/deposit/fin_num"] {
         let res = public
             .clone()
