@@ -222,9 +222,9 @@ async fn balance(
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
-    let (_, _, balance, subtype, product, opened, last, maturity) =
+    let (_, account_no, balance, subtype, product, opened, last, maturity) =
         row.ok_or_else(|| not_found(&ctx))?;
-    Ok(api::ok(
+    let mut response = api::ok(
         &ctx,
         merge(
             bank_part(&q.bank_tran_id, now),
@@ -239,7 +239,9 @@ async fn balance(
                 "last_tran_date": last.unwrap_or_default(),
             }),
         ),
-    ))
+    );
+    crate::shared::outcome::annotate(&mut response, Some(account_no), None, None);
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,7 +342,7 @@ async fn transaction_list(
     let customer_id = who.customer_id;
     let itype = q.inquiry_type.clone();
     let descending = q.sort_order == "D";
-    let result: Option<(i64, Vec<HistoryRow>)> = state
+    let result: Option<(String, i64, Vec<HistoryRow>)> = state
         .db
         .run_in(&stats, move |s| {
             let Some(row): Option<BalanceRow> =
@@ -348,7 +350,7 @@ async fn transaction_list(
             else {
                 return Ok(None);
             };
-            let (account_id, _, balance, ..) = row;
+            let (account_id, account_no, balance, ..) = row;
             let fetch = PAGE_SIZE + 1;
             let rows: Vec<HistoryRow> = if descending {
                 let before = cursor.unwrap_or(i64::MAX);
@@ -381,11 +383,11 @@ async fn transaction_list(
                     ],
                 )?
             };
-            Ok(Some((balance, rows)))
+            Ok(Some((account_no, balance, rows)))
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
-    let (balance, mut rows) = result.ok_or_else(|| not_found(&ctx))?;
+    let (account_no, balance, mut rows) = result.ok_or_else(|| not_found(&ctx))?;
     let more = rows.len() as i64 > PAGE_SIZE;
     rows.truncate(PAGE_SIZE as usize);
     let trace = if more {
@@ -408,7 +410,7 @@ async fn transaction_list(
             })
         })
         .collect();
-    Ok(api::ok(
+    let mut response = api::ok(
         &ctx,
         merge(
             bank_part(&q.bank_tran_id, now),
@@ -422,7 +424,9 @@ async fn transaction_list(
                 "res_list": list,
             }),
         ),
-    ))
+    );
+    crate::shared::outcome::annotate(&mut response, Some(account_no), None, None);
+    Ok(response)
 }
 
 #[cfg(test)]

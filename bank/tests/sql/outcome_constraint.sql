@@ -4,5 +4,5 @@ BEGIN
   IF NOT REGEXP_LIKE(:request_id, '^[0-9A-HJKMNP-TV-Z]{26}$') THEN
     RAISE_APPLICATION_ERROR(-20001, 'invalid request id');
   END IF;
-  EXECUTE IMMEDIATE 'ALTER TABLE outbox ADD CONSTRAINT outcome_refuse CHECK (JSON_VALUE(event_json, ''$.request_id'') IS NULL OR JSON_VALUE(event_json, ''$.request_id'') <> ''' || :request_id || ''')';
+  EXECUTE IMMEDIATE 'ALTER TABLE outbox ADD CONSTRAINT outcome_refuse CHECK (JSON_VALUE(event_json, ''$.event_type'') <> ''request.completed'' OR JSON_VALUE(event_json, ''$.request_id'') IS NULL OR JSON_VALUE(event_json, ''$.request_id'') <> ''' || :request_id || ''')';
 END;

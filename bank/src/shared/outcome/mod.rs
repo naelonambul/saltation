@@ -83,10 +83,10 @@ impl Recorder {
             .map(|p| p.as_str().to_owned())
             .unwrap_or_else(|| "unmatched".into());
         if let Some(stats) = req.extensions().get::<RequestStats>() {
-            stats
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .outcome_endpoint = Some(endpoint.clone());
+            let mut stats = stats.lock().unwrap_or_else(|e| e.into_inner());
+            stats.outcome_endpoint = Some(endpoint.clone());
+            stats.outcome_method = Some(req.method().to_string());
+            stats.outcome_arrival = req.extensions().get::<Arrival>().map(|a| a.0);
         }
         Self {
             ctx,
@@ -160,6 +160,9 @@ impl Recorder {
         event.account_no = metadata.account_no;
         event.customer_no = identity.customer_no;
         event.session_id = identity.session_id;
+        if event.device_id.is_none() {
+            event.device_id = self.ctx.device_id.clone();
+        }
         event.payload = serde_json::json!({
             "endpoint": self.endpoint,
             "method": self.method,

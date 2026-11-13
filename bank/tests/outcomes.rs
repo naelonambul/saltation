@@ -19,6 +19,52 @@ const RESTORE: SqlStmt = sql_stmt!(
     "sql/outcome_constraint_drop.sql"
 );
 
+const RELATED: SqlStmt = sql_stmt!("test.outcome_related", "sql/outcome_related.sql");
+const IDENTITY: SqlStmt = sql_stmt!("test.outcome_identity", "sql/outcome_identity.sql");
+const ACCOUNT: SqlStmt = sql_stmt!("test.outcome_account", "sql/outcome_account.sql");
+const ROLLBACK: SqlStmt = sql_stmt!("test.outcome_rollback", "sql/outcome_rollback.sql");
+
+async fn related(api: &Api, id: &str) -> Vec<Value> {
+    let id = id.to_owned();
+    let rows: Vec<String> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&RELATED, &[&id]))
+        .await
+        .unwrap();
+    rows.iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect()
+}
+
+async fn assert_completion(
+    api: &Api,
+    id: &str,
+    method: &str,
+    endpoint: &str,
+    status: StatusCode,
+) -> Value {
+    let all = related(api, id).await;
+    let completions: Vec<_> = all
+        .iter()
+        .filter(|e| e["event_type"] == "request.completed")
+        .collect();
+    assert_eq!(completions.len(), 1, "{method} {endpoint}: {all:?}");
+    let event = completions[0];
+    assert_eq!(all.last().unwrap()["event_id"], event["event_id"]);
+    for other in all
+        .iter()
+        .filter(|e| e["event_type"] != "request.completed")
+    {
+        assert!(event["event_id"].as_str().unwrap() > other["event_id"].as_str().unwrap());
+    }
+    assert_eq!(event["payload"]["endpoint"], endpoint);
+    assert_eq!(event["payload"]["method"], method);
+    assert_eq!(event["payload"]["http_status"], status.as_u16());
+    assert!(event["payload"]["duration_ms"].as_u64().is_some());
+    event.clone()
+}
+
 async fn events(api: &Api, id: &str) -> Vec<Value> {
     let id = id.to_owned();
     let rows: Vec<String> = api
@@ -44,9 +90,11 @@ impl Coverage<'_> {
         path: &str,
         token: Option<&str>,
         body: Option<Value>,
-        fallback: bool,
+        _fallback: bool,
     ) -> Value {
         let id = new_id();
+        let before = self.api.state.clock.state().await.unwrap().business_time;
+        let request_body = body.clone().unwrap_or(Value::Null);
         let inbound = matches!(
             template,
             "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num"
@@ -73,28 +121,143 @@ impl Coverage<'_> {
                 "application/x-www-form-urlencoded",
             )
             .await
+        } else if inbound {
+            raw(
+                router,
+                method,
+                path,
+                &id,
+                token,
+                request_body.to_string(),
+                "application/json",
+            )
+            .await
         } else {
             call(router, method, path, &id, token, body).await
         };
         assert_eq!(status, StatusCode::OK, "{method} {template}: {response}");
-        let found = events(self.api, &id).await;
-        assert_eq!(found.len(), 1, "{method} {template}");
-        let event = &found[0];
-        assert!(envelope_errors(event).is_empty(), "{event}");
-        assert_eq!(event["payload"]["endpoint"], template);
+        // T1/T3: every route has one completion, after all domain events.
+        let event = assert_completion(self.api, &id, method, template, status).await;
+        assert!(envelope_errors(&event).is_empty(), "{event}");
         assert_eq!(event["rsp_code"], response["rsp_code"]);
-        if fallback {
-            assert_eq!(event["payload"]["method"], method);
-            assert_eq!(event["payload"]["http_status"], 200);
-            assert!(event["payload"]["duration_ms"].as_u64().is_some());
-            assert_eq!(
-                event["channel"],
-                if inbound { "EXTERNAL" } else { "MOBILE" }
+        assert_eq!(
+            event["channel"],
+            if inbound { "EXTERNAL" } else { "MOBILE" }
+        );
+        assert_eq!(
+            event["listener"],
+            if inbound { "generator" } else { "public" }
+        );
+        // T7: business time, authenticated identity and the single-account rule.
+        let after = self.api.state.clock.state().await.unwrap().business_time;
+        let occurred =
+            chrono::DateTime::parse_from_rfc3339(event["occurred_at"].as_str().unwrap()).unwrap();
+        assert!(occurred.timestamp_millis() >= before.timestamp_millis());
+        assert!(occurred.timestamp_millis() <= after.timestamp_millis());
+        if inbound {
+            assert_eq!(event["device_id"], "outcome-sim-device");
+        }
+        if !inbound && let Some(token) = token {
+            let hash = bank::shared::auth::token_hash(token);
+            let (customer, session): (String, String) = self
+                .api
+                .state
+                .db
+                .run(move |s| s.query_row(&IDENTITY, &[&hash]))
+                .await
+                .unwrap();
+            assert_eq!(event["customer_no"], customer);
+            assert_eq!(event["session_id"], session);
+        }
+        let account_route = template.starts_with("/v2.0/ext/deposits")
+            || template.starts_with("/v2.0/ext/loans")
+            || matches!(
+                template,
+                "/v2.0/account/balance/fin_num"
+                    | "/v2.0/account/transaction_list/fin_num"
+                    | "/v2.0/transfer/withdraw/fin_num"
+                    | "/v2.0/transfer/deposit/fin_num"
             );
-            assert_eq!(
-                event["listener"],
-                if inbound { "generator" } else { "public" }
+        if account_route {
+            let fin = response["fintech_use_num"]
+                .as_str()
+                .or_else(|| request_body["fintech_use_num"].as_str())
+                .or_else(|| request_body["req_list"][0]["fintech_use_num"].as_str())
+                .map(str::to_owned)
+                .or_else(|| {
+                    path.split('?')
+                        .nth(1)
+                        .and_then(|q| {
+                            q.split('&')
+                                .find_map(|v| v.strip_prefix("fintech_use_num="))
+                        })
+                        .map(str::to_owned)
+                })
+                .unwrap();
+            let account: String = self
+                .api
+                .state
+                .db
+                .run(move |s| s.query_row(&ACCOUNT, &[&fin]))
+                .await
+                .unwrap();
+            assert_eq!(event["account_no"], account, "{template}");
+        } else {
+            assert!(event["account_no"].is_null(), "{template}: {event}");
+        }
+        let domain = match (method, template) {
+            (_, "/v2.0/ext/auth/login") => Some("login.succeeded"),
+            (_, "/oauth/2.0/revoke") => Some("logout"),
+            (_, "/v2.0/ext/auth/password_reset/request") => Some("password_reset.requested"),
+            (_, "/v2.0/ext/auth/password_reset/confirm") => Some("password_reset.completed"),
+            ("POST", "/v2.0/ext/payees") => Some("payee.registered"),
+            ("DELETE", "/v2.0/ext/payees") => Some("payee.deleted"),
+            _ => None,
+        };
+        if let Some(domain) = domain {
+            assert!(
+                related(self.api, &id)
+                    .await
+                    .iter()
+                    .any(|e| e["event_type"] == domain)
             );
+        }
+        // T7: stored money-moving results use the fallback and retain identity/account metadata.
+        let request_type = match (method, template) {
+            ("POST", "/v2.0/transfer/withdraw/fin_num") => Some("TRANSFER"),
+            ("POST", "/v2.0/transfer/deposit/fin_num") => Some("INBOUND"),
+            ("POST", "/v2.0/ext/deposits") => Some("TERM_OPEN"),
+            ("POST", "/v2.0/ext/deposits/{id}/close") => Some("TERM_CLOSE"),
+            ("POST", "/v2.0/ext/loans") => Some("LOAN_TAKE"),
+            ("POST", "/v2.0/ext/loans/{id}/repay") => Some("LOAN_REPAY"),
+            _ => None,
+        };
+        if let Some(kind) = request_type {
+            assert_eq!(event["payload"]["request_type"], kind);
+            let replay_id = new_id();
+            let (replay_status, _) = if inbound {
+                raw(
+                    router,
+                    method,
+                    path,
+                    &replay_id,
+                    token,
+                    request_body.to_string(),
+                    "application/json",
+                )
+                .await
+            } else {
+                call(router, method, path, &replay_id, token, Some(request_body)).await
+            };
+            assert_eq!(replay_status, status);
+            let replay =
+                assert_completion(self.api, &replay_id, method, template, replay_status).await;
+            assert_eq!(related(self.api, &replay_id).await.len(), 1);
+            assert_eq!(replay["payload"]["replayed"], true);
+            assert_eq!(replay["payload"]["request_type"], kind);
+            for key in ["account_no", "customer_no", "session_id", "device_id"] {
+                assert_eq!(replay[key], event[key], "replay {template} {key}");
+            }
         }
         self.covered
             .insert((template.to_owned(), method.to_owned()));
@@ -114,7 +277,8 @@ async fn raw(
         .method(method)
         .uri(path)
         .header("x-request-id", id)
-        .header("content-type", content_type);
+        .header("content-type", content_type)
+        .header("x-sim-device", "outcome-sim-device");
     if let Some(token) = token {
         req = req.header("authorization", format!("Bearer {token}"));
     }
@@ -171,6 +335,26 @@ async fn outcomes() {
     let password = "outcome-password-unique";
     let (status, _) = call(&api.generator, "POST", "/internal/v1/seed/customers", &new_id(), None, Some(json!({"customers": [{"customer_no": format!("O{n}"), "name": "결과", "phone": phone, "customer_type": "INDIVIDUAL", "password": password}]}))).await;
     assert_eq!(status, StatusCode::OK);
+    // T3: rejected login still commits its completion after login.failed.
+    let wrong_id = new_id();
+    let (status, _) = call(
+        &api.public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &wrong_id,
+        None,
+        Some(json!({"phone": phone, "password": "incorrect"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let wrong = assert_completion(&api, &wrong_id, "POST", "/v2.0/ext/auth/login", status).await;
+    assert_eq!(wrong["outcome"], "rejected");
+    assert!(
+        related(&api, &wrong_id)
+            .await
+            .iter()
+            .any(|e| e["event_type"] == "login.failed")
+    );
     let login = coverage
         .success(
             "POST",
@@ -466,6 +650,64 @@ async fn outcomes() {
         call(&api.generator, "GET", path, &id, None, None).await;
         assert!(events(&api, &id).await.is_empty());
     }
+    // T3: refuse only completion INSERTs, then prove the entire transaction rolled back.
+    // The constraint is always restored before any assertions or reads that may panic.
+    let rollback_payee = customer(&api, 0).await;
+    for (path, token, body) in [
+        (
+            "/v2.0/ext/auth/login",
+            None,
+            json!({"phone": phone, "password": "outcome-new-password"}),
+        ),
+        (
+            "/v2.0/ext/payees",
+            Some(a.token.as_str()),
+            json!({"bank_code_std": "998", "account_num": rollback_payee.account}),
+        ),
+        (
+            "/v2.0/transfer/withdraw/fin_num",
+            Some(a.token.as_str()),
+            json!({"bank_tran_id": bank_tran_id(), "fintech_use_num": a.fin, "tran_amt": "100", "tran_dtime": dt, "transfer_purpose": "TR", "recv_client_name": "김수취", "recv_client_bank_code": "998", "recv_client_account_num": rollback_payee.account}),
+        ),
+    ] {
+        let before_a = common::deposits::snapshot(&api, &a.fin).await;
+        let before_b = common::deposits::snapshot(&api, &rollback_payee.fin).await;
+        let refused = new_id();
+        let id = refused.clone();
+        api.state
+            .db
+            .run(move |s| {
+                s.execute(&REFUSE, &[&id])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let answer = call(&api.public, "POST", path, &refused, token, Some(body)).await;
+        api.state
+            .db
+            .run(|s| {
+                s.execute(&RESTORE, &[])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        assert!(related(&api, &refused).await.is_empty());
+        let account = rollback_payee.account.clone();
+        let counts: (i64, i64, i64) = api
+            .state
+            .db
+            .run(move |s| s.query_row(&ROLLBACK, &[&refused, &refused, &account]))
+            .await
+            .unwrap();
+        assert_eq!(counts, (0, 0, 0), "{path}");
+        assert_eq!(common::deposits::snapshot(&api, &a.fin).await, before_a);
+        assert_eq!(
+            common::deposits::snapshot(&api, &rollback_payee.fin).await,
+            before_b
+        );
+    }
+
     // T5: always drop the constraint before propagating assertion failures.
     let refused = new_id();
     let id = refused.clone();

@@ -160,8 +160,11 @@ async fn register(
             &name, &req.alias, &now, &CHANNEL, &who.session_id])?;
         let row: PayeeRow = s.query_row(&SELECT_PAYEE, &[&id, &who.customer_id])?;
         outbox::record(s, &Event::for_request(&c, "payee.registered", now, CHANNEL, "completed")
-            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .customer(who.customer_no.clone()).session(who.session_id.clone()).codes(codes::SUCCESS, None)
             .payload(json!({"payee_id": id.to_string(), "bank_code_std": req.bank_code_std, "account_num": req.account_num})))?;
+        outbox::record(s, &Event::for_request(&c, "request.completed", now, CHANNEL, "completed")
+            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .payload(json!({"http_status": 200})))?;
         s.commit()?; Ok(Ok(payee(row)))
     }).await.map_err(|e| {
         if e.ora_code() == Some(1) && e.to_string().to_uppercase().contains("PAYEE_ACTIVE_UK") {
@@ -216,8 +219,11 @@ async fn delete(
         let Some(row) = row else { return Ok(false) };
         if s.execute(&DELETE_PAYEE, &[&now, &req.payee_id, &who.customer_id])? == 0 { return Ok(false) }
         outbox::record(s, &Event::for_request(&c, "payee.deleted", now, CHANNEL, "completed")
-            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .customer(who.customer_no.clone()).session(who.session_id.clone()).codes(codes::SUCCESS, None)
             .payload(json!({"payee_id": row.0.to_string(), "bank_code_std": row.1, "account_num": row.3})))?;
+        outbox::record(s, &Event::for_request(&c, "request.completed", now, CHANNEL, "completed")
+            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .payload(json!({"http_status": 200})))?;
         s.commit()?; Ok(true)
     }).await.map_err(|e| db_error(&ctx, &e))?;
     if deleted {

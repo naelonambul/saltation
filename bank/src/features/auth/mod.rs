@@ -219,6 +219,21 @@ async fn login(
                 ],
             )?;
             outbox::record(s, &event)?;
+            outbox::complete(
+                s,
+                &c,
+                &event,
+                if outcome == Outcome::Success {
+                    200
+                } else {
+                    401
+                },
+                if outcome == Outcome::Success {
+                    codes::SUCCESS
+                } else {
+                    codes::UNAUTHORIZED
+                },
+            )?;
             s.commit()?;
             Ok((failures, customer_id))
         })
@@ -274,6 +289,7 @@ async fn logout(
                 .customer(who.customer_no.clone())
                 .session(who.session_id.clone());
             outbox::record(s, &event)?;
+            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
             s.commit()
         })
         .await

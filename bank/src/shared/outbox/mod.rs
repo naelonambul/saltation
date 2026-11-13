@@ -154,17 +154,61 @@ pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
     let mut event = event.clone();
     if event.event_type == "request.completed"
         && let Some(payload) = event.payload.as_object_mut()
-        && let Some(endpoint) = &session.outcome_endpoint
     {
-        payload.insert("endpoint".into(), endpoint.clone().into());
+        if let Some(endpoint) = &session.outcome_endpoint {
+            payload.insert("endpoint".into(), endpoint.clone().into());
+        }
+        if let Some(method) = &session.outcome_method {
+            payload.insert("method".into(), method.clone().into());
+        }
+        if let Some(arrival) = session.outcome_arrival {
+            payload.insert(
+                "duration_ms".into(),
+                (arrival.elapsed().as_millis().min(u128::from(u64::MAX)) as u64).into(),
+            );
+        }
     }
     let json =
         serde_json::to_string(&event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
-    session.execute(&INSERT_EVENT, &[&event.event_id, &json])?;
+    if let Err(error) = session.execute(&INSERT_EVENT, &[&event.event_id, &json]) {
+        if event.event_type == "request.completed" {
+            tracing::warn!(error = %error, request_id = ?event.request_id, "completion event insert failed");
+            return Err(DbError::Busy);
+        }
+        return Err(error);
+    }
     if event.event_type == "request.completed" {
         session.note_completion();
     }
     Ok(())
+}
+
+/// Records a completion after the caller's last domain event, in the same transaction.
+pub fn complete(
+    session: &mut Session,
+    ctx: &RequestContext,
+    domain: &Event,
+    status: u16,
+    code: &str,
+) -> Result<(), DbError> {
+    let mut event = Event::for_request(
+        ctx,
+        "request.completed",
+        DateTime::parse_from_rfc3339(&domain.occurred_at)
+            .map_err(|e| DbError::Config(format!("event time: {e}")))?,
+        domain.channel,
+        if (200..300).contains(&status) {
+            "completed"
+        } else {
+            "rejected"
+        },
+    )
+    .codes(code, domain.bank_rsp_code.as_deref())
+    .payload(serde_json::json!({"http_status": status}));
+    event.customer_no = domain.customer_no.clone();
+    event.session_id = domain.session_id.clone();
+    event.device_id = domain.device_id.clone().or_else(|| ctx.device_id.clone());
+    record(session, &event)
 }
 
 /// Undelivered event count and the oldest event's age in seconds (spec F-36a).

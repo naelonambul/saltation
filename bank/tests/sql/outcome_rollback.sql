@@ -1,0 +1,1 @@
+SELECT (SELECT COUNT(*) FROM login_attempt WHERE request_id = :login_request_id), (SELECT COUNT(*) FROM transaction_request WHERE request_id = :transaction_request_id), (SELECT COUNT(*) FROM payee WHERE account_no = :account_no) FROM dual

@@ -99,10 +99,17 @@ async fn token(
     }
     let (token, hash) = auth::new_token();
     let expires = now + chrono::Duration::days(90);
+    let c = ctx.clone();
     state
         .db
         .run_in(&stats, move |s| {
             s.execute(&INSERT_TOKEN, &[&hash, &id, &scope, &expires])?;
+            outbox::record(
+                s,
+                &Event::for_request(&c, "request.completed", now, "EXTERNAL", "completed")
+                    .codes(codes::SUCCESS, None)
+                    .payload(json!({"http_status": 200})),
+            )?;
             s.commit()
         })
         .await
@@ -204,7 +211,8 @@ fn finish(
         codes::BANK_REJECTED
     };
     let message = if success { "" } else { "참가기관 거부" };
-    let stored = json!({"body": body, "rsp_message": message}).to_string();
+    let stored = json!({"body": body, "rsp_message": message, "account_no": who.map(|(_, a)| a), "customer_no": who.map(|(c, _)| c)})
+        .to_string();
     s.execute(
         &FINISH_REQUEST,
         &[&status, &code, &bank_code, &stored, &p.ctx.request_id],
@@ -217,7 +225,7 @@ fn finish(
         if success { "completed" } else { "rejected" },
     )
     .codes(code, Some(bank_code))
-    .payload(json!({"endpoint": ENDPOINT, "tran_amt": p.amount, "transfer_id": transfer_id}));
+    .payload(json!({"endpoint": ENDPOINT, "http_status": if success {200} else {422}, "request_type": "INBOUND", "tran_amt": p.amount, "transfer_id": transfer_id}));
     if let Some((customer, account)) = who {
         event = event
             .customer(customer.to_owned())
@@ -345,6 +353,7 @@ async fn deposit(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
+    Extension(identity): Extension<crate::shared::outcome::IdentitySlot>,
     who: AuthClient,
     body: Result<Json<DepositRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -391,7 +400,11 @@ async fn deposit(
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(Value::Null);
-            Ok(api::respond(
+            identity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .customer_no = stored["customer_no"].as_str().map(str::to_owned);
+            let mut response = api::respond(
                 &ctx,
                 if status == "DONE" {
                     StatusCode::OK
@@ -401,7 +414,14 @@ async fn deposit(
                 codes::known(&code).unwrap_or(codes::SYSTEM_ERROR),
                 stored["rsp_message"].as_str().unwrap_or(""),
                 stored["body"].clone(),
-            ))
+            );
+            crate::shared::outcome::annotate(
+                &mut response,
+                stored["account_no"].as_str().map(str::to_owned),
+                Some("INBOUND".into()),
+                Some(true),
+            );
+            Ok(response)
         }
     }
 }

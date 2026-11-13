@@ -92,14 +92,14 @@ type DetailRow = (
     String,
     String,
 );
-fn detail(s: &mut Session, id: i64, customer: i64) -> Result<Option<Value>, DbError> {
+fn detail(s: &mut Session, id: i64, customer: i64) -> Result<Option<(Value, String)>, DbError> {
     let row: Option<DetailRow> = s.query_opt(&DETAIL, &[&id, &customer])?;
-    Ok(row.map(|(id, fin, account, name, principal, balance, opened, maturity, status, linked)| json!({
+    Ok(row.map(|(id, fin, account, name, principal, balance, opened, maturity, status, linked)| (json!({
         "loan_id": id.to_string(), "fintech_use_num": fin, "account_num_masked": fields::mask_account(&account),
         "product_name": name, "principal_amt": principal.to_string(), "balance_amt": balance.to_string(),
         "account_issue_date": opened, "maturity_date": maturity, "account_state": if status == "CLOSED" {"09"} else {"01"},
         "linked_fintech_use_num": linked
-    })))
+    }), account)))
 }
 async fn read(
     State(state): State<AppState>,
@@ -115,8 +115,12 @@ async fn read(
         .run_in(&stats, move |s| detail(s, id, who.customer_id))
         .await
         .map_err(|e| db_error(&ctx, &e))?;
-    body.map(|b| api::ok(&ctx, b))
-        .ok_or_else(|| ApiError::new(&ctx, StatusCode::NOT_FOUND, codes::NOT_FOUND, "대상 없음"))
+    body.map(|(b, account)| {
+        let mut response = api::ok(&ctx, b);
+        crate::shared::outcome::annotate(&mut response, Some(account), None, None);
+        response
+    })
+    .ok_or_else(|| ApiError::new(&ctx, StatusCode::NOT_FOUND, codes::NOT_FOUND, "대상 없음"))
 }
 
 #[derive(Deserialize)]
@@ -164,6 +168,7 @@ impl Plan {
     }
 }
 struct Outcome {
+    account_no: Option<String>,
     status: StatusCode,
     code: &'static str,
     message: String,
@@ -185,7 +190,9 @@ fn finish(s: &mut Session, p: &Plan, out: Outcome) -> Result<Attempt, DbError> {
         "REJECTED"
     };
     let bank_code = out.body["bank_rsp_code"].as_str();
-    let stored = json!({"rsp_message": out.message, "body": out.body}).to_string();
+    let stored =
+        json!({"rsp_message": out.message, "body": out.body, "account_no": out.account_no})
+            .to_string();
     s.execute(
         &FINISH_REQUEST,
         &[&status, &out.code, &bank_code, &stored, &p.ctx.request_id],
@@ -194,9 +201,7 @@ fn finish(s: &mut Session, p: &Plan, out: Outcome) -> Result<Attempt, DbError> {
         Operation::Open { .. } => ENDPOINT.to_owned(),
         Operation::Repay { id, .. } => format!("{ENDPOINT}/{id}/repay"),
     };
-    outbox::record(
-        s,
-        &Event::for_request(
+    let mut event = Event::for_request(
             &p.ctx,
             "request.completed",
             p.now,
@@ -210,16 +215,23 @@ fn finish(s: &mut Session, p: &Plan, out: Outcome) -> Result<Attempt, DbError> {
         .customer(p.customer_no.clone())
         .session(p.session.clone())
         .codes(out.code, bank_code)
-        .payload(json!({"endpoint": endpoint, "request_type": p.request_type()})),
-    )?;
+        .payload(json!({"endpoint": endpoint, "request_type": p.request_type(), "http_status": out.status.as_u16()}));
+    event.account_no = out.account_no.clone();
+    outbox::record(s, &event)?;
     s.commit()?;
     Ok(Attempt::Done(out))
 }
-fn reject(s: &mut Session, p: &Plan, bank_code: &str) -> Result<Attempt, DbError> {
+fn reject(
+    s: &mut Session,
+    p: &Plan,
+    bank_code: &str,
+    account_no: Option<String>,
+) -> Result<Attempt, DbError> {
     finish(
         s,
         p,
         Outcome {
+            account_no,
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: codes::BANK_REJECTED,
             message: "상품 거래 거부".into(),
@@ -227,12 +239,13 @@ fn reject(s: &mut Session, p: &Plan, bank_code: &str) -> Result<Attempt, DbError
         },
     )
 }
-fn missing(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
+fn missing(s: &mut Session, p: &Plan, account_no: Option<String>) -> Result<Attempt, DbError> {
     // As for transfers, persist a missing resource so retries cannot change its outcome.
     finish(
         s,
         p,
         Outcome {
+            account_no,
             status: StatusCode::NOT_FOUND,
             code: codes::NOT_FOUND,
             message: "대상 없음".into(),
@@ -282,18 +295,19 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
     }
     let id = match &p.operation {
         Operation::Open { fin, terms, amount } => {
-            let payer: Option<(i64, String)> = s.query_opt(&PAYER, &[fin, &p.customer])?;
+            let payer: Option<(i64, String, String)> = s.query_opt(&PAYER, &[fin, &p.customer])?;
             let conditions: Option<(i64, i64, i64)> = s.query_opt(&TERMS, &[terms])?;
-            let (Some((payer, name)), Some((months, min, max))) = (payer, conditions) else {
-                return missing(s, p);
+            let account_no = payer.as_ref().map(|r| r.2.clone());
+            let (Some((payer, name, _)), Some((months, min, max))) = (payer, conditions) else {
+                return missing(s, p, account_no);
             };
             let payer_locks = ledger::lock_accounts(s, &[payer])?;
             let from = payer_locks.get(payer).expect("locked payer");
             if from.subtype != "DEMAND" || from.status == "CLOSED" {
-                return reject(s, p, "403");
+                return reject(s, p, "403", account_no);
             }
             if !(min..=max).contains(amount) {
-                return reject(s, p, "407");
+                return reject(s, p, "407", account_no);
             }
             // The payer is already locked; the newly allocated account has no other users.
             let placeholder = format!("X{}", &ulid::Ulid::new().to_string()[11..]);
@@ -338,19 +352,20 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         Operation::Repay { id, amount } => {
             let linked: Option<(i64, String)> = s.query_opt(&REPAY_INFO, &[id, &p.customer])?;
             let Some((linked, name)) = linked else {
-                return missing(s, p);
+                return missing(s, p, None);
             };
             let mut locks = ledger::lock_accounts(s, &[*id, linked])?;
             let owed = locks.get(*id).expect("loan");
+            let account_no = Some(owed.account_no.clone());
             let payer = locks.get(linked).expect("linked");
             if owed.status == "CLOSED" || payer.status == "CLOSED" {
-                return reject(s, p, "403");
+                return reject(s, p, "403", account_no);
             }
             if *amount > owed.balance {
-                return reject(s, p, "408");
+                return reject(s, p, "408", account_no);
             }
             if payer.balance < *amount {
-                return reject(s, p, "405");
+                return reject(s, p, "405", account_no);
             }
             let loan_no = owed.account_no.clone();
             let payer_no = payer.account_no.clone();
@@ -389,7 +404,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             *id
         }
     };
-    let mut body =
+    let (mut body, account_no) =
         detail(s, id, p.customer)?.ok_or_else(|| DbError::Config("new loan missing".into()))?;
     body.as_object_mut().expect("detail").extend(
         bank_part(p, "000", "")
@@ -401,6 +416,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         s,
         p,
         Outcome {
+            account_no: Some(account_no),
             status: StatusCode::OK,
             code: codes::SUCCESS,
             message: String::new(),
@@ -439,13 +455,20 @@ async fn execute(state: AppState, stats: RequestStats, p: Plan) -> Result<Respon
                 } else {
                     StatusCode::UNPROCESSABLE_ENTITY
                 };
-                return Ok(api::respond(
+                let mut response = api::respond(
                     &p.ctx,
                     http,
                     code,
                     stored["rsp_message"].as_str().unwrap_or(""),
                     stored["body"].clone(),
-                ));
+                );
+                crate::shared::outcome::annotate(
+                    &mut response,
+                    stored["account_no"].as_str().map(str::to_owned),
+                    Some(p.request_type().into()),
+                    Some(true),
+                );
+                return Ok(response);
             }
             Err(e) if e.ora_code() == Some(60) && retries < 2 => {
                 retries += 1;

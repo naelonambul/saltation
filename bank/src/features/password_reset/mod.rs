@@ -115,6 +115,7 @@ async fn request(
                 event = event.payload(json!({"reason": "unknown"}));
             }
             outbox::record(s, &event)?;
+            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
             s.commit()
         })
         .await
@@ -231,6 +232,17 @@ async fn confirm(
                 event = event.customer(no);
             }
             outbox::record(s, &event)?;
+            outbox::complete(
+                s,
+                &c,
+                &event,
+                if success { 200 } else { 401 },
+                if success {
+                    codes::SUCCESS
+                } else {
+                    RESET_REJECTED
+                },
+            )?;
             s.commit()?;
             Ok(success)
         })

@@ -161,14 +161,12 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
     {
-        let endpoint = stats
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .outcome_endpoint
-            .clone();
+        let metadata = stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (result, collected) = self
             .run_collect(move |session| {
-                session.outcome_endpoint = endpoint;
+                session.outcome_endpoint = metadata.outcome_endpoint;
+                session.outcome_method = metadata.outcome_method;
+                session.outcome_arrival = metadata.outcome_arrival;
                 work(session)
             })
             .await;
@@ -202,6 +200,8 @@ impl Db {
                 stats: StatementStats::default(),
                 pending_completion: false,
                 outcome_endpoint: None,
+                outcome_method: None,
+                outcome_arrival: None,
             };
             let result = work(&mut session);
             if result.is_err() {
@@ -233,6 +233,8 @@ pub struct StatementStats {
     pub count: u32,
     pub completion_committed: bool,
     pub outcome_endpoint: Option<String>,
+    pub outcome_method: Option<String>,
+    pub outcome_arrival: Option<Instant>,
     pub slowest: Option<(&'static str, Duration)>,
 }
 
@@ -284,6 +286,8 @@ pub struct Session {
     pub stats: StatementStats,
     pending_completion: bool,
     pub(crate) outcome_endpoint: Option<String>,
+    pub(crate) outcome_method: Option<String>,
+    pub(crate) outcome_arrival: Option<Instant>,
 }
 
 impl Session {
