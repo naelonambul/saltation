@@ -93,6 +93,7 @@ pub fn user_seq_no(customer_id: i64) -> String {
 /// The authenticated customer of a request.
 #[derive(Debug, Clone)]
 pub struct AuthCustomer {
+    pub device_id: Option<String>,
     pub customer_id: i64,
     pub customer_no: String,
     pub scope: String,
@@ -144,15 +145,16 @@ impl FromRequestParts<AppState> for AuthCustomer {
         let found = state
             .db
             .run_in(&stats, move |s| {
-                let row: Option<(i64, String, String, String)> =
+                let row: Option<(i64, String, String, String, Option<String>)> =
                     s.query_opt(&SELECT_TOKEN, &[&hash, &now])?;
-                let Some((customer_id, customer_no, scope, session_id)) = row else {
+                let Some((customer_id, customer_no, scope, session_id, device_id)) = row else {
                     return Ok(None);
                 };
                 s.execute(&EXTEND_TOKEN, &[&(now + SESSION_IDLE), &hash])?;
                 s.execute(&TOUCH_SESSION, &[&now, &session_id])?;
                 s.commit()?;
                 Ok(Some(AuthCustomer {
+                    device_id,
                     customer_id,
                     customer_no,
                     scope,
@@ -168,6 +170,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             .get::<crate::shared::outcome::IdentitySlot>()
         {
             let mut identity = slot.lock().unwrap_or_else(|e| e.into_inner());
+            identity.device_id = customer.device_id.clone();
             identity.customer_no = Some(customer.customer_no.clone());
             identity.session_id = Some(customer.session_id.clone());
         }

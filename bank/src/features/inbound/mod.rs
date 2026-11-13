@@ -247,7 +247,8 @@ fn finish(
 fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
     let item = &p.req.req_list[0];
     let listener = p.ctx.listener.as_str();
-    if let Err(e) = s.execute(
+    if let Err(e) = crate::shared::outcome::claim(
+        s,
         &INSERT_REQUEST,
         &[
             &p.ctx.request_id,
@@ -261,6 +262,9 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             &p.ctx.region,
             &p.now,
         ],
+        &p.ctx.request_id,
+        &p.scope,
+        &item.bank_tran_id,
     ) {
         if e.ora_code() != Some(1) {
             return Err(e);
@@ -268,6 +272,16 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         s.rollback()?;
         let row: Option<(String, String, String, Option<String>)> =
             s.query_opt(&SELECT_STORED, &[&p.scope, &item.bank_tran_id])?;
+        let row = if crate::shared::outcome::claimed_elsewhere(
+            s,
+            &p.ctx.request_id,
+            &p.scope,
+            &item.bank_tran_id,
+        )? {
+            None
+        } else {
+            row
+        };
         if row.as_ref().is_none_or(|row| row.0 != p.hash) {
             crate::shared::outcome::conflict(
                 s,

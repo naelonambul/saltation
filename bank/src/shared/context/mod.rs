@@ -238,10 +238,14 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
         Ok(ticket) => ticket,
         Err(error) => {
             recorder.unrecorded();
-            return rejection.unwrap_or_else(|| match error {
-                DbError::Busy => ApiError::busy(&ctx).into_response(),
-                _ => ApiError::internal(&ctx).into_response(),
-            });
+            return if rejection.is_some() {
+                ApiError::busy(&ctx).into_response()
+            } else {
+                match error {
+                    DbError::Busy => ApiError::busy(&ctx).into_response(),
+                    _ => ApiError::internal(&ctx).into_response(),
+                }
+            };
         }
     };
     let now = ticket.now;

@@ -130,7 +130,7 @@
     },
     "payload": {
       "type": "object",
-      "description": "For request.completed: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; never a request or response body, header value or secret."
+      "description": "For request.completed: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; money-moving completions also retain tran_amt, transfer_id, reason, counterparty_bank_code, counterparty_account_no; never a request or response body, header value or secret."
     }
   }
 }

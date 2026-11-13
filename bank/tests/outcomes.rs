@@ -24,6 +24,144 @@ const IDENTITY: SqlStmt = sql_stmt!("test.outcome_identity", "sql/outcome_identi
 const ACCOUNT: SqlStmt = sql_stmt!("test.outcome_account", "sql/outcome_account.sql");
 const ROLLBACK: SqlStmt = sql_stmt!("test.outcome_rollback", "sql/outcome_rollback.sql");
 
+static SECRETS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+fn secret(value: &str) {
+    let mut secrets = SECRETS.lock().unwrap();
+    if !secrets.iter().any(|s| s == value) {
+        secrets.push(value.to_owned());
+    }
+}
+fn collect_secrets(body: &Value) {
+    match body {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(
+                    key.as_str(),
+                    "password" | "new_password" | "code" | "client_secret"
+                ) {
+                    if let Some(value) = value.as_str() {
+                        secret(value);
+                    }
+                } else {
+                    collect_secrets(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_secrets(value);
+            }
+        }
+        _ => {}
+    }
+}
+async fn call(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    id: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    if let Some(token) = token {
+        secret(token);
+    }
+    if let Some(body) = &body {
+        collect_secrets(body);
+    }
+    let answer = common::call(router, method, path, id, token, body).await;
+    if let Some(token) = answer.1["access_token"].as_str() {
+        secret(token);
+    }
+    answer
+}
+async fn customer(api: &Api, opening: i64) -> Customer {
+    let n = unique_digits(10);
+    let phone = format!("010{n}");
+    let no = format!("C{n}");
+    let password = format!("outcome-password-{}", new_id());
+    let account = format!("96{n}");
+    let seeded = call(&api.generator, "POST", "/internal/v1/seed/customers", &new_id(), None,
+        Some(json!({"customers": [{"customer_no": no, "name": "김수취", "phone": phone, "customer_type": "INDIVIDUAL", "password": password}]}))).await;
+    assert_eq!(seeded.0, StatusCode::OK);
+    let seeded = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None,
+        Some(json!({"accounts": [{"customer_no": no, "account_no": account, "opening_balance": opening}]}))).await;
+    assert_eq!(seeded.0, StatusCode::OK);
+    let fin = seeded.1["accounts"][0]["fintech_use_num"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let login = call(
+        &api.public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(json!({"phone": phone, "password": password, "device_id": "outcome-session-device"})),
+    )
+    .await;
+    assert_eq!(login.0, StatusCode::OK);
+    Customer {
+        token: login.1["access_token"].as_str().unwrap().to_owned(),
+        account,
+        fin,
+    }
+}
+async fn state_snapshot(api: &Api) -> Vec<String> {
+    api.state
+        .db
+        .run(|s| {
+            s.query_all(
+                &sql_stmt!("test.outcome_state", "sql/outcome_state.sql"),
+                &[],
+            )
+        })
+        .await
+        .unwrap()
+}
+async fn refuse(api: &Api, id: &str, all: bool) {
+    let id = id.to_owned();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(
+                if all {
+                    &sql_stmt!("test.outcome_refuse_all", "sql/outcome_refuse_all.sql")
+                } else {
+                    &REFUSE
+                },
+                &[&id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+async fn restore(api: &Api) {
+    api.state
+        .db
+        .run(|s| {
+            s.execute(&RESTORE, &[])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+fn unrecorded(handle: &metrics_exporter_prometheus::PrometheusHandle) -> u64 {
+    handle
+        .render()
+        .lines()
+        .filter(|line| line.starts_with("bank_request_outcomes_unrecorded_total{"))
+        .map(|line| {
+            line.split_whitespace()
+                .last()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        })
+        .sum()
+}
+
 async fn attempts(api: &Api, id: &str) -> Vec<Value> {
     let id = id.to_owned();
     let rows: Vec<(String, Option<String>)> = api
@@ -180,6 +318,81 @@ impl Coverage<'_> {
         } else {
             &self.api.public
         };
+        // Each successful mutation has a fail-closed witness using its valid input.
+        if matches!(
+            (method, template),
+            (
+                "POST",
+                "/v2.0/ext/auth/login"
+                    | "/oauth/2.0/revoke"
+                    | "/v2.0/ext/auth/password_reset/request"
+                    | "/v2.0/ext/auth/password_reset/confirm"
+                    | "/oauth/2.0/token"
+                    | "/v2.0/transfer/deposit/fin_num"
+                    | "/v2.0/ext/deposits"
+                    | "/v2.0/ext/deposits/{id}/close"
+                    | "/v2.0/ext/loans"
+                    | "/v2.0/ext/loans/{id}/repay"
+            ) | ("DELETE", "/v2.0/ext/payees")
+        ) {
+            let before_state = state_snapshot(self.api).await;
+            let before_balances = balances(self.api).await;
+            let before_counts = counts(self.api).await;
+            let refused = new_id();
+            refuse(self.api, &refused, false).await;
+            let answer = if template == "/oauth/2.0/token" {
+                raw(
+                    router,
+                    method,
+                    path,
+                    &refused,
+                    None,
+                    format!(
+                        "client_id={}&client_secret={}&scope=oob&grant_type=client_credentials",
+                        request_body["client_id"].as_str().unwrap(),
+                        request_body["client_secret"].as_str().unwrap()
+                    ),
+                    "application/x-www-form-urlencoded",
+                )
+                .await
+            } else {
+                raw(
+                    router,
+                    method,
+                    path,
+                    &refused,
+                    token,
+                    request_body.to_string(),
+                    "application/json",
+                )
+                .await
+            };
+            restore(self.api).await;
+            assert_eq!(
+                answer.0,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{template}: {}",
+                answer.1
+            );
+            assert!(related(self.api, &refused).await.is_empty());
+            assert_eq!(
+                state_snapshot(self.api).await,
+                before_state,
+                "{template} business state changed"
+            );
+            assert_eq!(balances(self.api).await, before_balances);
+            assert_eq!(counts(self.api).await, before_counts);
+            if template == "/v2.0/ext/auth/login" {
+                // F3: domain event failures must also map to retryable 503.
+                let refused = new_id();
+                refuse(self.api, &refused, true).await;
+                let answer = call(router, method, path, &refused, token, body.clone()).await;
+                restore(self.api).await;
+                assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
+                assert!(related(self.api, &refused).await.is_empty());
+                assert_eq!(state_snapshot(self.api).await, before_state);
+            }
+        }
         let (status, response) = if template == "/oauth/2.0/token" {
             let body = body.unwrap();
             let text = format!(
@@ -298,6 +511,18 @@ impl Coverage<'_> {
                     .any(|e| e["event_type"] == domain)
             );
         }
+        if matches!(
+            template,
+            "/v2.0/account/balance/fin_num" | "/v2.0/transfer/withdraw/fin_num"
+        ) {
+            assert_eq!(event["device_id"], "outcome-session-device");
+            if template == "/v2.0/transfer/withdraw/fin_num" {
+                assert_eq!(
+                    attempts(self.api, &id).await[0]["DEVICE_ID"],
+                    "outcome-session-device"
+                );
+            }
+        }
         // T7: stored money-moving results use the fallback and retain identity/account metadata.
         let request_type = match (method, template) {
             ("POST", "/v2.0/transfer/withdraw/fin_num") => Some("TRANSFER"),
@@ -363,6 +588,14 @@ impl Coverage<'_> {
             assert_eq!(conflict_event["payload"]["request_type"], kind);
             // T4: both authorization failure paths persist exactly one unclaimed attempt.
             for forbidden in [false, true] {
+                let before_balances = balances(self.api).await;
+                let before_counts = counts(self.api).await;
+                let mut auth_body = request_body.clone();
+                if inbound {
+                    auth_body["req_list"][0]["bank_tran_id"] = json!(bank_tran_id());
+                } else {
+                    auth_body["bank_tran_id"] = json!(bank_tran_id());
+                }
                 let auth_id = new_id();
                 let old_scope = if forbidden {
                     Some(scope(self.api, token.unwrap(), "inquiry").await)
@@ -375,7 +608,7 @@ impl Coverage<'_> {
                     path,
                     &auth_id,
                     if forbidden { token } else { None },
-                    request_body.to_string(),
+                    auth_body.to_string(),
                     "application/json",
                 )
                 .await;
@@ -392,6 +625,8 @@ impl Coverage<'_> {
                     "{kind}: {}",
                     answer.1
                 );
+                assert_eq!(balances(self.api).await, before_balances);
+                assert_eq!(counts(self.api).await.1, before_counts.1);
                 let rows = attempts(self.api, &auth_id).await;
                 assert_eq!(rows.len(), 1);
                 assert_attempt(
@@ -469,6 +704,19 @@ async fn raw(
     body: String,
     content_type: &str,
 ) -> (StatusCode, Value) {
+    if let Some(token) = token {
+        secret(token);
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(&body) {
+        collect_secrets(&value);
+    }
+    if content_type == "application/x-www-form-urlencoded" {
+        for part in body.split('&') {
+            if let Some(value) = part.strip_prefix("client_secret=") {
+                secret(value);
+            }
+        }
+    }
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -519,6 +767,7 @@ fn contract_operations() -> BTreeSet<(String, String)> {
 // One test serializes constraint DDL with all requests in this file.
 #[tokio::test]
 async fn outcomes() {
+    let metrics = bank::shared::telemetry::metrics_handle();
     let api = api().await;
     let a = customer(&api, 5_000_000).await;
     let b = customer(&api, 0).await;
@@ -539,7 +788,7 @@ async fn outcomes() {
         "/v2.0/ext/auth/login",
         &wrong_id,
         None,
-        Some(json!({"phone": phone, "password": "incorrect"})),
+        Some(json!({"phone": phone, "password": "outcome-wrong-password-sentinel"})),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -822,6 +1071,142 @@ async fn outcomes() {
         common::deposits::core(first.1)
     );
     assert_eq!(attempts(&api, &reused_id).await, rows);
+    let replay_events = events(&api, &reused_id).await;
+    assert_eq!(replay_events.len(), completion.len() + 1);
+    assert_eq!(replay_events.last().unwrap()["payload"]["replayed"], true);
+
+    // F1: another claimed request ID cannot replay an unrelated key.
+    let owner_id = new_id();
+    let mut owner_transfer = transfer.clone();
+    owner_transfer["bank_tran_id"] = json!(bank_tran_id());
+    assert_eq!(
+        call(
+            &api.public,
+            "POST",
+            path,
+            &owner_id,
+            Some(&a.token),
+            Some(owner_transfer)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let mut other_transfer = transfer.clone();
+    other_transfer["bank_tran_id"] = json!(bank_tran_id());
+    let other_id = new_id();
+    assert_eq!(
+        call(
+            &api.public,
+            "POST",
+            path,
+            &other_id,
+            Some(&a.token),
+            Some(other_transfer.clone())
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let other_original = attempts(&api, &other_id).await;
+    let original_rows = attempts(&api, &owner_id).await;
+    let before = balances(&api).await;
+    let before_count = counts(&api).await;
+    let answer = call(
+        &api.public,
+        "POST",
+        path,
+        &owner_id,
+        Some(&a.token),
+        Some(other_transfer),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::CONFLICT);
+    assert_eq!(answer.1["rsp_code"], "A0007");
+    let after_rows = attempts(&api, &owner_id).await;
+    assert_eq!(after_rows.len(), original_rows.len() + 1);
+    assert!(original_rows.iter().all(|row| after_rows.contains(row)));
+    assert_eq!(attempts(&api, &other_id).await, other_original);
+    assert_eq!(balances(&api).await, before);
+    assert_eq!(counts(&api).await, (before_count.0 + 1, before_count.1));
+    assert_eq!(
+        after_rows
+            .iter()
+            .filter(|row| row["REUSED_REQUEST_ID"] == owner_id && row["STATUS"] == "REJECTED")
+            .count(),
+        1
+    );
+
+    let rejected = after_rows
+        .iter()
+        .find(|row| row["REUSED_REQUEST_ID"] == owner_id)
+        .unwrap();
+    assert_ne!(rejected["REQUEST_ID"], owner_id);
+    let completed = events(&api, &owner_id).await;
+    assert_eq!(completed.len(), 2);
+    assert_eq!(
+        completed[1]["payload"]["attempt_id"],
+        rejected["REQUEST_ID"]
+    );
+    assert_eq!(completed[1]["payload"]["http_status"], 409);
+
+    // F2: unclaimed auth rejections are relocated, then the original ID can claim.
+    let mut retry_transfer = transfer.clone();
+    retry_transfer["bank_tran_id"] = json!(bank_tran_id());
+    let retry_inbound = json!({"cntr_account_type": "N", "cntr_account_num": sender,
+        "wd_print_content": "송금", "name_check_option": "off", "tran_dtime": dt,
+        "req_cnt": "1", "req_list": [{"tran_no": "1", "bank_tran_id": bank_tran_id(),
+        "fintech_use_num": b.fin, "print_content": "입금", "tran_amt": "123",
+        "req_client_name": "외부수취인", "transfer_purpose": "TR"}]});
+    for (router, retry_path, token, body, amount) in [
+        (&api.public, path, a.token.as_str(), retry_transfer, 10),
+        (
+            &api.generator,
+            "/v2.0/transfer/deposit/fin_num",
+            client_token,
+            retry_inbound,
+            123,
+        ),
+    ] {
+        let id = new_id();
+        let before = common::deposits::snapshot(&api, &b.fin).await;
+        let before_counts = counts(&api).await;
+        let rejected = call(router, "POST", retry_path, &id, None, Some(body.clone())).await;
+        assert_eq!(rejected.0, StatusCode::UNAUTHORIZED);
+        let original = attempts(&api, &id).await;
+        assert_eq!(original.len(), 1);
+        assert!(original[0]["IDEM_KEY"].is_null());
+        let accepted = call(router, "POST", retry_path, &id, Some(token), Some(body)).await;
+        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+        let rows = attempts(&api, &id).await;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["REQUEST_ID"] == id && r["IDEM_KEY"].is_string())
+                .count(),
+            1
+        );
+        let moved = rows.iter().find(|r| r["REUSED_REQUEST_ID"] == id).unwrap();
+        assert_ne!(moved["REQUEST_ID"], id);
+        assert_eq!(moved["STATUS"], "REJECTED");
+        assert!(moved["IDEM_KEY"].is_null());
+        let mut expected_rejection = original[0].clone();
+        expected_rejection["REQUEST_ID"] = moved["REQUEST_ID"].clone();
+        expected_rejection["REUSED_REQUEST_ID"] = json!(id);
+        assert_eq!(*moved, expected_rejection);
+        let completed = events(&api, &id).await;
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0]["payload"]["http_status"], 401);
+        assert_eq!(completed[1]["payload"]["http_status"], 200);
+        assert_eq!(
+            common::deposits::snapshot(&api, &b.fin).await.0,
+            before.0 + amount
+        );
+        assert_eq!(
+            counts(&api).await,
+            (before_counts.0 + 2, before_counts.1 + 1)
+        );
+    }
 
     // Eight simultaneous duplicates each complete, while only one claims the key and posts.
     let mut concurrent = transfer;
@@ -912,6 +1297,20 @@ async fn outcomes() {
         "every OpenAPI operation has a successful witness"
     );
 
+    let expired_token = format!("outcome-expired-token-{}", new_id());
+    let hash = bank::shared::auth::token_hash(&expired_token);
+    let source = bank::shared::auth::token_hash(&a.token);
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(
+                &sql_stmt!("test.outcome_expired", "sql/outcome_expired.sql"),
+                &[&hash, &source],
+            )?;
+            s.commit()
+        })
+        .await
+        .unwrap();
     // T2: framework and extractor rejections all pass through the same fallback.
     for (method, path, token, text, expected, endpoint) in [
         (
@@ -925,7 +1324,15 @@ async fn outcomes() {
         (
             "GET",
             "/v2.0/user/me",
-            Some("unknown-token"),
+            Some("outcome-unknown-token-sentinel"),
+            String::new(),
+            401,
+            "/v2.0/user/me",
+        ),
+        (
+            "GET",
+            "/v2.0/user/me",
+            Some(expired_token.as_str()),
             String::new(),
             401,
             "/v2.0/user/me",
@@ -983,6 +1390,13 @@ async fn outcomes() {
         )
         .await;
         assert_eq!(status.as_u16(), expected, "{body}");
+        if matches!(expected, 404 | 405) {
+            assert_contract("Error", &body);
+            assert_eq!(
+                body["rsp_code"],
+                if expected == 404 { "A0003" } else { "A0002" }
+            );
+        }
         if expected == 400 {
             assert_contract("Error", &body);
             assert_eq!(body["rsp_code"], "A0002");
@@ -994,6 +1408,17 @@ async fn outcomes() {
         assert_eq!(found[0]["payload"]["endpoint"], endpoint);
         assert_eq!(found[0]["rsp_code"], body["rsp_code"]);
     }
+    let options_id = new_id();
+    call(
+        &api.generator,
+        "OPTIONS",
+        "/v2.0/user/me",
+        &options_id,
+        None,
+        None,
+    )
+    .await;
+    assert!(related(&api, &options_id).await.is_empty());
     for path in ["/healthz", "/internal/v1/clock", "/internal/unknown"] {
         let id = new_id();
         call(&api.generator, "GET", path, &id, None, None).await;
@@ -1068,7 +1493,9 @@ async fn outcomes() {
         })
         .await
         .unwrap();
+    let counter_before = unrecorded(&metrics);
     let blocked = call(&api.public, "GET", &balance, &refused, Some(&a.token), None).await;
+    let counter_after = unrecorded(&metrics);
     let blocked_events = events(&api, &refused).await;
     let other_id = new_id();
     let other = call(
@@ -1089,6 +1516,7 @@ async fn outcomes() {
         })
         .await
         .unwrap();
+    assert_eq!(counter_after, counter_before + 1);
     assert_eq!(blocked.0, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(blocked.1["rsp_code"], "A0013");
     assert!(blocked_events.is_empty());
@@ -1098,16 +1526,7 @@ async fn outcomes() {
     // T6: inspect the complete OUTBOX, including handler-owned events.
     let rows: Vec<String> = api.state.db.run(|s| s.query_all(&ALL, &[])).await.unwrap();
     for text in rows {
-        for secret in [
-            password,
-            "outcome-new-password",
-            code,
-            login_token,
-            &a.token,
-            &b.token,
-            client_token,
-            secret,
-        ] {
+        for secret in SECRETS.lock().unwrap().iter() {
             assert!(!text.contains(secret), "secret leaked into OUTBOX");
         }
         let event: Value = serde_json::from_str(&text).unwrap();

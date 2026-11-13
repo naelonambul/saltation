@@ -39,6 +39,7 @@ pub fn annotate(
 
 #[derive(Clone, Debug, Default)]
 pub struct Identity {
+    pub device_id: Option<String>,
     pub customer_no: Option<String>,
     pub session_id: Option<String>,
     pub client_id: Option<String>,
@@ -108,7 +109,9 @@ impl Recorder {
             } else {
                 "MOBILE"
             },
-            excluded: matches!(path, "/healthz" | "/metrics") || path.starts_with("/internal/"),
+            excluded: req.method() == axum::http::Method::OPTIONS
+                || matches!(path, "/healthz" | "/metrics")
+                || path.starts_with("/internal/"),
         }
     }
 
@@ -161,7 +164,7 @@ impl Recorder {
         event.customer_no = identity.customer_no;
         event.session_id = identity.session_id;
         if event.device_id.is_none() {
-            event.device_id = self.ctx.device_id.clone();
+            event.device_id = identity.device_id;
         }
         event.payload = serde_json::json!({
             "endpoint": self.endpoint,
@@ -222,6 +225,12 @@ pub fn reject_attempt(
     let kind = event.payload["request_type"]
         .as_str()
         .ok_or_else(|| DbError::Config("rejected attempt needs request_type".into()))?;
+    let mut device_id = ctx.device_id.clone().or_else(|| event.device_id.clone());
+    if device_id.is_none()
+        && let Some(id) = &event.session_id
+    {
+        device_id = outbox::session_device(session, id)?;
+    }
     let insert = |s: &mut crate::shared::db::Session, id: &str, reused: Option<&str>| {
         s.execute(
             &INSERT,
@@ -235,7 +244,7 @@ pub fn reject_attempt(
                 &event.bank_rsp_code,
                 &bank_tran_id,
                 &event.session_id,
-                &event.device_id,
+                &device_id,
                 &ctx.ip,
                 &ctx.region,
                 &at,
@@ -289,4 +298,51 @@ fn money_operation(method: &str, route: &str) -> Option<(&'static str, &'static 
         "/v2.0/ext/loans/{id}/repay" => Some(("LOAN_REPAY", "MOBILE")),
         _ => None,
     }
+}
+
+/// Claims a key, relocating an earlier unclaimed rejection atomically on PK collision.
+pub fn claim(
+    s: &mut crate::shared::db::Session,
+    stmt: &crate::shared::db::SqlStmt,
+    params: &[&dyn oracle::sql_type::ToSql],
+    id: &str,
+    scope: &str,
+    key: &str,
+) -> Result<u64, crate::shared::db::DbError> {
+    match s.execute(stmt, params) {
+        Err(error) if error.ora_code() == Some(1) => {
+            let existing: Option<String> = s.query_opt(
+                &crate::sql_stmt!("outcome.key_owner", "sql/key_owner.sql"),
+                &[&scope, &key],
+            )?;
+            if existing.is_none() {
+                let moved = s.execute(
+                    &crate::sql_stmt!("outcome.relocate_rejection", "sql/relocate_rejection.sql"),
+                    &[&ulid::Ulid::new().to_string(), &id, &id],
+                )?;
+                if moved == 1 {
+                    return s.execute(stmt, params);
+                }
+            }
+            Err(error)
+        }
+        result => result,
+    }
+}
+
+/// A claimed request ID belonging to another key takes precedence over replay.
+pub fn claimed_elsewhere(
+    s: &mut crate::shared::db::Session,
+    id: &str,
+    scope: &str,
+    key: &str,
+) -> Result<bool, crate::shared::db::DbError> {
+    let row: Option<(Option<String>, Option<String>)> = s.query_opt(
+        &crate::sql_stmt!("outcome.request_owner", "sql/request_owner.sql"),
+        &[&id],
+    )?;
+    Ok(row.is_some_and(|(stored_scope, stored_key)| {
+        stored_key.is_some()
+            && (stored_scope.as_deref() != Some(scope) || stored_key.as_deref() != Some(key))
+    }))
 }

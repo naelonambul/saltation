@@ -263,7 +263,8 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     let ctx = &plan.ctx;
     let req = &plan.req;
     let human = ctx.listener.as_str();
-    if let Err(e) = s.execute(
+    if let Err(e) = crate::shared::outcome::claim(
+        s,
         &INSERT_REQUEST,
         &[
             &ctx.request_id,
@@ -278,11 +279,24 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             &ctx.region,
             &plan.now,
         ],
+        &ctx.request_id,
+        &plan.scope,
+        &req.bank_tran_id,
     ) {
         if e.ora_code() == Some(1) {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&plan.scope, &req.bank_tran_id])?;
+            let stored = if crate::shared::outcome::claimed_elsewhere(
+                s,
+                &ctx.request_id,
+                &plan.scope,
+                &req.bank_tran_id,
+            )? {
+                None
+            } else {
+                stored
+            };
             if stored.as_ref().is_none_or(|row| row.0 != plan.hash) {
                 crate::shared::outcome::conflict(
                     s,
@@ -600,6 +614,8 @@ async fn withdraw(
     who: AuthCustomer,
     crate::shared::api::Json(req): crate::shared::api::Json<WithdrawRequest>,
 ) -> Result<Response, ApiError> {
+    let mut ctx = ctx;
+    ctx.device_id = ctx.device_id.or_else(|| who.device_id.clone());
     if !who.has_scope("transfer") {
         return Err(ApiError::new(
             &ctx,

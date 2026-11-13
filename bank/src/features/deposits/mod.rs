@@ -305,7 +305,8 @@ fn leg(id: i64, amount: i64, initiated: bool, other: &str, name: &str) -> Leg {
     }
 }
 fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
-    if let Err(e) = s.execute(
+    if let Err(e) = crate::shared::outcome::claim(
+        s,
         &INSERT_REQUEST,
         &[
             &p.ctx.request_id,
@@ -321,11 +322,24 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             &p.ctx.region,
             &p.now,
         ],
+        &p.ctx.request_id,
+        &p.scope,
+        &p.key,
     ) {
         if e.ora_code() == Some(1) {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&p.scope, &p.key])?;
+            let stored = if crate::shared::outcome::claimed_elsewhere(
+                s,
+                &p.ctx.request_id,
+                &p.scope,
+                &p.key,
+            )? {
+                None
+            } else {
+                stored
+            };
             if stored.as_ref().is_none_or(|row| row.0 != p.hash) {
                 crate::shared::outcome::conflict(
                     s,
@@ -540,6 +554,8 @@ fn plan(
     canonical: Value,
     operation: Operation,
 ) -> Plan {
+    let mut ctx = ctx;
+    ctx.device_id = ctx.device_id.or(who.device_id);
     Plan {
         ctx,
         now,

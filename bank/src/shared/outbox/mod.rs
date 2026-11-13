@@ -149,6 +149,15 @@ impl Event {
     }
 }
 
+pub(crate) fn session_device(session: &mut Session, id: &str) -> Result<Option<String>, DbError> {
+    Ok(session
+        .query_opt::<Option<String>>(
+            &crate::sql_stmt!("outbox.session_device", "sql/session_device.sql"),
+            &[&id],
+        )?
+        .flatten())
+}
+
 /// Inserts the event into `OUTBOX` in the caller's transaction.
 pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
     let mut event = event.clone();
@@ -168,14 +177,16 @@ pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
             );
         }
     }
+    if event.device_id.is_none()
+        && let Some(id) = &event.session_id
+    {
+        event.device_id = session_device(session, id)?;
+    }
     let json =
         serde_json::to_string(&event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
     if let Err(error) = session.execute(&INSERT_EVENT, &[&event.event_id, &json]) {
-        if event.event_type == "request.completed" {
-            tracing::warn!(error = %error, request_id = ?event.request_id, "completion event insert failed");
-            return Err(DbError::Busy);
-        }
-        return Err(error);
+        tracing::warn!(error = %error, request_id = ?event.request_id, event_type = event.event_type, "event insert failed");
+        return Err(DbError::Busy);
     }
     if event.event_type == "request.completed" {
         session.note_completion();
