@@ -1,7 +1,7 @@
 {
   "description": "event_type values of business events (spec F-35) written through the outbox to bank_logs. Bank-originated events have channel SYSTEM and a null request_id.",
   "event_types": {
-    "request.completed": "every API request, with endpoint, response codes and duration",
+    "request.completed": "every API request of the public and generator listeners (not /healthz, /metrics or /internal/**), exactly one per HTTP arrival; payload: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id",
     "login.succeeded": "customer login",
     "login.failed": "rejected login",
     "logout": "customer logout",

@@ -129,7 +129,8 @@
       "type": "boolean"
     },
     "payload": {
-      "type": "object"
+      "type": "object",
+      "description": "For request.completed: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; never a request or response body, header value or secret."
     }
   }
 }

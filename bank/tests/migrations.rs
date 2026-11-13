@@ -13,13 +13,18 @@ const COUNT_PERFORMANCE_INDEXES: SqlStmt = sql_stmt!(
     "sql/count_performance_indexes.sql"
 );
 
+const INSERT_REQUEST_ATTEMPT: SqlStmt = sql_stmt!(
+    "test.insert_request_attempt",
+    "sql/insert_request_attempt.sql"
+);
+
 #[tokio::test]
 async fn migrations_apply_once_and_are_recorded() {
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=13).collect::<Vec<_>>()
+        (1..=14).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -42,6 +47,63 @@ async fn migrations_apply_once_and_are_recorded() {
         })
         .await
         .expect("inspect");
+    db.run(|s| {
+        let absent: Option<&str> = None;
+        for id in ["migration14-rejected-1", "migration14-rejected-2"] {
+            s.execute(
+                &INSERT_REQUEST_ATTEMPT,
+                &[&id, &absent, &absent, &absent, &"REJECTED"],
+            )?;
+        }
+        let done = s
+            .execute(
+                &INSERT_REQUEST_ATTEMPT,
+                &[&"migration14-done", &absent, &absent, &absent, &"DONE"],
+            )
+            .expect_err("DONE must claim idempotency");
+        assert_eq!(done.ora_code(), Some(2290));
+
+        // Every partial-null combination must fail, regardless of which field is absent.
+        for mask in 1..7 {
+            let scope = (mask & 1 != 0).then_some("migration14");
+            let key = (mask & 2 != 0).then_some("partial");
+            let hash = (mask & 4 != 0).then_some("x");
+            let partial = s
+                .execute(
+                    &INSERT_REQUEST_ATTEMPT,
+                    &[&"migration14-partial", &scope, &key, &hash, &"REJECTED"],
+                )
+                .expect_err("a partial idempotency claim must fail");
+            assert_eq!(partial.ora_code(), Some(2290));
+        }
+        s.execute(
+            &INSERT_REQUEST_ATTEMPT,
+            &[
+                &"migration14-claimed-1",
+                &"migration14",
+                &"claimed",
+                &"x",
+                &"DONE",
+            ],
+        )?;
+        let duplicate = s
+            .execute(
+                &INSERT_REQUEST_ATTEMPT,
+                &[
+                    &"migration14-claimed-2",
+                    &"migration14",
+                    &"claimed",
+                    &"x",
+                    &"REJECTED",
+                ],
+            )
+            .expect_err("a claimed idempotency key must remain unique");
+        assert_eq!(duplicate.ora_code(), Some(1));
+        s.rollback()
+    })
+    .await
+    .expect("request attempt constraints");
+
     assert_eq!(recorded, MIGRATIONS.len() as i64);
     assert_eq!(
         outbox_ts, "OUTBOX_TS/OUTBOX_TS",
