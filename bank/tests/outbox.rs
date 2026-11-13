@@ -110,6 +110,7 @@ async fn relay_delivers_once_even_after_a_crash() {
         sample.get_str("occurred_at").is_ok(),
         "timestamps stay ISO-8601 strings, not BSON dates"
     );
+    assert!(sample.get_str("recorded_at").is_ok());
     assert_eq!(sample.get_str("_id").ok(), sample.get_str("event_id").ok());
 }
 
@@ -170,7 +171,7 @@ async fn outage_then_full_delivery() {
     while started.elapsed() < Duration::from_secs(150) {
         let body = json!({
             "bank_tran_id": bank_tran_id(), "fintech_use_num": fins[i % 2], "tran_amt": "100",
-            "tran_dtime": "20260101000000", "transfer_purpose": "TR", "recv_client_name": "최장애",
+            "tran_dtime": api.state.clock.state().await.expect("clock").business_time.format("%Y%m%d%H%M%S").to_string(), "transfer_purpose": "TR", "recv_client_name": "최장애",
             "recv_client_bank_code": "998", "recv_client_account_num": accounts[(i + 1) % 2],
         });
         let (status, body) = call(

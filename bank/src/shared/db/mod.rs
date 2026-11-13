@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oracle::Connection;
+use oracle::SqlValue;
 use oracle::pool::{CloseMode, GetMode, Pool, PoolBuilder};
-use oracle::sql_type::ToSql;
+use oracle::sql_type::{OracleType, ToSql};
 use tokio::sync::Semaphore;
 
 use crate::shared::telemetry::RequestStats;
@@ -17,6 +18,9 @@ use crate::shared::telemetry::RequestStats;
 pub use migrations::{MIGRATIONS, Migration};
 
 /// A named SQL statement loaded from a file at compile time.
+/// How long warming the pool at start may take.
+const WARM_UP_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy)]
 pub struct SqlStmt {
     pub name: &'static str,
@@ -110,13 +114,30 @@ pub struct Db {
 
 impl Db {
     pub fn connect(config: &DbConfig) -> Result<Self, DbError> {
+        // The pool is created empty and warmed here. Oracle client 23 would open a non-zero
+        // minimum in background threads (kpuspExtendStartup), and that wait can hang forever
+        // when another pool in the process is active.
         let pool = PoolBuilder::new(&config.user, &config.password, &config.connect_string)
-            .min_connections(config.min_sessions)
+            .min_connections(0)
             .max_connections(config.max_sessions)
             .connection_increment(1)
             .stmt_cache_size(config.stmt_cache_size)
             .get_mode(GetMode::TimedWait(config.acquire_timeout))
             .build()?;
+        // The get mode cannot change after creation (ORA-24499), so a get that times out
+        // while the pool is still opening the session (ORA-24459) is retried.
+        let deadline = Instant::now() + WARM_UP_WAIT;
+        let mut held: Vec<Connection> = Vec::new();
+        while held.len() < config.min_sessions.min(config.max_sessions) as usize {
+            match pool.get() {
+                Ok(conn) => held.push(conn),
+                Err(e)
+                    if e.db_error().is_some_and(|d| d.code() == 24459)
+                        && Instant::now() < deadline => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        drop(held);
         Ok(Self {
             pool: Arc::new(pool),
             gate: Arc::new(Semaphore::new(config.max_sessions as usize)),
@@ -212,6 +233,36 @@ impl StatementStats {
     }
 }
 
+/// Binds Rust strings as VARCHAR2. The driver's default is NVARCHAR2, which makes Oracle
+/// convert the VARCHAR2 column instead (`SYS_OP_C2C(col) = :bind`), so no index on a
+/// character column is used and every keyed lookup scans its table.
+struct Bind<'a>(&'a dyn ToSql);
+
+/// Longest string still bound as VARCHAR2 (4 bytes per character, 32767-byte limit).
+const VARCHAR_BIND_CHARS: u32 = 8000;
+
+impl ToSql for Bind<'_> {
+    fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
+        Ok(match self.0.oratype(conn)? {
+            OracleType::NVarchar2(chars) if chars <= VARCHAR_BIND_CHARS => {
+                OracleType::Varchar2(chars.max(1) * 4)
+            }
+            other => other,
+        })
+    }
+
+    fn to_sql(&self, val: &mut SqlValue) -> oracle::Result<()> {
+        self.0.to_sql(val)
+    }
+}
+
+/// Runs `f` with the binds wrapped in [`Bind`].
+fn with_binds<T>(params: &[&dyn ToSql], f: impl FnOnce(&[&dyn ToSql]) -> T) -> T {
+    let wrapped: Vec<Bind<'_>> = params.iter().map(|p| Bind(*p)).collect();
+    let refs: Vec<&dyn ToSql> = wrapped.iter().map(|b| b as &dyn ToSql).collect();
+    f(&refs)
+}
+
 /// One connection checked out for one unit of work.
 pub struct Session {
     conn: Connection,
@@ -248,8 +299,30 @@ impl Session {
     /// Executes a statement that returns no rows; returns the affected row count.
     pub fn execute(&mut self, stmt: &SqlStmt, params: &[&dyn ToSql]) -> Result<u64, DbError> {
         self.timed(stmt, |c| {
-            c.execute(stmt.sql, params).and_then(|s| s.row_count())
+            with_binds(params, |p| c.execute(stmt.sql, p)).and_then(|s| s.row_count())
         })
+    }
+
+    /// Inserts one row and reads its RETURNING ID out bind.
+    pub fn insert_returning_id(
+        &mut self,
+        stmt: &SqlStmt,
+        params: &[&dyn ToSql],
+    ) -> Result<i64, DbError> {
+        let ids = self.timed(stmt, |c| {
+            let mut statement = c.statement(stmt.sql).build()?;
+            statement.bind("id", &None::<i64>)?;
+            with_binds(params, |p| statement.execute(p))?;
+            statement.returned_values::<_, i64>("id")
+        })?;
+        match ids.as_slice() {
+            [id] => Ok(*id),
+            _ => Err(DbError::Config(format!(
+                "{} returned {} IDs, expected one",
+                stmt.name,
+                ids.len()
+            ))),
+        }
     }
 
     /// Executes a query expected to return exactly one row.
@@ -258,7 +331,9 @@ impl Session {
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<T, DbError> {
-        self.timed(stmt, |c| c.query_row_as::<T>(stmt.sql, params))
+        self.timed(stmt, |c| {
+            with_binds(params, |p| c.query_row_as::<T>(stmt.sql, p))
+        })
     }
 
     /// Executes a query expected to return at most one row.
@@ -284,7 +359,9 @@ impl Session {
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<Vec<T>, DbError> {
-        self.timed(stmt, |c| c.query_as::<T>(stmt.sql, params)?.collect())
+        self.timed(stmt, |c| {
+            with_binds(params, |p| c.query_as::<T>(stmt.sql, p)?.collect())
+        })
     }
 
     /// Executes a statement once per row of binds in one round trip (array DML).
@@ -300,7 +377,7 @@ impl Session {
         self.timed(stmt, |c| {
             let mut batch = c.batch(stmt.sql, size).build()?;
             for row in rows {
-                batch.append_row(row)?;
+                with_binds(row, |p| batch.append_row(p))?;
             }
             batch.execute()
         })

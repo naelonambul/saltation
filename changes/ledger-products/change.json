@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "ledger-products",
+  "kind": "implementation",
+  "title": "Stage 2: ledger and products",
+  "base": {
+    "ref": "main",
+    "commit": "11c50ebe72e38dcb94bf2f65acdc78df57b9d98b"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "contracts/**",
+    "bank/**",
+    "generator/**",
+    "scripts/dev/it-oracle.sh",
+    "infra/compose/**",
+    "docs/dev-host.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:836ebe195e4c5d0d450e4f8a2b4a7bb0494a82215a865814382c2f3adedef64b",
+      "by": "naelonambul",
+      "at": "2026-11-12T11:22:34Z",
+      "write_scope_sha256": "sha256:def63b48dcfb211331ff2fe424352a2374754cfea2553452b4fa10fbafdaabe4",
+      "note": "Owner in session: \uc2b9\uc778 (ledger-products plan sha256:836ebe19)"
+    }
+  ]
+}

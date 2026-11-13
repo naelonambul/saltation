@@ -11,14 +11,14 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::Duration;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::app::AppState;
 use crate::shared::api::{ApiError, codes};
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::SqlStmt;
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
@@ -140,11 +140,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             .get::<RequestStats>()
             .cloned()
             .unwrap_or_default();
-        let now: DateTime<FixedOffset> = state
-            .clock
-            .now()
-            .await
-            .map_err(|_| ApiError::internal(&ctx))?;
+        let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
         let found = state
             .db
             .run_in(&stats, move |s| {
@@ -193,5 +189,69 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(token_hash(&token), hash);
         assert_eq!(user_seq_no(42), "0000000042");
+    }
+}
+
+/// A live counterparty token; no customer session is touched or extended.
+#[derive(Debug, Clone)]
+pub struct AuthClient {
+    pub counterparty_client_id: i64,
+    pub client_id: String,
+    pub institution_code: String,
+    pub scope: String,
+}
+impl AuthClient {
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scope.split_whitespace().any(|s| s == scope)
+    }
+}
+const SELECT_CLIENT_TOKEN: SqlStmt =
+    sql_stmt!("auth.select_client_token", "sql/select_client_token.sql");
+impl FromRequestParts<AppState> for AuthClient {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let ctx = RequestContext::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|e| match e {});
+        let unauthorized = || {
+            ApiError::new(
+                &ctx,
+                StatusCode::UNAUTHORIZED,
+                codes::UNAUTHORIZED,
+                "인증이 필요합니다",
+            )
+        };
+        let hash = token_hash(bearer(parts).ok_or_else(unauthorized)?);
+        let stats = parts
+            .extensions
+            .get::<RequestStats>()
+            .cloned()
+            .unwrap_or_default();
+        let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
+        let row: Option<(i64, String, String, String)> = state
+            .db
+            .run_in(&stats, move |s| {
+                s.query_opt(&SELECT_CLIENT_TOKEN, &[&hash, &now])
+            })
+            .await
+            .map_err(|e| {
+                if matches!(e, crate::shared::db::DbError::Busy) {
+                    ApiError::busy(&ctx)
+                } else {
+                    ApiError::internal(&ctx)
+                }
+            })?;
+        row.map(
+            |(counterparty_client_id, client_id, institution_code, scope)| Self {
+                counterparty_client_id,
+                client_id,
+                institution_code,
+                scope,
+            },
+        )
+        .ok_or_else(unauthorized)
     }
 }

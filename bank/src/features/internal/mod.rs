@@ -2,11 +2,12 @@
 //! only on the generator listener. Stage 1: clock read, customer and demand
 //! account seeding.
 
-use axum::extract::State;
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -15,7 +16,8 @@ use crate::app::AppState;
 use crate::shared::api::fields::BANK_CODE;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth;
-use crate::shared::context::RequestContext;
+use crate::shared::clock::ClockError;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
 use crate::shared::outbox;
@@ -28,26 +30,31 @@ const SELECT_CUSTOMER_ID: SqlStmt =
 const INSERT_CREDENTIAL: SqlStmt =
     sql_stmt!("internal.insert_credential", "sql/insert_credential.sql");
 const INSERT_ACCOUNT: SqlStmt = sql_stmt!("internal.insert_account", "sql/insert_account.sql");
-const SELECT_ACCOUNT_ID: SqlStmt =
-    sql_stmt!("internal.select_account_id", "sql/select_account_id.sql");
 const INSERT_FINTECH: SqlStmt = sql_stmt!("internal.insert_fintech", "sql/insert_fintech.sql");
 const INSERT_STATUS: SqlStmt = sql_stmt!(
     "internal.insert_status_history",
     "sql/insert_status_history.sql"
-);
-const INSERT_SEED_REQUEST: SqlStmt = sql_stmt!(
-    "internal.insert_seed_request",
-    "sql/insert_seed_request.sql"
 );
 
 const MAX_BATCH: usize = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/internal/v1/seed/counterparty_clients",
+            post(seed_counterparty_clients),
+        )
         .route("/internal/v1/clock", get(read_clock))
+        .route("/internal/v1/clock/set", post(set_clock))
+        .route("/internal/v1/clock/advance", post(advance_clock))
+        .route("/internal/v1/mode/live", post(go_live))
         .route("/internal/v1/outbox", get(read_outbox))
         .route("/internal/v1/seed/customers", post(seed_customers))
         .route("/internal/v1/seed/accounts", post(seed_accounts))
+        .route(
+            "/internal/v1/seed/counterparties",
+            post(seed_counterparties),
+        )
 }
 
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
@@ -118,6 +125,7 @@ fn ci_hash(c: &SeedCustomer) -> String {
 }
 
 async fn seed_customers(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -126,7 +134,10 @@ async fn seed_customers(
     if req.customers.is_empty() || req.customers.len() > MAX_BATCH {
         return Err(bad_request(&ctx, "customers must contain 1 to 500 entries"));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
+    if req.customers.iter().any(|c| c.name.chars().count() > 50) {
+        return Err(bad_request(&ctx, "name must be at most 50 characters"));
+    }
     let mut rows = Vec::with_capacity(req.customers.len());
     for c in req.customers {
         let hash = auth::hash_secret(c.password.clone())
@@ -139,7 +150,7 @@ async fn seed_customers(
         .db
         .run_in(&stats, move |s| {
             for (ci, hash, c) in &rows {
-                s.execute(
+                let id = s.insert_returning_id(
                     &INSERT_CUSTOMER,
                     &[
                         &c.customer_no,
@@ -151,7 +162,6 @@ async fn seed_customers(
                         &now,
                     ],
                 )?;
-                let id: i64 = s.query_row(&SELECT_CUSTOMER_ID, &[&c.customer_no])?;
                 s.execute(&INSERT_CREDENTIAL, &[&id, hash, &now])?;
             }
             s.commit()
@@ -181,6 +191,7 @@ fn fintech_use_num(account_id: i64) -> String {
 }
 
 async fn seed_accounts(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -196,7 +207,7 @@ async fn seed_accounts(
     {
         return Err(bad_request(&ctx, "account_no must be up to 16 digits"));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let accounts = req.accounts;
     let created = state
         .db
@@ -204,8 +215,8 @@ async fn seed_accounts(
             let mut out = Vec::with_capacity(accounts.len());
             for a in &accounts {
                 let customer_id: i64 = s.query_row(&SELECT_CUSTOMER_ID, &[&a.customer_no])?;
-                s.execute(&INSERT_ACCOUNT, &[&a.account_no, &customer_id, &now])?;
-                let account_id: i64 = s.query_row(&SELECT_ACCOUNT_ID, &[&a.account_no])?;
+                let account_id =
+                    s.insert_returning_id(&INSERT_ACCOUNT, &[&a.account_no, &customer_id, &now])?;
                 let fin = fintech_use_num(account_id);
                 s.execute(
                     &INSERT_FINTECH,
@@ -213,18 +224,19 @@ async fn seed_accounts(
                 )?;
                 s.execute(&INSERT_STATUS, &[&account_id, &now])?;
                 if a.opening_balance > 0 {
-                    let request_id = ulid::Ulid::new().to_string();
-                    s.execute(&INSERT_SEED_REQUEST, &[&request_id, &a.account_no, &now])?;
                     let mut locks = ledger::lock_accounts(s, &[account_id])?;
                     let movement = Movement {
                         kind: Kind::Inbound,
-                        request_id: &request_id,
+                        payee_registered: None,
+                        request_id: None,
+                        ctx: None,
                         bank_tran_id: None,
                         amount: a.opening_balance,
                         channel: "SYSTEM",
                         occurred_at: now,
                         legs: vec![Leg {
                             account_id,
+                            customer_initiated: false,
                             amount: a.opening_balance,
                             inout_type: "입금",
                             tran_type: "대체",
@@ -259,4 +271,214 @@ mod tests {
         assert_eq!(fintech_use_num(7), "998000000000000000000007");
         assert_eq!(fintech_use_num(7).len(), 24);
     }
+}
+
+fn clock_error(ctx: &RequestContext, error: ClockError) -> ApiError {
+    match error {
+        ClockError::Busy => ApiError::busy(ctx),
+        ClockError::Db(e) => db_error(ctx, &e),
+        other => bad_request(ctx, &other.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClockSet {
+    business_time: DateTime<FixedOffset>,
+}
+
+#[derive(Deserialize)]
+struct ClockAdvance {
+    seconds: i64,
+}
+
+async fn set_clock(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    body: Result<Json<ClockSet>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|_| bad_request(&ctx, "invalid business_time"))?;
+    let clock = state
+        .clock
+        .set(body.business_time)
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
+}
+
+async fn advance_clock(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    body: Result<Json<ClockAdvance>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body.map_err(|_| bad_request(&ctx, "invalid seconds"))?;
+    if body.seconds < 1 {
+        return Err(bad_request(&ctx, "seconds must be at least 1"));
+    }
+    let clock = state
+        .clock
+        .advance(body.seconds)
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
+}
+
+async fn go_live(State(state): State<AppState>, ctx: RequestContext) -> Result<Response, ApiError> {
+    let clock = state
+        .clock
+        .go_live()
+        .await
+        .map_err(|e| clock_error(&ctx, e))?;
+    Ok(api::ok(&ctx, clock))
+}
+
+const INSERT_COUNTERPARTY: SqlStmt = sql_stmt!(
+    "internal.insert_counterparty",
+    "sql/insert_counterparty.sql"
+);
+#[derive(Deserialize)]
+struct SeedCounterparty {
+    counterparty_type: String,
+    industry_code: Option<String>,
+    institution_code: String,
+    account_no: String,
+    name: String,
+}
+#[derive(Deserialize)]
+struct SeedCounterparties {
+    counterparties: Vec<SeedCounterparty>,
+}
+async fn seed_counterparties(
+    BusinessTime(now): BusinessTime,
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    Json(req): Json<SeedCounterparties>,
+) -> Result<Response, ApiError> {
+    if req.counterparties.is_empty()
+        || req.counterparties.len() > MAX_BATCH
+        || req.counterparties.iter().any(|c| {
+            c.name.chars().count() > 50
+                || !matches!(
+                    c.counterparty_type.as_str(),
+                    "EMPLOYER" | "MERCHANT" | "INDIVIDUAL"
+                )
+                || c.industry_code.as_ref().is_some_and(|v| {
+                    v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+                || c.institution_code.len() != 3
+                || !c.institution_code.bytes().all(|b| b.is_ascii_digit())
+                || c.account_no.is_empty()
+                || c.account_no.len() > 16
+                || !c.account_no.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        return Err(bad_request(&ctx, "invalid counterparties"));
+    }
+    let created = state
+        .db
+        .run_in(&stats, move |s| {
+            let mut created = 0u64;
+            for c in req.counterparties {
+                match s.execute(
+                    &INSERT_COUNTERPARTY,
+                    &[
+                        &c.counterparty_type,
+                        &c.industry_code,
+                        &c.institution_code,
+                        &c.account_no,
+                        &c.name,
+                        &now,
+                    ],
+                ) {
+                    Ok(n) => created += n,
+                    Err(e) if e.ora_code() == Some(1) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            s.commit()?;
+            Ok(created)
+        })
+        .await
+        .map_err(|e| {
+            if e.ora_code() == Some(2291) {
+                bad_request(&ctx, "unknown institution code")
+            } else {
+                db_error(&ctx, &e)
+            }
+        })?;
+    Ok(api::ok(&ctx, json!({ "created": created })))
+}
+
+const INSERT_CLIENT: SqlStmt = sql_stmt!("internal.insert_client", "sql/insert_client.sql");
+const BANK_EXISTS: SqlStmt = sql_stmt!("internal.bank_exists", "sql/bank_exists.sql");
+#[derive(Deserialize)]
+struct SeedClient {
+    client_id: String,
+    client_secret: String,
+    institution_code: String,
+    scope: String,
+}
+#[derive(Deserialize)]
+struct SeedClients {
+    counterparty_clients: Vec<SeedClient>,
+}
+async fn seed_counterparty_clients(
+    BusinessTime(now): BusinessTime,
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    body: Result<Json<SeedClients>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(req) = body.map_err(|_| bad_request(&ctx, "invalid counterparty_clients"))?;
+    if req.counterparty_clients.is_empty()
+        || req.counterparty_clients.len() > MAX_BATCH
+        || req.counterparty_clients.iter().any(|c| {
+            c.client_id.is_empty()
+                || c.client_id.len() > 40
+                || !c
+                    .client_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                || !(16..=128).contains(&c.client_secret.chars().count())
+                || c.scope != "oob"
+                || c.institution_code.len() != 3
+                || !c.institution_code.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        return Err(bad_request(&ctx, "invalid counterparty_clients"));
+    }
+    let mut rows = Vec::new();
+    for c in req.counterparty_clients {
+        let hash = auth::hash_secret(c.client_secret.clone())
+            .await
+            .map_err(|_| ApiError::internal(&ctx))?;
+        rows.push((c, hash));
+    }
+    let created = state
+        .db
+        .run_in(&stats, move |s| {
+            for (c, _) in &rows {
+                let count: i64 = s.query_row(&BANK_EXISTS, &[&c.institution_code])?;
+                if count == 0 {
+                    return Ok(None);
+                }
+            }
+            let mut count = 0;
+            for (c, hash) in rows {
+                match s.execute(
+                    &INSERT_CLIENT,
+                    &[&c.client_id, &hash, &c.institution_code, &c.scope, &now],
+                ) {
+                    Ok(n) => count += n,
+                    Err(e) if e.ora_code() == Some(1) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            s.commit()?;
+            Ok(Some(count))
+        })
+        .await
+        .map_err(|e| db_error(&ctx, &e))?
+        .ok_or_else(|| bad_request(&ctx, "unknown bank institution"))?;
+    Ok(api::ok(&ctx, json!({"created": created})))
 }

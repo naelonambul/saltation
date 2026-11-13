@@ -15,7 +15,7 @@ use crate::shared::api::fields::{self, BANK_CODE, BANK_NAME};
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer};
 use crate::shared::clock::kst;
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
@@ -77,10 +77,10 @@ fn require_scope(ctx: &RequestContext, who: &AuthCustomer, scope: &str) -> Resul
     }
 }
 
-type AccountRow = (String, String, String, String, String);
+type AccountRow = (String, String, String, String, String, i64);
 
-fn account_json(name: &str, (fin, account_no, subtype, status, product): &AccountRow) -> Value {
-    json!({
+fn account_json(name: &str, (fin, account_no, subtype, status, product, id): &AccountRow) -> Value {
+    let mut account = json!({
         "fintech_use_num": fin,
         "account_alias": product,
         "bank_code_std": BANK_CODE,
@@ -91,7 +91,11 @@ fn account_json(name: &str, (fin, account_no, subtype, status, product): &Accoun
         "inquiry_agree_yn": "Y",
         "transfer_agree_yn": if subtype == "DEMAND" { "Y" } else { "N" },
         "account_state": if status == "CLOSED" { "09" } else { "01" },
-    })
+    });
+    if matches!(subtype.as_str(), "TERM" | "LOAN") {
+        account["ext_account_id"] = json!(id.to_string());
+    }
+    account
 }
 
 async fn load_accounts(
@@ -162,7 +166,8 @@ type BalanceRow = (
     String,
     String,
     DateTime<FixedOffset>,
-    Option<DateTime<FixedOffset>>,
+    Option<String>,
+    Option<String>,
 );
 
 fn not_found(ctx: &RequestContext) -> ApiError {
@@ -193,6 +198,7 @@ fn merge(mut a: Value, b: Value) -> Value {
 }
 
 async fn balance(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -206,7 +212,7 @@ async fn balance(
             "bank_tran_id 또는 tran_dtime 형식이 올바르지 않습니다",
         ));
     }
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let fin = q.fintech_use_num.clone();
     let customer_id = who.customer_id;
     let row: Option<BalanceRow> = state
@@ -216,7 +222,8 @@ async fn balance(
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
-    let (_, _, balance, subtype, product, opened, last) = row.ok_or_else(|| not_found(&ctx))?;
+    let (_, _, balance, subtype, product, opened, last, maturity) =
+        row.ok_or_else(|| not_found(&ctx))?;
     Ok(api::ok(
         &ctx,
         merge(
@@ -224,12 +231,12 @@ async fn balance(
             json!({
                 "fintech_use_num": q.fintech_use_num,
                 "balance_amt": balance.to_string(),
-                "available_amt": balance.to_string(),
+                "available_amt": if subtype == "DEMAND" { balance.to_string() } else { "0".to_owned() },
                 "account_type": fields::account_type(&subtype),
                 "product_name": product,
                 "account_issue_date": fields::date(opened),
-                "maturity_date": "",
-                "last_tran_date": last.map(fields::date).unwrap_or_default(),
+                "maturity_date": maturity.unwrap_or_default(),
+                "last_tran_date": last.unwrap_or_default(),
             }),
         ),
     ))
@@ -277,6 +284,7 @@ fn parse_bound(date: &str, time: Option<&str>, end: bool) -> Option<DateTime<Fix
 }
 
 async fn transaction_list(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
@@ -327,7 +335,7 @@ async fn transaction_list(
         ),
         None => None,
     };
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
+
     let fin = q.fintech_use_num.clone();
     let customer_id = who.customer_id;
     let itype = q.inquiry_type.clone();

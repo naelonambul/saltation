@@ -1,0 +1,224 @@
+openapi: 3.1.0
+info:
+  title: Saltation internal interface (generator only)
+  version: 0.1.0
+  description: >
+    Served on the generator listener only, without authentication: seeding,
+    the simulated SMS outbox, the simulated clock and the outbox backlog.
+    Every response carries the common envelope of public.yaml. Amounts here
+    are JSON integers.
+servers:
+  - url: http://localhost:8081
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
+      properties:
+        api_tran_id: { type: string, maxLength: 40 }
+        api_tran_dtm: { type: string, pattern: "^[0-9]{17}$" }
+        rsp_code: { type: string, pattern: "^[A-Z][0-9]{4}$" }
+        rsp_message: { type: string, maxLength: 300 }
+        request_id: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+    Error:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            rsp_code: { not: { const: A0000 } }
+    ClockResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [mode, business_time, rolled_through]
+          properties:
+            mode: { enum: [BACKFILL, LIVE] }
+            business_time: { type: string, format: date-time }
+            rolled_through:
+              description: The last business date whose rollover finished; null before the first.
+              anyOf: [{ type: string, format: date }, { type: "null" }]
+    ClockSetRequest:
+      description: Backfill only. Forward only, except that the clock may also move back while the bank has no customer.
+      type: object
+      required: [business_time]
+      properties:
+        business_time: { type: string, format: date-time }
+    ClockAdvanceRequest:
+      description: Backfill only. Rolls every business date the clock leaves before the new time is stored.
+      type: object
+      required: [seconds]
+      properties:
+        seconds: { type: integer, minimum: 1 }
+    OutboxResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [undelivered, oldest_age_seconds]
+          properties:
+            undelivered: { type: integer, minimum: 0 }
+            oldest_age_seconds: { type: [number, "null"] }
+    SmsResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [phone, message, code, occurred_at]
+          properties:
+            phone: { type: string, maxLength: 20 }
+            message: { type: string, maxLength: 200 }
+            code: { type: string, pattern: "^[0-9]{6}$" }
+            occurred_at: { type: string, format: date-time }
+    SeedCustomersRequest:
+      type: object
+      required: [customers]
+      properties:
+        customers:
+          type: array
+          items:
+            type: object
+            required: [customer_no, name, phone, customer_type, password]
+            properties:
+              customer_no: { type: string, maxLength: 12 }
+              name: { type: string, maxLength: 50 }
+              phone: { type: string, maxLength: 20 }
+              address: { type: string, maxLength: 200 }
+              customer_type: { enum: [INDIVIDUAL, SOLE_PROPRIETOR] }
+              password: { type: string, maxLength: 128 }
+    SeedAccountsRequest:
+      type: object
+      required: [accounts]
+      properties:
+        accounts:
+          type: array
+          items:
+            type: object
+            required: [customer_no, account_no]
+            properties:
+              customer_no: { type: string, maxLength: 12 }
+              account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+              opening_balance: { type: integer, minimum: 0 }
+    SeedAccountsResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [accounts]
+          properties:
+            accounts:
+              type: array
+              items:
+                type: object
+                required: [account_no, fintech_use_num]
+                properties:
+                  account_no: { type: string }
+                  fintech_use_num: { type: string, minLength: 24, maxLength: 24 }
+    SeedCounterpartyClientsRequest:
+      type: object
+      required: [counterparty_clients]
+      properties:
+        counterparty_clients:
+          type: array
+          items:
+            type: object
+            required: [client_id, client_secret, institution_code, scope]
+            properties:
+              client_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,40}$" }
+              client_secret: { type: string, minLength: 16, maxLength: 128 }
+              institution_code: { type: string, pattern: "^[0-9]{3}$" }
+              scope: { enum: [oob] }
+    SeedCounterpartiesRequest:
+      type: object
+      required: [counterparties]
+      properties:
+        counterparties:
+          type: array
+          items:
+            type: object
+            required: [counterparty_type, institution_code, account_no, name]
+            properties:
+              counterparty_type: { enum: [EMPLOYER, MERCHANT, INDIVIDUAL] }
+              industry_code: { type: string, pattern: "^[A-Za-z0-9]{1,10}$" }
+              institution_code: { type: string, pattern: "^[0-9]{3}$" }
+              account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+              name: { type: string, maxLength: 50 }
+    CreatedResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [created]
+          properties:
+            created: { type: integer, minimum: 0 }
+paths:
+  /internal/v1/clock:
+    get:
+      summary: The simulated clock
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ClockResponse" } } } }
+  /internal/v1/clock/set:
+    post:
+      summary: Set business time (backfill only)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ClockSetRequest" } } }
+      responses:
+        "200": { description: Set, content: { application/json: { schema: { $ref: "#/components/schemas/ClockResponse" } } } }
+        "400": { description: "Not in backfill mode, or a move back that is not allowed (rsp_code A0002)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Requests in flight did not finish within 10 seconds, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/v1/clock/advance:
+    post:
+      summary: Advance business time (backfill only)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ClockAdvanceRequest" } } }
+      responses:
+        "200": { description: Advanced, content: { application/json: { schema: { $ref: "#/components/schemas/ClockResponse" } } } }
+        "400": { description: Not in backfill mode (rsp_code A0002), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Requests in flight did not finish within 10 seconds, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/v1/mode/live:
+    post:
+      summary: Switch to live mode (one way); does nothing when already live
+      responses:
+        "200": { description: Live, content: { application/json: { schema: { $ref: "#/components/schemas/ClockResponse" } } } }
+        "400": { description: Wall-clock time is behind business time (rsp_code A0002), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/v1/outbox:
+    get:
+      summary: Outbox backlog, for generator backpressure
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/OutboxResponse" } } } }
+  /internal/v1/sms/{phone}:
+    get:
+      summary: The latest reset message sent to a phone
+      parameters: [{ name: phone, in: path, required: true, schema: { type: string, maxLength: 20 } }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/SmsResponse" } } } }
+        "404": { description: No message for this phone, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /internal/v1/seed/customers:
+    post:
+      summary: Seed customers with credentials
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedCustomersRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/CreatedResponse" } } } }
+  /internal/v1/seed/accounts:
+    post:
+      summary: Seed demand deposit accounts, with an optional opening balance
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedAccountsRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/SeedAccountsResponse" } } } }
+  /internal/v1/seed/counterparty_clients:
+    post:
+      summary: Seed counterparty clients (stored with a hashed secret)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedCounterpartyClientsRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/CreatedResponse" } } } }
+  /internal/v1/seed/counterparties:
+    post:
+      summary: Seed external counterparty accounts
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedCounterpartiesRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/CreatedResponse" } } } }

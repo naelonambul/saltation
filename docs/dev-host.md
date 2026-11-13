@@ -62,7 +62,20 @@ Registered in `checks.json`; run them all with `python3 scripts/repo.py verify -
 | `python` | `scripts/dev/ci-py.sh lint\|test` | Docker |
 | `oracle` | `scripts/dev/it-oracle.sh all`, Compose config check | Docker and the `saltation/oracle-ee:19.19` image |
 
-`scripts/dev/it-oracle.sh` runs Oracle and MongoDB in a separate Compose project (`saltation-it`). Its credentials and lock live in `$SALTATION_IT_DIR` (default `~/.cache/saltation-it`), outside the checkout, so the test database is created once and reused: a typical run skips database creation. The volumes are recreated when the env file is new, when `--fresh` is given, or when the setup key changes (a hash of `infra/oracle/setup/*`, `infra/mongo/init/*`, `infra/oracle/build.sh` and the Oracle image ID), or when the database volumes are not the ones this state created (for example volumes recreated by an older version of the script). Each run resets the schema and `bank_logs.events`, stops application containers before the database targets, and holds a per-host lock. To recover by hand, run `scripts/dev/it-oracle.sh all --fresh` or delete the state directory. It accepts a single target: `mongo-users`, `migrations`, `listeners`, `auth`, `accounts`, `transfers`, `outbox`, `outbox-outage` (stops MongoDB for 120 s during load; about 5 minutes), `observability` or `all`. `--fresh` recreates its volumes.
+`scripts/dev/it-oracle.sh` runs Oracle and MongoDB in a separate Compose project (`saltation-it`). Its credentials and lock live in `$SALTATION_IT_DIR` (default `~/.cache/saltation-it`), outside the checkout, so the test database is created once and reused: a typical run skips database creation. The volumes are recreated when the env file is new, when `--fresh` is given, or when the setup key changes (a hash of `infra/oracle/setup/*`, `infra/mongo/init/*`, `infra/oracle/build.sh` and the Oracle image ID), or when the database volumes are not the ones this state created (for example volumes recreated by an older version of the script). Each run resets the schema and `bank_logs.events`, stops application containers before the database targets, and holds a per-host lock. To recover by hand, run `scripts/dev/it-oracle.sh all --fresh` or delete the state directory. It accepts a single target: `mongo-users`, `migrations`, `backfill`, `listeners`, `auth`, `accounts`, `transfers`, `payees`, `inbound`, `password_reset`, `deposits`, `loans`, `outbox`, `outbox-outage` (stops MongoDB for 120 s during load; about 5 minutes), `observability`, `e2e` or `all`. `--fresh` recreates its volumes.
+
+`all` runs, in order: `mongo-users`; `migrations` (a reset schema, so the bank is in backfill mode); the ordinary suites; `backfill` (resets the schema again, crosses business dates with the day rollover and ends in live mode); the ordinary suites again, now in live mode; `observability`. A single target such as `scripts/dev/it-oracle.sh loans` runs one suite. `e2e` is run on demand and is not part of `all`.
+
+### Simulated clock
+
+A new database starts in backfill mode with business time frozen at first start. The local stack and `e2e` switch to live with the generator before driving activity:
+
+```
+docker compose --profile tools run --rm generator seed-parties --counterparties 50
+docker compose --profile tools run --rm generator clock live
+```
+
+`clock show` prints the mode, the business time and the last business date whose rollover finished. In backfill mode `clock set <RFC 3339 time>` and `clock advance <seconds>` move business time forward, rolling every business date they leave (maturities, dormancy, daily close); `clock set` may move it back only while the bank has no customer. `clock live` is one-way and does nothing when the bank is already live.
 
 ## Self-hosted runner on the OCI host (owner)
 

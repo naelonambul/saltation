@@ -1,6 +1,7 @@
 """Seeds customers and funded demand accounts through the internal interface
 (spec F-29) and records them in the generator's roster."""
 
+import hashlib
 import random
 from typing import Any
 
@@ -55,3 +56,39 @@ async def seed(bank: BankClient, truth: TruthStore, seed: int, count: int, start
         fins = {a["account_no"]: a["fintech_use_num"] for a in accounts}
         await truth.add_roster([{**c, "fintech_use_num": fins[c["account_no"]]} for c in batch])
     return len(customers)
+
+
+def make_counterparties(seed: int, count: int) -> list[dict[str, Any]]:
+    rng = random.Random(seed)
+    return [
+        {
+            "counterparty_type": ("EMPLOYER", "MERCHANT", "INDIVIDUAL")[i % 3],
+            "institution_code": str(901 + i % 3),
+            "account_no": f"{901 + i % 3}{i:013d}",
+            "name": rng.choice(FAMILY) + rng.choice(GIVEN),
+        }
+        for i in range(count)
+    ]
+
+
+def make_clients(seed: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "client_id": f"cp-{code}",
+            "client_secret": hashlib.sha256(f"{seed}:cp-{code}".encode()).hexdigest(),
+            "institution_code": str(code),
+            "scope": "oob",
+        }
+        for code in range(901, 904)
+    ]
+
+
+async def seed_parties(bank: BankClient, seed: int, count: int) -> dict[str, int]:
+    counts = {"counterparties": 0, "counterparty_clients": 0}
+    for key, items, send in (
+        ("counterparties", make_counterparties(seed, count), bank.seed_counterparties),
+        ("counterparty_clients", make_clients(seed), bank.seed_counterparty_clients),
+    ):
+        for i in range(0, len(items), BATCH):
+            counts[key] += await send(items[i : i + BATCH])
+    return counts

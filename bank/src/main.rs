@@ -6,6 +6,7 @@ use anyhow::Context;
 use bank::app::{self, AppState};
 use bank::shared::clock::Clock;
 use bank::shared::db::{Db, DbConfig};
+use bank::shared::rollover::Registry;
 use bank::shared::telemetry;
 use tokio::net::TcpListener;
 
@@ -72,6 +73,7 @@ fn mongo_uri() -> Result<String, std::env::VarError> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let limits = bank::shared::limits::Limits::from_env()?;
     let log_dir =
         std::env::var("SALTATION_LOG_DIR").unwrap_or_else(|_| "/var/log/saltation".to_owned());
     let _log_guard = telemetry::init_logging(&log_dir).context("app.log")?;
@@ -81,12 +83,23 @@ async fn main() -> anyhow::Result<()> {
         .context("connect to Oracle")?;
     let applied = db.migrate().await.context("apply migrations")?;
     tracing::info!(applied, "migrations up to date");
-    let clock = Clock::init(db.clone())
+    let mut registry = Registry::default();
+    registry.register(std::sync::Arc::new(bank::features::deposits::MaturityJob));
+    for job in bank::features::accounts_lifecycle::jobs() {
+        registry.register(job);
+    }
+    registry.register(std::sync::Arc::new(
+        bank::features::daily_close::DailyCloseJob,
+    ));
+    let clock = Clock::init(db.clone(), registry)
         .await
         .context("initialise the clock")?;
+    clock.catch_up().await.context("catch up rollover")?;
+    clock.spawn_live_scheduler();
     let state = AppState {
         db: db.clone(),
         clock,
+        limits,
     };
     match mongo_uri() {
         Ok(uri) => {

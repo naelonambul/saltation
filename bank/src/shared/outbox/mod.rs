@@ -4,7 +4,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use chrono::{DateTime, FixedOffset, SecondsFormat};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use ulid::Generator;
@@ -37,6 +37,7 @@ pub struct Event {
     pub event_id: String,
     pub event_type: &'static str,
     pub occurred_at: String,
+    pub recorded_at: String,
     pub request_id: Option<String>,
     pub session_id: Option<String>,
     pub device_id: Option<String>,
@@ -54,6 +55,35 @@ pub struct Event {
 }
 
 impl Event {
+    /// A system event without request or listener identity.
+    pub fn system(
+        event_type: &'static str,
+        occurred_at: DateTime<FixedOffset>,
+        outcome: &'static str,
+    ) -> Self {
+        Self {
+            schema: SCHEMA,
+            event_id: next_event_id(),
+            event_type,
+            occurred_at: occurred_at.to_rfc3339_opts(SecondsFormat::Micros, false),
+            recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            request_id: None,
+            session_id: None,
+            device_id: None,
+            customer_no: None,
+            account_no: None,
+            channel: "SYSTEM",
+            listener: None,
+            ip: None,
+            region: None,
+            outcome,
+            rsp_code: None,
+            bank_rsp_code: None,
+            human: false,
+            payload: Value::Object(Default::default()),
+        }
+    }
+
     /// An event caused by a request.
     pub fn for_request(
         ctx: &RequestContext,
@@ -67,13 +97,14 @@ impl Event {
             event_id: next_event_id(),
             event_type,
             occurred_at: occurred_at.to_rfc3339_opts(SecondsFormat::Millis, false),
+            recorded_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             request_id: Some(ctx.request_id.clone()),
             session_id: None,
             device_id: ctx.device_id.clone(),
             customer_no: None,
             account_no: None,
             channel,
-            listener: Some(ctx.listener.as_str()),
+            listener: Some(ctx.listener.event_label()),
             ip: ctx.ip.clone(),
             region: ctx.region.clone(),
             outcome,

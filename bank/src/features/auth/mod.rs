@@ -15,13 +15,14 @@ use ulid::Ulid;
 use crate::app::AppState;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer, CUSTOMER_SCOPE, SESSION_IDLE};
-use crate::shared::context::RequestContext;
+use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
 const SELECT_LOGIN: SqlStmt = sql_stmt!("auth.select_login", "sql/select_login.sql");
+const LOCK_CREDENTIAL: SqlStmt = sql_stmt!("auth.lock_credential", "sql/lock_credential.sql");
 const RECORD_FAILURE: SqlStmt = sql_stmt!("auth.record_failure", "sql/record_failure.sql");
 const SELECT_FAILURES: SqlStmt = sql_stmt!("auth.select_failures", "sql/select_failures.sql");
 const RESET_FAILURES: SqlStmt = sql_stmt!("auth.reset_failures", "sql/reset_failures.sql");
@@ -82,12 +83,12 @@ fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
 }
 
 async fn login(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
     let device_id = req.device_id.clone().or_else(|| ctx.device_id.clone());
     let phone = req.phone.clone();
     let found: Option<LoginRow> = state
@@ -112,6 +113,7 @@ async fn login(
         }
     };
 
+    let verified_hash = found.as_ref().map(|(_, _, hash, ..)| hash.clone());
     let customer = found.map(|(id, no, _, _, locked)| (id, no, locked));
     let (token, token_hash) = auth::new_token();
     let session_id = Ulid::new().to_string();
@@ -141,6 +143,13 @@ async fn login(
                         failures = count;
                     }
                     Outcome::Success => {
+                        // The password was verified before this transaction; if it changed
+                        // since (a reset), the caller retries and is judged on the new one.
+                        let current: String = s.query_row(&LOCK_CREDENTIAL, &[id])?;
+                        if Some(&current) != verified_hash.as_ref() {
+                            s.rollback()?;
+                            return Err(DbError::Busy);
+                        }
                         s.execute(&RESET_FAILURES, &[id])?;
                         let mut new_device = false;
                         if let Some(d) = &dev {
@@ -249,12 +258,12 @@ async fn login(
 }
 
 async fn logout(
+    BusinessTime(now): BusinessTime,
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
 ) -> Result<Response, ApiError> {
-    let now = state.clock.now().await.map_err(|e| db_error(&ctx, &e))?;
     let c = ctx.clone();
     state
         .db

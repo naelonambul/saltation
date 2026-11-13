@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, listeners, auth, accounts, transfers, outbox, outbox-outage, observability, e2e (more are added per plan step)
+#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -203,6 +203,10 @@ e2e() {
   gen=("${compose[@]}" --profile tools run --rm generator)
   "${compose[@]}" up -d --build --wait --wait-timeout 1800
   "${compose[@]}" --profile tools build generator >/dev/null
+  # A new database starts in backfill mode; the run and the browser flow need live time.
+  echo "e2e: seeding counterparties and switching to live"
+  "${gen[@]}" seed-parties --counterparties 50
+  "${gen[@]}" clock live
   echo "e2e: seeding 1,000 customers from #$start"
   "${gen[@]}" seed --customers 1000 --start "$start"
   echo "e2e: 10 minutes of normal transfers at 5 per second"
@@ -228,10 +232,16 @@ e2e() {
 run_target() {
   case "$1" in
     migrations)  reset_schema; cargo_test migrations ;;
+    backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
     auth)        cargo_test auth ;;
     accounts)    cargo_test accounts ;;
     transfers)   cargo_test transfers ;;
+    payees)      cargo_test payees ;;
+    inbound)     cargo_test inbound ;;
+    password_reset) cargo_test password_reset ;;
+    deposits) cargo_test deposits ;;
+    loans) cargo_test loans ;;
     outbox)      cargo_test outbox ;;
     outbox-outage) outbox_outage ;;
     observability) observability ;;
@@ -244,7 +254,9 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers outbox
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
+  run_target backfill
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
   run_target observability
 else
   run_target "$target"

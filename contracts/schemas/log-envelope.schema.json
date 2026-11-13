@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "saltation.log/1",
+  "title": "Saltation business event envelope (spec F-37)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "recorded_at",
+    "request_id",
+    "session_id",
+    "device_id",
+    "customer_no",
+    "account_no",
+    "channel",
+    "listener",
+    "ip",
+    "region",
+    "outcome",
+    "rsp_code",
+    "bank_rsp_code",
+    "human",
+    "payload"
+  ],
+  "properties": {
+    "_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "schema": {
+      "const": "saltation.log/1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[a-z_]+(\\.[a-z_]+)*$"
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "business time, with offset"
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "wall-clock time"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "device_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "customer_no": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "account_no": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "pattern": "^[A-Z_]+$",
+      "description": "MOBILE, ATM, CARD, ADMIN, ... ; SYSTEM for bank-originated events"
+    },
+    "listener": {
+      "enum": [
+        "public",
+        "generator",
+        null
+      ]
+    },
+    "ip": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "region": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "rsp_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "bank_rsp_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "human": {
+      "type": "boolean"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
