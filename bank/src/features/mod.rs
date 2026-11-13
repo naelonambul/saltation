@@ -8,3 +8,5 @@ pub mod internal;
 pub mod outbox_relay;
 pub mod payees;
 pub mod transfers;
+
+pub mod inbound;

@@ -87,6 +87,19 @@ async fn listeners_expose_only_their_routes() {
         "a generated request ID is echoed even on 404"
     );
 
+    for path in ["/oauth/2.0/token", "/v2.0/transfer/deposit/fin_num"] {
+        let res = public
+            .clone()
+            .oneshot(Request::post(path).body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "{path} is generator only"
+        );
+    }
+
     for router in [&public, &generator] {
         let (status, _, _) = get(router, "/metrics", None).await;
         assert_eq!(

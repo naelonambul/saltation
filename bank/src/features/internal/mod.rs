@@ -40,6 +40,10 @@ const MAX_BATCH: usize = 500;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/internal/v1/seed/counterparty_clients",
+            post(seed_counterparty_clients),
+        )
         .route("/internal/v1/clock", get(read_clock))
         .route("/internal/v1/clock/set", post(set_clock))
         .route("/internal/v1/clock/advance", post(advance_clock))
@@ -403,4 +407,78 @@ async fn seed_counterparties(
             }
         })?;
     Ok(api::ok(&ctx, json!({ "created": created })))
+}
+
+const INSERT_CLIENT: SqlStmt = sql_stmt!("internal.insert_client", "sql/insert_client.sql");
+const BANK_EXISTS: SqlStmt = sql_stmt!("internal.bank_exists", "sql/bank_exists.sql");
+#[derive(Deserialize)]
+struct SeedClient {
+    client_id: String,
+    client_secret: String,
+    institution_code: String,
+    scope: String,
+}
+#[derive(Deserialize)]
+struct SeedClients {
+    counterparty_clients: Vec<SeedClient>,
+}
+async fn seed_counterparty_clients(
+    BusinessTime(now): BusinessTime,
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    body: Result<Json<SeedClients>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(req) = body.map_err(|_| bad_request(&ctx, "invalid counterparty_clients"))?;
+    if req.counterparty_clients.is_empty()
+        || req.counterparty_clients.len() > MAX_BATCH
+        || req.counterparty_clients.iter().any(|c| {
+            c.client_id.is_empty()
+                || c.client_id.len() > 40
+                || !c
+                    .client_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                || !(16..=128).contains(&c.client_secret.chars().count())
+                || c.scope != "oob"
+                || c.institution_code.len() != 3
+                || !c.institution_code.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        return Err(bad_request(&ctx, "invalid counterparty_clients"));
+    }
+    let mut rows = Vec::new();
+    for c in req.counterparty_clients {
+        let hash = auth::hash_secret(c.client_secret.clone())
+            .await
+            .map_err(|_| ApiError::internal(&ctx))?;
+        rows.push((c, hash));
+    }
+    let created = state
+        .db
+        .run_in(&stats, move |s| {
+            for (c, _) in &rows {
+                let count: i64 = s.query_row(&BANK_EXISTS, &[&c.institution_code])?;
+                if count == 0 {
+                    return Ok(None);
+                }
+            }
+            let mut count = 0;
+            for (c, hash) in rows {
+                match s.execute(
+                    &INSERT_CLIENT,
+                    &[&c.client_id, &hash, &c.institution_code, &c.scope, &now],
+                ) {
+                    Ok(n) => count += n,
+                    Err(e) if e.ora_code() == Some(1) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            s.commit()?;
+            Ok(Some(count))
+        })
+        .await
+        .map_err(|e| db_error(&ctx, &e))?
+        .ok_or_else(|| bad_request(&ctx, "unknown bank institution"))?;
+    Ok(api::ok(&ctx, json!({"created": created})))
 }

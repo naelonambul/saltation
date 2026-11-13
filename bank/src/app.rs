@@ -73,7 +73,9 @@ pub fn public_router(state: AppState) -> Router {
 
 pub fn generator_router(state: AppState) -> Router {
     with_layers(
-        public_routes().merge(features::internal::router()),
+        public_routes()
+            .merge(features::internal::router())
+            .merge(features::inbound::router()),
         Listener::Generator,
         state,
     )

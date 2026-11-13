@@ -120,7 +120,7 @@ components:
             type: object
             required: [client_id, client_secret, institution_code, scope]
             properties:
-              client_id: { type: string, maxLength: 40 }
+              client_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,40}$" }
               client_secret: { type: string, minLength: 16, maxLength: 128 }
               institution_code: { type: string, pattern: "^[0-9]{3}$" }
               scope: { enum: [oob] }

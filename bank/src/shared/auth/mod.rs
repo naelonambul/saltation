@@ -191,3 +191,67 @@ mod tests {
         assert_eq!(user_seq_no(42), "0000000042");
     }
 }
+
+/// A live counterparty token; no customer session is touched or extended.
+#[derive(Debug, Clone)]
+pub struct AuthClient {
+    pub counterparty_client_id: i64,
+    pub client_id: String,
+    pub institution_code: String,
+    pub scope: String,
+}
+impl AuthClient {
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scope.split_whitespace().any(|s| s == scope)
+    }
+}
+const SELECT_CLIENT_TOKEN: SqlStmt =
+    sql_stmt!("auth.select_client_token", "sql/select_client_token.sql");
+impl FromRequestParts<AppState> for AuthClient {
+    type Rejection = ApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let ctx = RequestContext::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|e| match e {});
+        let unauthorized = || {
+            ApiError::new(
+                &ctx,
+                StatusCode::UNAUTHORIZED,
+                codes::UNAUTHORIZED,
+                "인증이 필요합니다",
+            )
+        };
+        let hash = token_hash(bearer(parts).ok_or_else(unauthorized)?);
+        let stats = parts
+            .extensions
+            .get::<RequestStats>()
+            .cloned()
+            .unwrap_or_default();
+        let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
+        let row: Option<(i64, String, String, String)> = state
+            .db
+            .run_in(&stats, move |s| {
+                s.query_opt(&SELECT_CLIENT_TOKEN, &[&hash, &now])
+            })
+            .await
+            .map_err(|e| {
+                if matches!(e, crate::shared::db::DbError::Busy) {
+                    ApiError::busy(&ctx)
+                } else {
+                    ApiError::internal(&ctx)
+                }
+            })?;
+        row.map(
+            |(counterparty_client_id, client_id, institution_code, scope)| Self {
+                counterparty_client_id,
+                client_id,
+                institution_code,
+                scope,
+            },
+        )
+        .ok_or_else(unauthorized)
+    }
+}

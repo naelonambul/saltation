@@ -127,6 +127,7 @@ paths:
         content: { application/x-www-form-urlencoded: { schema: { $ref: "#/components/schemas/TokenRequest" } } }
       responses:
         "200": { description: Issued, content: { application/json: { schema: { $ref: "#/components/schemas/TokenResponse" } } } }
+        "400": { description: Malformed request or a grant type other than client_credentials (rsp_code A0002), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "401": { description: Unknown client or wrong secret (rsp_code O0001), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "403": { description: Scope not granted to the client (rsp_code O0003), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /v2.0/transfer/deposit/fin_num:
@@ -138,6 +139,7 @@ paths:
         content: { application/json: { schema: { $ref: "#/components/schemas/DepositRequest" } } }
       responses:
         "200": { description: Deposited, or a replay of the same bank_tran_id and payload, content: { application/json: { schema: { $ref: "#/components/schemas/DepositResponse" } } } }
+        "400": { description: Malformed request, or a sending account that is not a counterparty of the client's institution (rsp_code A0002), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "401": { description: Missing, expired or revoked token, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "403": { description: Token without scope oob (rsp_code O0003), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "409": { description: Same bank_tran_id with a different payload, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

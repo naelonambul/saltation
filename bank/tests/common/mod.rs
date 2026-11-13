@@ -219,3 +219,37 @@ pub async fn register_payee(api: &Api, token: &str, bank: &str, account: &str) -
     assert_contract("PayeeResponse", &body);
     body
 }
+
+/// Validate the separate generator inbound contract rather than public.yaml.
+pub fn assert_inbound_contract(schema_name: &str, value: &Value) {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
+    let text =
+        std::fs::read_to_string(format!("{dir}/openapi/inbound.yaml")).expect("inbound contract");
+    let doc: Value = serde_yaml::from_str(&text).expect("inbound YAML");
+    let defs = doc["components"]["schemas"]
+        .to_string()
+        .replace("#/components/schemas/", "#/$defs/");
+    let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": serde_json::from_str::<Value>(&defs).expect("defs"), "$ref": format!("#/$defs/{schema_name}")});
+    let validator = jsonschema::draft202012::new(&schema).expect("inbound schema");
+    let errors: Vec<_> = validator
+        .iter_errors(value)
+        .map(|e| format!("{} at {}", e, e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{schema_name}: {errors:?}\n{value}");
+}
+
+pub async fn form_call(router: &Router, path: &str, body: String) -> (StatusCode, Value) {
+    let req = Request::post(path)
+        .header("x-request-id", new_id())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .expect("request");
+    let res = router.clone().oneshot(req).await.expect("response");
+    let status = res.status();
+    let bytes = res.into_body().collect().await.expect("body").to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).expect("JSON response"),
+    )
+}
