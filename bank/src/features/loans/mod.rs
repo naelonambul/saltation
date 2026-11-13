@@ -24,6 +24,7 @@ const DETAIL: SqlStmt = sql_stmt!("loans.detail", "sql/detail.sql");
 const FINISH_REQUEST: SqlStmt = sql_stmt!("loans.finish_request", "sql/finish_request.sql");
 const INSERT_ACCOUNT: SqlStmt = sql_stmt!("loans.insert_account", "sql/insert_account.sql");
 const INSERT_DETAIL: SqlStmt = sql_stmt!("loans.insert_detail", "sql/insert_detail.sql");
+const INSERT_HISTORY: SqlStmt = sql_stmt!("loans.insert_history", "sql/insert_history.sql");
 const INSERT_FINTECH: SqlStmt = sql_stmt!("loans.insert_fintech", "sql/insert_fintech.sql");
 const INSERT_REQUEST: SqlStmt = sql_stmt!("loans.insert_request", "sql/insert_request.sql");
 const NUMBER: SqlStmt = sql_stmt!("loans.number", "sql/number.sql");
@@ -136,6 +137,7 @@ struct Plan {
     ctx: RequestContext,
     now: DateTime<FixedOffset>,
     customer: i64,
+    customer_no: String,
     session: String,
     scope: String,
     key: String,
@@ -205,6 +207,7 @@ fn finish(s: &mut Session, p: &Plan, out: Outcome) -> Result<Attempt, DbError> {
                 "rejected"
             },
         )
+        .customer(p.customer_no.clone())
         .session(p.session.clone())
         .codes(out.code, bank_code)
         .payload(json!({"endpoint": endpoint, "request_type": p.request_type()})),
@@ -300,6 +303,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             )?;
             let number = format!("30{id:012}");
             s.execute(&NUMBER, &[&number, &id])?;
+            s.execute(&INSERT_HISTORY, &[&id, &p.now])?;
             let fin = format!("{}{id:021}", fields::BANK_CODE);
             s.execute(
                 &INSERT_FINTECH,
@@ -464,6 +468,7 @@ fn plan(
         ctx,
         now,
         customer: who.customer_id,
+        customer_no: who.customer_no,
         session: who.session_id,
         scope: format!("C:{}", who.customer_id),
         key,

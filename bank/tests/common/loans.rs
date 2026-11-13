@@ -33,13 +33,14 @@ pub async fn movements(api: &Api, id: i64) -> Vec<(String, i64, i64, i64, i64)> 
         .unwrap()
 }
 pub async fn completion(api: &Api, rid: String, operation: &str) {
-    let row: (String, String, i64) = api
+    let row: (String, String, i64, i64) = api
         .state
         .db
         .run(move |s| s.query_row(&REQUESTS, &[&rid]))
         .await
         .unwrap();
-    assert_eq!(row, (operation.into(), "MOBILE".into(), 1));
+    // One completion event, and it names the customer.
+    assert_eq!(row, (operation.into(), "MOBILE".into(), 0, 1));
 }
 
 pub async fn provenance(api: &Api, id: i64, rid: &str, kind: &str, amount: i64) {

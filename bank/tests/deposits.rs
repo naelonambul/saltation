@@ -282,13 +282,14 @@ async fn deposits() {
         .await;
         assert_eq!(actual, status);
         assert_contract(schema, &response);
-        let meta: (String, String, i64) = api
+        let meta: (String, String, i64, i64) = api
             .state
             .db
             .run(move |s| s.query_row(&events, &[&rid]))
             .await
             .unwrap();
-        assert_eq!(meta, (operation.into(), "MOBILE".into(), 1));
+        // One completion event, and it names the customer.
+        assert_eq!(meta, (operation.into(), "MOBILE".into(), 0, 1));
     }
     // Complete payloads with one bad field reach the handler's own validation.
     let mut bad_id = open_payload(&api, &a.fin, 100_000).await;
