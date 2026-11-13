@@ -19,7 +19,11 @@ pub async fn state() -> AppState {
     let clock = Clock::init(db.clone(), Registry::default())
         .await
         .expect("clock");
-    AppState { db, clock }
+    AppState {
+        db,
+        clock,
+        limits: Default::default(),
+    }
 }
 
 pub struct Api {
@@ -85,7 +89,12 @@ pub fn contract_errors(schema_name: &str, value: &Value) -> Vec<String> {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
     let text = std::fs::read_to_string(format!("{dir}/openapi/public.yaml"))
         .expect("read the public contract");
-    let doc: Value = serde_yaml::from_str(&text).expect("contract YAML");
+    let mut doc: Value = serde_yaml::from_str(&text).expect("contract YAML");
+    if doc["components"]["schemas"].get(schema_name).is_none() {
+        let text = std::fs::read_to_string(format!("{dir}/openapi/internal.yaml"))
+            .expect("internal contract");
+        doc = serde_yaml::from_str(&text).expect("internal YAML");
+    }
     let defs = doc["components"]["schemas"]
         .to_string()
         .replace("#/components/schemas/", "#/$defs/");
@@ -125,4 +134,88 @@ pub fn envelope_errors(event: &Value) -> Vec<String> {
         .iter_errors(event)
         .map(|e| format!("{} at {}", e, e.instance_path()))
         .collect()
+}
+
+pub struct Customer {
+    pub token: String,
+    pub account: String,
+    pub fin: String,
+}
+pub async fn customer(api: &Api, opening: i64) -> Customer {
+    let n = unique_digits(10);
+    let phone = format!("010{n}");
+    let no = format!("C{n}");
+    let account = format!("96{n}");
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/internal/v1/seed/customers",
+        &new_id(),
+        None,
+        Some(
+            serde_json::json!({"customers": [{"customer_no": no, "name": "김수취", "phone": phone,
+        "customer_type": "INDIVIDUAL", "password": "pw-payees"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_contract("CreatedResponse", &body);
+    let (status, body) = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None,
+        Some(serde_json::json!({"accounts": [{"customer_no": no, "account_no": account, "opening_balance": opening}]}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_contract("SeedAccountsResponse", &body);
+    let fin = body["accounts"][0]["fintech_use_num"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, body) = call(
+        &api.public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(
+            serde_json::json!({"phone": phone, "password": "pw-payees", "device_id": "payee-test"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_contract("LoginResponse", &body);
+    Customer {
+        token: body["access_token"].as_str().unwrap().to_owned(),
+        account,
+        fin,
+    }
+}
+pub async fn seed_counterparty(api: &Api, account: &str) {
+    let request = serde_json::json!({"counterparties": [{"counterparty_type": "INDIVIDUAL", "institution_code": "901",
+        "account_no": account, "name": "외부수취인"}]});
+    for expected in [1, 0] {
+        let (status, body) = call(
+            &api.generator,
+            "POST",
+            "/internal/v1/seed/counterparties",
+            &new_id(),
+            None,
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_contract("CreatedResponse", &body);
+        assert_eq!(body["created"], expected);
+    }
+}
+pub async fn register_payee(api: &Api, token: &str, bank: &str, account: &str) -> Value {
+    let (status, body) = call(
+        &api.public,
+        "POST",
+        "/v2.0/ext/payees",
+        &new_id(),
+        Some(token),
+        Some(serde_json::json!({"bank_code_std": bank, "account_num": account, "alias": "수취인 별칭"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_contract("PayeeResponse", &body);
+    body
 }

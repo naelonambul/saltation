@@ -22,7 +22,11 @@ async fn state() -> AppState {
     let clock = Clock::init(db.clone(), Registry::default())
         .await
         .expect("clock");
-    AppState { db, clock }
+    AppState {
+        db,
+        clock,
+        limits: Default::default(),
+    }
 }
 
 async fn get(

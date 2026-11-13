@@ -73,6 +73,7 @@ fn mongo_uri() -> Result<String, std::env::VarError> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let limits = bank::shared::limits::Limits::from_env()?;
     let log_dir =
         std::env::var("SALTATION_LOG_DIR").unwrap_or_else(|_| "/var/log/saltation".to_owned());
     let _log_guard = telemetry::init_logging(&log_dir).context("app.log")?;
@@ -94,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db: db.clone(),
         clock,
+        limits,
     };
     match mongo_uri() {
         Ok(uri) => {

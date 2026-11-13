@@ -1,9 +1,8 @@
-//! In-bank transfer and transfer result (spec F-14, F-16, F-18, F-19; Money
-//! operation processing). Stage 1 supports transfers between Saltation
-//! accounts; recipient inquiry and external counterparties arrive in stage 2.
+//! In-bank and external transfers and transfer results (spec F-14, F-16,
+//! F-18, F-19; Money operation processing).
 //!
-//! One Oracle transaction per attempt: claim the idempotency key, lock both
-//! accounts in ascending ID order, check status, balance and the daily limit,
+//! One Oracle transaction per attempt: claim the idempotency key, lock
+//! affected accounts in ascending ID order, check status, balance and the daily limit,
 //! post through the ledger, record the outcome and its outbox event, commit.
 
 use axum::extract::State;
@@ -32,10 +31,10 @@ const FINISH_REQUEST: SqlStmt = sql_stmt!("transfers.finish_request", "sql/finis
 const SELECT_STORED: SqlStmt = sql_stmt!("transfers.select_stored", "sql/select_stored.sql");
 const SELECT_SENDER: SqlStmt = sql_stmt!("transfers.select_sender", "sql/select_sender.sql");
 const SELECT_RECEIVER: SqlStmt = sql_stmt!("transfers.select_receiver", "sql/select_receiver.sql");
+const SELECT_EXTERNAL: SqlStmt = sql_stmt!("transfers.select_external", "sql/select_external.sql");
+const REGISTERED: SqlStmt = sql_stmt!("transfers.registered", "sql/registered.sql");
 const SELECT_RESULT: SqlStmt = sql_stmt!("transfers.select_result", "sql/select_result.sql");
 
-/// Mobile transfer limit per account per business day (spec F-16).
-pub const DAILY_LIMIT: i64 = 50_000_000;
 const MAX_AMOUNT: i64 = 999_999_999_999;
 const ENDPOINT: &str = "/v2.0/transfer/withdraw/fin_num";
 const DEADLOCK_RETRIES: usize = 2;
@@ -134,6 +133,7 @@ fn map_db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
 struct Plan {
     req: WithdrawRequest,
     amount: i64,
+    daily_limit: i64,
     hash: String,
     scope: String,
     customer_id: i64,
@@ -316,23 +316,19 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     };
     let cust = Some(customer_no.as_str());
     let acct = Some(sender_no.as_str());
-    if req.recv_client_bank_code != BANK_CODE {
-        return reject(
-            s,
-            plan,
-            (cust, acct),
-            rejection(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                codes::BANK_REJECTED,
-                "404",
-                "타행 이체는 아직 지원하지 않습니다",
-            ),
-        )
-        .map(Attempt::Done);
-    }
-    let receiver: Option<(i64, String, String)> =
-        s.query_opt(&SELECT_RECEIVER, &[&req.recv_client_account_num])?;
-    let Some((receiver_id, receiver_customer, receiver_name)) = receiver else {
+    let external = req.recv_client_bank_code != BANK_CODE;
+    let receiver: Option<(i64, String, String, String)> = if external {
+        let row: Option<(String, String)> = s.query_opt(
+            &SELECT_EXTERNAL,
+            &[&req.recv_client_bank_code, &req.recv_client_account_num],
+        )?;
+        row.map(|(name, bank)| (0, String::new(), name, bank))
+    } else {
+        let row: Option<(i64, String, String)> =
+            s.query_opt(&SELECT_RECEIVER, &[&req.recv_client_account_num])?;
+        row.map(|(id, customer, name)| (id, customer, name, BANK_NAME.to_owned()))
+    };
+    let Some((receiver_id, receiver_customer, receiver_name, receiver_bank_name)) = receiver else {
         return reject(
             s,
             plan,
@@ -361,16 +357,21 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         .map(Attempt::Done);
     }
 
-    let mut locks = ledger::lock_accounts(s, &[sender_id, receiver_id])?;
-    let (from, to) = match (locks.get(sender_id), locks.get(receiver_id)) {
-        (Some(f), Some(t)) => (f.clone(), t.clone()),
-        _ => return Err(DbError::Config("locked accounts missing".into())),
+    let ids = if external {
+        vec![sender_id]
+    } else {
+        vec![sender_id, receiver_id]
     };
-    if from.status == "CLOSED"
-        || from.subtype != "DEMAND"
-        || to.status == "CLOSED"
-        || to.subtype != "DEMAND"
-    {
+    let mut locks = ledger::lock_accounts(s, &ids)?;
+    let from = locks
+        .get(sender_id)
+        .cloned()
+        .ok_or_else(|| DbError::Config("locked sender missing".into()))?;
+    let receiver_invalid = !external
+        && locks
+            .get(receiver_id)
+            .is_none_or(|to| to.status == "CLOSED" || to.subtype != "DEMAND");
+    if from.status == "CLOSED" || from.subtype != "DEMAND" || receiver_invalid {
         return reject(
             s,
             plan,
@@ -385,7 +386,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         .map(Attempt::Done);
     }
     let daily = ledger::lock_daily(s, sender_id, business_date(plan.now))?;
-    if daily.transfer_out + plan.amount > DAILY_LIMIT {
+    if daily.transfer_out + plan.amount > plan.daily_limit {
         return reject(
             s,
             plan,
@@ -424,8 +425,17 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     } else {
         truncate(&req.dps_print_content, 20)
     };
-    let movement = Movement {
+    let registered: i64 = s.query_row(
+        &REGISTERED,
+        &[
+            &plan.customer_id,
+            &req.recv_client_bank_code,
+            &req.recv_client_account_num,
+        ],
+    )?;
+    let mut movement = Movement {
         kind: Kind::Transfer,
+        payee_registered: Some(registered > 0),
         request_id: Some(&ctx.request_id),
         ctx: Some(ctx),
         bank_tran_id: Some(&req.bank_tran_id),
@@ -440,7 +450,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
                 inout_type: "출금",
                 tran_type: "대체",
                 print_content: Some(wd_print.clone()),
-                counterparty_bank_code: Some(BANK_CODE.into()),
+                counterparty_bank_code: Some(req.recv_client_bank_code.clone()),
                 counterparty_account_no: Some(req.recv_client_account_num.clone()),
                 counterparty_name: Some(receiver_name.clone()),
                 transfer_out: plan.amount,
@@ -459,6 +469,9 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             },
         ],
     };
+    if external {
+        movement.legs.truncate(1);
+    }
     let posted = match ledger::post(s, &mut locks, &movement) {
         Ok(p) => p,
         Err(LedgerError::Db(e)) => return Err(e),
@@ -471,9 +484,9 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             json!({
                 "account_num_masked": fields::mask_account(&sender_no),
                 "print_content": wd_print,
-                "wd_limit_remain_amt": (DAILY_LIMIT - daily.transfer_out - plan.amount).to_string(),
-                "dps_bank_code_std": BANK_CODE,
-                "dps_bank_name": BANK_NAME,
+                "wd_limit_remain_amt": (plan.daily_limit - daily.transfer_out - plan.amount).min(MAX_AMOUNT).to_string(),
+                "dps_bank_code_std": req.recv_client_bank_code,
+                "dps_bank_name": receiver_bank_name,
                 "dps_account_num_masked": fields::mask_account(&req.recv_client_account_num),
                 "dps_print_content": dps_print,
                 "dps_account_holder_name": receiver_name,
@@ -493,7 +506,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             "endpoint": ENDPOINT,
             "tran_amt": plan.amount,
             "transfer_id": posted.transfer_id,
-            "counterparty_bank_code": BANK_CODE,
+            "counterparty_bank_code": req.recv_client_bank_code,
             "counterparty_account_no": req.recv_client_account_num,
         }));
     outbox::record(s, &event)?;
@@ -598,6 +611,7 @@ async fn withdraw(
         hash: req.hash(),
         req,
         amount,
+        daily_limit: state.limits.transfer_daily,
         scope: format!("C:{}", who.customer_id),
         customer_id: who.customer_id,
         session_id: who.session_id.clone(),

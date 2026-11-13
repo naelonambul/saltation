@@ -78,7 +78,7 @@ components:
             required: [customer_no, name, phone, customer_type, password]
             properties:
               customer_no: { type: string, maxLength: 12 }
-              name: { type: string, maxLength: 60 }
+              name: { type: string, maxLength: 50 }
               phone: { type: string, maxLength: 20 }
               address: { type: string, maxLength: 200 }
               customer_type: { enum: [INDIVIDUAL, SOLE_PROPRIETOR] }
@@ -135,10 +135,10 @@ components:
             required: [counterparty_type, institution_code, account_no, name]
             properties:
               counterparty_type: { enum: [EMPLOYER, MERCHANT, INDIVIDUAL] }
-              industry_code: { type: string, maxLength: 10 }
+              industry_code: { type: string, pattern: "^[A-Za-z0-9]{1,10}$" }
               institution_code: { type: string, pattern: "^[0-9]{3}$" }
               account_no: { type: string, pattern: "^[0-9]{1,16}$" }
-              name: { type: string, maxLength: 60 }
+              name: { type: string, maxLength: 50 }
     CreatedResponse:
       allOf:
         - $ref: "#/components/schemas/Envelope"

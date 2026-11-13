@@ -6,4 +6,5 @@ pub mod accounts_lifecycle;
 pub mod auth;
 pub mod internal;
 pub mod outbox_relay;
+pub mod payees;
 pub mod transfers;

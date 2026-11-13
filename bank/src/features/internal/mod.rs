@@ -47,6 +47,10 @@ pub fn router() -> Router<AppState> {
         .route("/internal/v1/outbox", get(read_outbox))
         .route("/internal/v1/seed/customers", post(seed_customers))
         .route("/internal/v1/seed/accounts", post(seed_accounts))
+        .route(
+            "/internal/v1/seed/counterparties",
+            post(seed_counterparties),
+        )
 }
 
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
@@ -127,6 +131,9 @@ async fn seed_customers(
         return Err(bad_request(&ctx, "customers must contain 1 to 500 entries"));
     }
 
+    if req.customers.iter().any(|c| c.name.chars().count() > 50) {
+        return Err(bad_request(&ctx, "name must be at most 50 characters"));
+    }
     let mut rows = Vec::with_capacity(req.customers.len());
     for c in req.customers {
         let hash = auth::hash_secret(c.password.clone())
@@ -216,6 +223,7 @@ async fn seed_accounts(
                     let mut locks = ledger::lock_accounts(s, &[account_id])?;
                     let movement = Movement {
                         kind: Kind::Inbound,
+                        payee_registered: None,
                         request_id: None,
                         ctx: None,
                         bank_tran_id: None,
@@ -317,4 +325,82 @@ async fn go_live(State(state): State<AppState>, ctx: RequestContext) -> Result<R
         .await
         .map_err(|e| clock_error(&ctx, e))?;
     Ok(api::ok(&ctx, clock))
+}
+
+const INSERT_COUNTERPARTY: SqlStmt = sql_stmt!(
+    "internal.insert_counterparty",
+    "sql/insert_counterparty.sql"
+);
+#[derive(Deserialize)]
+struct SeedCounterparty {
+    counterparty_type: String,
+    industry_code: Option<String>,
+    institution_code: String,
+    account_no: String,
+    name: String,
+}
+#[derive(Deserialize)]
+struct SeedCounterparties {
+    counterparties: Vec<SeedCounterparty>,
+}
+async fn seed_counterparties(
+    BusinessTime(now): BusinessTime,
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    Json(req): Json<SeedCounterparties>,
+) -> Result<Response, ApiError> {
+    if req.counterparties.is_empty()
+        || req.counterparties.len() > MAX_BATCH
+        || req.counterparties.iter().any(|c| {
+            c.name.chars().count() > 50
+                || !matches!(
+                    c.counterparty_type.as_str(),
+                    "EMPLOYER" | "MERCHANT" | "INDIVIDUAL"
+                )
+                || c.industry_code.as_ref().is_some_and(|v| {
+                    v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+                || c.institution_code.len() != 3
+                || !c.institution_code.bytes().all(|b| b.is_ascii_digit())
+                || c.account_no.is_empty()
+                || c.account_no.len() > 16
+                || !c.account_no.bytes().all(|b| b.is_ascii_digit())
+        })
+    {
+        return Err(bad_request(&ctx, "invalid counterparties"));
+    }
+    let created = state
+        .db
+        .run_in(&stats, move |s| {
+            let mut created = 0u64;
+            for c in req.counterparties {
+                match s.execute(
+                    &INSERT_COUNTERPARTY,
+                    &[
+                        &c.counterparty_type,
+                        &c.industry_code,
+                        &c.institution_code,
+                        &c.account_no,
+                        &c.name,
+                        &now,
+                    ],
+                ) {
+                    Ok(n) => created += n,
+                    Err(e) if e.ora_code() == Some(1) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            s.commit()?;
+            Ok(created)
+        })
+        .await
+        .map_err(|e| {
+            if e.ora_code() == Some(2291) {
+                bad_request(&ctx, "unknown institution code")
+            } else {
+                db_error(&ctx, &e)
+            }
+        })?;
+    Ok(api::ok(&ctx, json!({ "created": created })))
 }

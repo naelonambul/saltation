@@ -362,3 +362,115 @@ async fn random_two_way_transfers_keep_the_books_consistent() {
     assert_eq!(after, before, "money is neither created nor destroyed");
     assert_consistent(&api).await;
 }
+
+const TRANSFER_FLAG: SqlStmt = sql_stmt!("test.transfer_flag", "sql/transfer_flag.sql");
+const EXTERNAL_ROWS: SqlStmt = sql_stmt!("test.external_rows", "sql/external_rows.sql");
+
+#[tokio::test]
+async fn external_transfers_payee_flags_and_configured_limit() {
+    let mut state = common::state().await;
+    state.limits.transfer_daily = 100;
+    let api = Api {
+        public: bank::app::public_router(state.clone()),
+        generator: bank::app::generator_router(state.clone()),
+        state,
+    };
+    let sender = common::customer(&api, 1000).await;
+    let recipient = common::customer(&api, 0).await;
+    let external = format!("94{}", unique_digits(10));
+    common::seed_counterparty(&api, &external).await;
+
+    // Over the configured limit is rejected before any ledger write.
+    let mut over = transfer_body(&bank_tran_id(), &sender.fin, &external, 101);
+    over["recv_client_bank_code"] = json!("901");
+    let (status, body, _) = transfer(&api, &sender.token, over).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_contract("TransferRejected", &body);
+    assert_eq!(body["bank_rsp_code"], "406");
+
+    let unknown_id = bank_tran_id();
+    let mut unknown = transfer_body(&unknown_id, &sender.fin, "1", 1);
+    unknown["recv_client_bank_code"] = json!("901");
+    let (status, body, _) = transfer(&api, &sender.token, unknown).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_contract("TransferRejected", &body);
+    assert_eq!(body["bank_rsp_code"], "404");
+    assert_eq!(scalar(&api, &COUNT_BTID, Some(unknown_id)).await, 0);
+    assert_eq!(
+        scalar(&api, &SUM_BALANCES, Some(sender.account.clone())).await,
+        1000
+    );
+
+    for (bank, account) in [
+        ("998", recipient.account.as_str()),
+        ("901", external.as_str()),
+    ] {
+        for (registered, flag) in [(false, "N"), (true, "Y")] {
+            if registered {
+                common::register_payee(&api, &sender.token, bank, account).await;
+            }
+            let btid = bank_tran_id();
+            let mut request = transfer_body(&btid, &sender.fin, account, 10);
+            request["recv_client_bank_code"] = json!(bank);
+            let (status, body, _) = transfer(&api, &sender.token, request).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_contract("TransferResponse", &body);
+            assert_eq!(body["dps_bank_code_std"], bank);
+            assert_eq!(
+                body["dps_bank_name"],
+                if bank == "901" {
+                    "가람은행"
+                } else {
+                    "살테이션은행"
+                }
+            );
+            assert_eq!(text(&api, &TRANSFER_FLAG, btid.clone()).await, flag);
+            if bank == "901" {
+                let rows: Vec<(String, i64, String, String, String, String)> = api
+                    .state
+                    .db
+                    .run(move |s| s.query_all(&EXTERNAL_ROWS, &[&btid]))
+                    .await
+                    .expect("external rows");
+                assert_eq!(
+                    rows,
+                    vec![(
+                        sender.account.clone(),
+                        -10,
+                        "901".to_owned(),
+                        external.clone(),
+                        "외부수취인".to_owned(),
+                        "transfer".to_owned()
+                    )]
+                );
+            }
+        }
+    }
+    assert_eq!(
+        scalar(&api, &SUM_BALANCES, Some(sender.account.clone())).await,
+        960
+    );
+    assert_consistent(&api).await;
+}
+
+#[tokio::test]
+async fn large_configured_limit_keeps_response_contract_valid() {
+    let mut state = common::state().await;
+    state.limits.transfer_daily = i64::MAX;
+    let api = Api {
+        public: bank::app::public_router(state.clone()),
+        generator: bank::app::generator_router(state.clone()),
+        state,
+    };
+    let sender = common::customer(&api, 100).await;
+    let recipient = common::customer(&api, 0).await;
+    let (status, body, _) = transfer(
+        &api,
+        &sender.token,
+        transfer_body(&bank_tran_id(), &sender.fin, &recipient.account, 1),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_contract("TransferResponse", &body);
+    assert_eq!(body["wd_limit_remain_amt"], "999999999999");
+}

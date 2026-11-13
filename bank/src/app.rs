@@ -22,6 +22,7 @@ use crate::shared::telemetry;
 pub struct AppState {
     pub db: Db,
     pub clock: Clock,
+    pub limits: crate::shared::limits::Limits,
 }
 
 fn public_routes() -> Router<AppState> {
@@ -30,6 +31,7 @@ fn public_routes() -> Router<AppState> {
         .merge(features::auth::router())
         .merge(features::accounts::router())
         .merge(features::transfers::router())
+        .merge(features::payees::router())
 }
 
 fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) -> Router {

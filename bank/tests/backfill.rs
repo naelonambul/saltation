@@ -831,7 +831,11 @@ async fn backfill_sequence() {
     }
     registry.register(Arc::new(bank::features::accounts_lifecycle::DormancyJob));
     let clock = Clock::init(db.clone(), registry).await.expect("clock");
-    let state = AppState { db, clock };
+    let state = AppState {
+        db,
+        clock,
+        limits: Default::default(),
+    };
     let api = Api {
         public: app::public_router(state.clone()),
         generator: app::generator_router(state.clone()),

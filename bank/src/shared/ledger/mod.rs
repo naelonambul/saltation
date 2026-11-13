@@ -145,6 +145,7 @@ pub struct Leg {
 #[derive(Debug, Clone)]
 pub struct Movement<'a> {
     pub kind: Kind,
+    pub payee_registered: Option<bool>,
     pub request_id: Option<&'a str>,
     pub ctx: Option<&'a RequestContext>,
     pub bank_tran_id: Option<&'a str>,
@@ -198,6 +199,7 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
             &m.bank_tran_id,
             &m.amount,
             &m.occurred_at,
+            &m.payee_registered.map(|v| if v { "Y" } else { "N" }),
         ],
     )?;
     let date = business_date(m.occurred_at);
