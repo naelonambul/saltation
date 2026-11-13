@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 
+use oracle::sql_type::ToSql;
+
 use crate::shared::clock::business_date;
 use crate::shared::context::RequestContext;
 use crate::shared::db::{DbError, Session, SqlStmt};
@@ -17,13 +19,12 @@ use crate::shared::outbox::{self, Event};
 use crate::sql_stmt;
 use serde_json::json;
 
-const LOCK_ACCOUNT: SqlStmt = sql_stmt!("ledger.lock_account", "sql/lock_account.sql");
+const LOCK_ACCOUNTS: SqlStmt = sql_stmt!("ledger.lock_accounts", "sql/lock_accounts.sql");
 const INSERT_TRANSFER: SqlStmt = sql_stmt!("ledger.insert_transfer", "sql/insert_transfer.sql");
 const UPDATE_STATUS: SqlStmt = sql_stmt!("ledger.update_status", "sql/update_status.sql");
 const INSERT_STATUS: SqlStmt = sql_stmt!("ledger.insert_status", "sql/insert_status.sql");
 const INSERT_ROW: SqlStmt = sql_stmt!("ledger.insert_row", "sql/insert_row.sql");
 const UPDATE_ACCOUNT: SqlStmt = sql_stmt!("ledger.update_account", "sql/update_account.sql");
-const ENSURE_DAILY: SqlStmt = sql_stmt!("ledger.ensure_daily", "sql/ensure_daily.sql");
 const LOCK_DAILY: SqlStmt = sql_stmt!("ledger.lock_daily", "sql/lock_daily.sql");
 const ADD_DAILY: SqlStmt = sql_stmt!("ledger.add_daily", "sql/add_daily.sql");
 
@@ -55,24 +56,27 @@ pub fn lock_accounts(s: &mut Session, account_ids: &[i64]) -> Result<LockSet, Db
     ids.sort_unstable();
     ids.dedup();
     let mut set = LockSet::default();
-    for id in ids {
-        let (balance, next_sequence, status, subtype, account_no): (
-            i64,
-            i64,
-            String,
-            String,
-            String,
-        ) = s.query_row(&LOCK_ACCOUNT, &[&id])?;
-        set.accounts.insert(
-            id,
-            Locked {
-                account_no,
-                balance,
-                next_sequence,
-                status,
-                subtype,
-            },
-        );
+    // Two per round trip, ascending: the time the first lock is held is what queues waiters.
+    for pair in ids.chunks(2) {
+        let first = pair[0];
+        let second = pair.get(1).copied().unwrap_or(first);
+        let rows: Vec<(i64, i64, i64, String, String, String)> =
+            s.query_all(&LOCK_ACCOUNTS, &[&first, &second])?;
+        if rows.len() != pair.len() {
+            return Err(DbError::Config("account to lock does not exist".into()));
+        }
+        for (id, balance, next_sequence, status, subtype, account_no) in rows {
+            set.accounts.insert(
+                id,
+                Locked {
+                    account_no,
+                    balance,
+                    next_sequence,
+                    status,
+                    subtype,
+                },
+            );
+        }
     }
     Ok(set)
 }
@@ -85,10 +89,9 @@ pub struct Daily {
     pub cash_out: i64,
 }
 
-/// Reads (creating if needed) and locks the daily totals of an account that
-/// the caller has already locked.
+/// Reads the daily totals of an account that the caller has already locked;
+/// that lock is what keeps the totals from changing.
 pub fn lock_daily(s: &mut Session, account_id: i64, date: NaiveDate) -> Result<Daily, DbError> {
-    s.execute(&ENSURE_DAILY, &[&account_id, &date])?;
     let (transfer_out, cash_in, cash_out) = s.query_row(&LOCK_DAILY, &[&account_id, &date])?;
     Ok(Daily {
         transfer_out,
@@ -199,54 +202,66 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
     )?;
     let date = business_date(m.occurred_at);
     let mut balances_after = Vec::with_capacity(m.legs.len());
+    let no_terminal = None::<String>;
+    let no_cash = 0i64;
+    let mut sequences = Vec::with_capacity(m.legs.len());
+    let mut flags = Vec::with_capacity(m.legs.len());
     for leg in &m.legs {
         let locked = locks
             .accounts
             .get_mut(&leg.account_id)
             .ok_or(LedgerError::NotLocked(leg.account_id))?;
-        let sequence = locked.next_sequence;
-        let balance = locked.balance + leg.amount;
-        s.execute(
-            &INSERT_ROW,
-            &[
-                &leg.account_id,
-                &sequence,
-                &leg.amount,
-                &balance,
-                &leg.inout_type,
-                &leg.tran_type,
-                &leg.print_content,
-                &leg.counterparty_bank_code,
-                &leg.counterparty_account_no,
-                &leg.counterparty_name,
-                &m.channel,
-                &None::<String>,
-                &m.request_id,
-                &transfer_id,
-                &date,
-                &m.occurred_at,
-            ],
-        )?;
-        s.execute(
-            &UPDATE_ACCOUNT,
-            &[
-                &balance,
-                &(sequence + 1),
-                &i64::from(leg.customer_initiated),
-                &m.occurred_at,
-                &leg.account_id,
-            ],
-        )?;
-        locked.balance = balance;
-        locked.next_sequence = sequence + 1;
+        sequences.push((locked.next_sequence, locked.next_sequence + 1));
+        flags.push(i64::from(leg.customer_initiated));
+        locked.balance += leg.amount;
+        locked.next_sequence += 1;
+        balances_after.push((leg.account_id, locked.balance));
+    }
+    // One round trip per table: the account locks are held until the caller commits.
+    let mut rows: Vec<Vec<&dyn ToSql>> = Vec::with_capacity(m.legs.len());
+    let mut updates: Vec<Vec<&dyn ToSql>> = Vec::with_capacity(m.legs.len());
+    for (i, leg) in m.legs.iter().enumerate() {
+        rows.push(vec![
+            &leg.account_id,
+            &sequences[i].0,
+            &leg.amount,
+            &balances_after[i].1,
+            &leg.inout_type,
+            &leg.tran_type,
+            &leg.print_content,
+            &leg.counterparty_bank_code,
+            &leg.counterparty_account_no,
+            &leg.counterparty_name,
+            &m.channel,
+            &no_terminal,
+            &m.request_id,
+            &transfer_id,
+            &date,
+            &m.occurred_at,
+        ]);
+        updates.push(vec![
+            &balances_after[i].1,
+            &sequences[i].1,
+            &flags[i],
+            &m.occurred_at,
+            &leg.account_id,
+        ]);
+    }
+    s.execute_batch(&INSERT_ROW, &rows)?;
+    s.execute_batch(&UPDATE_ACCOUNT, &updates)?;
+    for leg in &m.legs {
         if leg.transfer_out != 0 {
-            s.execute(&ENSURE_DAILY, &[&leg.account_id, &date])?;
             s.execute(
                 &ADD_DAILY,
-                &[&leg.transfer_out, &0i64, &0i64, &leg.account_id, &date],
+                &[
+                    &leg.account_id,
+                    &date,
+                    &leg.transfer_out,
+                    &no_cash,
+                    &no_cash,
+                ],
             )?;
         }
-        balances_after.push((leg.account_id, balance));
     }
     for leg in &m.legs {
         if leg.customer_initiated

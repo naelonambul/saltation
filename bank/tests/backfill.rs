@@ -181,7 +181,8 @@ async fn jobs_run_once_per_crossed_date_in_order(
     recording: &Arc<Mutex<Recording>>,
     start: NaiveDate,
 ) {
-    let wall_before = Utc::now();
+    // `recorded_at` has millisecond precision, so compare from the start of this millisecond.
+    let wall_before = Utc::now() - chrono::Duration::milliseconds(1);
     let (status, body) = post(
         api,
         "/internal/v1/clock/advance",
