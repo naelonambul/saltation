@@ -77,10 +77,10 @@ fn require_scope(ctx: &RequestContext, who: &AuthCustomer, scope: &str) -> Resul
     }
 }
 
-type AccountRow = (String, String, String, String, String);
+type AccountRow = (String, String, String, String, String, i64);
 
-fn account_json(name: &str, (fin, account_no, subtype, status, product): &AccountRow) -> Value {
-    json!({
+fn account_json(name: &str, (fin, account_no, subtype, status, product, id): &AccountRow) -> Value {
+    let mut account = json!({
         "fintech_use_num": fin,
         "account_alias": product,
         "bank_code_std": BANK_CODE,
@@ -91,7 +91,11 @@ fn account_json(name: &str, (fin, account_no, subtype, status, product): &Accoun
         "inquiry_agree_yn": "Y",
         "transfer_agree_yn": if subtype == "DEMAND" { "Y" } else { "N" },
         "account_state": if status == "CLOSED" { "09" } else { "01" },
-    })
+    });
+    if matches!(subtype.as_str(), "TERM" | "LOAN") {
+        account["ext_account_id"] = json!(id.to_string());
+    }
+    account
 }
 
 async fn load_accounts(
@@ -163,6 +167,7 @@ type BalanceRow = (
     String,
     DateTime<FixedOffset>,
     Option<String>,
+    Option<String>,
 );
 
 fn not_found(ctx: &RequestContext) -> ApiError {
@@ -217,7 +222,8 @@ async fn balance(
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
-    let (_, _, balance, subtype, product, opened, last) = row.ok_or_else(|| not_found(&ctx))?;
+    let (_, _, balance, subtype, product, opened, last, maturity) =
+        row.ok_or_else(|| not_found(&ctx))?;
     Ok(api::ok(
         &ctx,
         merge(
@@ -225,11 +231,11 @@ async fn balance(
             json!({
                 "fintech_use_num": q.fintech_use_num,
                 "balance_amt": balance.to_string(),
-                "available_amt": balance.to_string(),
+                "available_amt": if subtype == "DEMAND" { balance.to_string() } else { "0".to_owned() },
                 "account_type": fields::account_type(&subtype),
                 "product_name": product,
                 "account_issue_date": fields::date(opened),
-                "maturity_date": "",
+                "maturity_date": maturity.unwrap_or_default(),
                 "last_tran_date": last.unwrap_or_default(),
             }),
         ),
