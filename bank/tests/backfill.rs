@@ -777,6 +777,190 @@ async fn dormancy_and_reactivation(api: &Api) {
     assert_eq!(dormancy_events(api, x).await.len(), 2);
 }
 
+async fn term_deposit_open(api: &Api) -> (String, String, i64, i64, i64, String) {
+    use common::deposits::*;
+    let phone = format!("010{}", common::unique_digits(10));
+    let no = format!("D{}", common::unique_digits(10));
+    let account = format!("94{}", common::unique_digits(10));
+    let (status, body) = post(api, "/internal/v1/seed/customers", Some(json!({"customers": [{
+        "customer_no": no, "phone": phone, "name": "예금", "customer_type": "INDIVIDUAL", "password": "deposit-pass"
+    }]}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    common::assert_contract("CreatedResponse", &body);
+    let (status, body) = post(
+        api,
+        "/internal/v1/seed/accounts",
+        Some(json!({"accounts": [{
+            "customer_no": no, "account_no": account, "opening_balance": 1000000
+        }]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    common::assert_contract("SeedAccountsResponse", &body);
+    let fin = body["accounts"][0]["fintech_use_num"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, login) = post(
+        api,
+        "/v2.0/ext/auth/login",
+        Some(json!({"phone": phone, "password": "deposit-pass"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{login}");
+    common::assert_contract("LoginResponse", &login);
+    let token = login["access_token"].as_str().unwrap();
+    let start = snapshot(api, &fin).await.0;
+    let first = request(
+        api,
+        token,
+        "POST",
+        "/v2.0/ext/deposits",
+        Some(open_payload(api, &fin, 100000).await),
+        StatusCode::OK,
+        "DepositTranResponse",
+    )
+    .await;
+    let second = request(
+        api,
+        token,
+        "POST",
+        "/v2.0/ext/deposits",
+        Some(open_payload(api, &fin, 100000).await),
+        StatusCode::OK,
+        "DepositTranResponse",
+    )
+    .await;
+    let first_id = first["deposit_id"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    let second_id = second["deposit_id"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    let maturity = first["maturity_date"].as_str().unwrap().to_owned();
+    assert_eq!(
+        maturity,
+        business_date(now(api).await)
+            .checked_add_months(chrono::Months::new(6))
+            .unwrap()
+            .format("%Y%m%d")
+            .to_string()
+    );
+    let closed = request(
+        api,
+        token,
+        "POST",
+        &format!("/v2.0/ext/deposits/{second_id}/close"),
+        Some(close_payload(api).await),
+        StatusCode::OK,
+        "DepositTranResponse",
+    )
+    .await;
+    assert_eq!(closed["close_type"], "EARLY");
+    assert_eq!(snapshot(api, &fin).await.0, start - 100000);
+    (phone, fin, start, first_id, second_id, maturity)
+}
+
+async fn term_deposit_matured(api: &Api, saved: (String, String, i64, i64, i64, String)) {
+    use common::deposits::*;
+    let (phone, fin, start, first, second, maturity) = saved;
+    assert!(business_date(now(api).await).format("%Y%m%d").to_string() > maturity);
+    let (status, login) = post(
+        api,
+        "/v2.0/ext/auth/login",
+        Some(json!({"phone": phone, "password": "deposit-pass"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{login}");
+    common::assert_contract("LoginResponse", &login);
+    let token = login["access_token"].as_str().unwrap();
+    let path = format!("/v2.0/ext/deposits/{first}");
+    let body = request(
+        api,
+        token,
+        "GET",
+        &path,
+        None,
+        StatusCode::OK,
+        "DepositResponse",
+    )
+    .await;
+    assert_eq!(body["account_state"], "09");
+    assert_eq!(body["balance_amt"], "0");
+    assert_eq!(body["close_type"], "MATURITY");
+    assert_eq!(body["close_date"], maturity);
+    assert_eq!(snapshot(api, &fin).await.0, start);
+    let rows = movements(api, first).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[1],
+        (
+            "term_close".into(),
+            2,
+            0,
+            maturity.clone(),
+            maturity.clone(),
+            0
+        )
+    );
+    let date = maturity.clone();
+    let finished: i64 = api
+        .state
+        .db
+        .run(move |s| s.query_row(&ROLLOVER, &[&date]))
+        .await
+        .unwrap();
+    assert_eq!(finished, 1);
+    // The maturity close has its status history row and status event.
+    let closure: (String, i64, i64) = api
+        .state
+        .db
+        .run(move |s| s.query_row(&CLOSURE, &[&first]))
+        .await
+        .unwrap();
+    assert_eq!(closure, ("MATURITY".into(), 1, 1));
+    let body = request(
+        api,
+        token,
+        "GET",
+        &format!("/v2.0/ext/deposits/{second}"),
+        None,
+        StatusCode::OK,
+        "DepositResponse",
+    )
+    .await;
+    assert_eq!(body["close_type"], "EARLY");
+    let rows = movements(api, second).await;
+    assert_eq!(rows.iter().filter(|r| r.0 == "term_close").count(), 1);
+    let body = request(
+        api,
+        token,
+        "POST",
+        &format!("{path}/close"),
+        Some(close_payload(api).await),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "BankRejected",
+    )
+    .await;
+    assert_eq!(body["bank_rsp_code"], "403");
+    // Run the job directly again: a repeated settlement cannot add money or rows.
+    let date = NaiveDate::parse_from_str(&maturity, "%Y%m%d").unwrap();
+    bank::features::deposits::MaturityJob
+        .run(
+            &api.state.db,
+            date,
+            bank::shared::rollover::last_instant(date),
+        )
+        .await
+        .unwrap();
+    assert_eq!(movements(api, first).await.len(), 2);
+    assert_eq!(snapshot(api, &fin).await.0, start);
+}
+
 async fn password_reset_code_expires(api: &Api) {
     let phone = format!("010{}", common::unique_digits(10));
     let no = format!("R{}", common::unique_digits(10));
@@ -867,6 +1051,7 @@ async fn backfill_sequence() {
             recording: recording.clone(),
         }));
     }
+    registry.register(Arc::new(bank::features::deposits::MaturityJob));
     registry.register(Arc::new(bank::features::accounts_lifecycle::DormancyJob));
     let clock = Clock::init(db.clone(), registry).await.expect("clock");
     let state = AppState {
@@ -897,7 +1082,9 @@ async fn backfill_sequence() {
         assert!(r.sleep_on.is_none());
         assert!(r.fail_once.is_none());
     }
+    let deposits = term_deposit_open(&api).await;
     dormancy_and_reactivation(&api).await;
+    term_deposit_matured(&api, deposits).await;
     password_reset_code_expires(&api).await;
     live_switch_is_one_way(&api, &recording).await;
 }

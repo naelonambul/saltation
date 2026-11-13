@@ -253,3 +253,5 @@ pub async fn form_call(router: &Router, path: &str, body: String) -> (StatusCode
         serde_json::from_slice(&bytes).expect("JSON response"),
     )
 }
+
+pub mod deposits;

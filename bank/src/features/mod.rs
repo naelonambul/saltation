@@ -12,3 +12,5 @@ pub mod transfers;
 pub mod inbound;
 
 pub mod password_reset;
+
+pub mod deposits;

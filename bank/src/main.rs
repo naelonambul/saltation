@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let applied = db.migrate().await.context("apply migrations")?;
     tracing::info!(applied, "migrations up to date");
     let mut registry = Registry::default();
+    registry.register(std::sync::Arc::new(bank::features::deposits::MaturityJob));
     for job in bank::features::accounts_lifecycle::jobs() {
         registry.register(job);
     }

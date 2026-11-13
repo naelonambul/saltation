@@ -31,6 +31,7 @@ fn public_routes() -> Router<AppState> {
         .merge(features::auth::router())
         .merge(features::password_reset::router())
         .merge(features::accounts::router())
+        .merge(features::deposits::router())
         .merge(features::transfers::router())
         .merge(features::payees::router())
 }
