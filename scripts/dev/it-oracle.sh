@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e (more are added per plan step)
+#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -203,6 +203,10 @@ e2e() {
   gen=("${compose[@]}" --profile tools run --rm generator)
   "${compose[@]}" up -d --build --wait --wait-timeout 1800
   "${compose[@]}" --profile tools build generator >/dev/null
+  # A new database starts in backfill mode; the run and the browser flow need live time.
+  echo "e2e: seeding counterparties and switching to live"
+  "${gen[@]}" seed-parties --counterparties 50
+  "${gen[@]}" clock live
   echo "e2e: seeding 1,000 customers from #$start"
   "${gen[@]}" seed --customers 1000 --start "$start"
   echo "e2e: 10 minutes of normal transfers at 5 per second"
