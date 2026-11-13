@@ -324,9 +324,20 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
     ) {
         if e.ora_code() == Some(1) {
             s.rollback()?;
-            return Ok(Attempt::Stored(
-                s.query_opt(&SELECT_STORED, &[&p.scope, &p.key])?,
-            ));
+            let stored: Option<(String, String, String, Option<String>)> =
+                s.query_opt(&SELECT_STORED, &[&p.scope, &p.key])?;
+            if stored.as_ref().is_none_or(|row| row.0 != p.hash) {
+                crate::shared::outcome::conflict(
+                    s,
+                    &p.ctx,
+                    p.now,
+                    p.request_type(),
+                    "MOBILE",
+                    &p.key,
+                    (Some(&p.customer_no), Some(&p.session)),
+                )?;
+            }
+            return Ok(Attempt::Stored(stored));
         }
         return Err(e);
     }

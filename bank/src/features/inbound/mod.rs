@@ -268,6 +268,17 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         s.rollback()?;
         let row: Option<(String, String, String, Option<String>)> =
             s.query_opt(&SELECT_STORED, &[&p.scope, &item.bank_tran_id])?;
+        if row.as_ref().is_none_or(|row| row.0 != p.hash) {
+            crate::shared::outcome::conflict(
+                s,
+                &p.ctx,
+                p.now,
+                "INBOUND",
+                "EXTERNAL",
+                &item.bank_tran_id,
+                (None, None),
+            )?;
+        }
         let (hash, status, code, body) = row.unwrap_or_default();
         return Ok(Attempt::Stored(hash, status, code, body));
     }
@@ -276,7 +287,22 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         &[&p.who.institution_code, &p.req.cntr_account_num],
     )?;
     let Some((sender_name, bank_name)) = sender else {
-        s.rollback()?;
+        let stored = json!({"body": {}, "rsp_message": "요청 항목 오류"}).to_string();
+        s.execute(
+            &FINISH_REQUEST,
+            &[
+                &"REJECTED",
+                &codes::INVALID_PARAMETER,
+                &Option::<&str>::None,
+                &stored,
+                &p.ctx.request_id,
+            ],
+        )?;
+        let event = Event::for_request(&p.ctx, "request.completed", p.now, "EXTERNAL", "rejected")
+            .codes(codes::INVALID_PARAMETER, None)
+            .payload(json!({"http_status": 400, "request_type": "INBOUND"}));
+        outbox::record(s, &event)?;
+        s.commit()?;
         return Ok(Attempt::InvalidSender);
     };
     let receiver: Option<(i64, String, String, String)> =
@@ -408,6 +434,8 @@ async fn deposit(
                 &ctx,
                 if status == "DONE" {
                     StatusCode::OK
+                } else if code == codes::INVALID_PARAMETER {
+                    StatusCode::BAD_REQUEST
                 } else {
                     StatusCode::UNPROCESSABLE_ENTITY
                 },

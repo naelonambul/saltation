@@ -24,6 +24,82 @@ const IDENTITY: SqlStmt = sql_stmt!("test.outcome_identity", "sql/outcome_identi
 const ACCOUNT: SqlStmt = sql_stmt!("test.outcome_account", "sql/outcome_account.sql");
 const ROLLBACK: SqlStmt = sql_stmt!("test.outcome_rollback", "sql/outcome_rollback.sql");
 
+async fn attempts(api: &Api, id: &str) -> Vec<Value> {
+    let id = id.to_owned();
+    let rows: Vec<(String, Option<String>)> = api
+        .state
+        .db
+        .run(move |s| {
+            s.query_all(
+                &sql_stmt!("test.outcome_attempts", "sql/outcome_attempts.sql"),
+                &[&id, &id],
+            )
+        })
+        .await
+        .unwrap();
+    rows.iter()
+        .map(|(row, response)| {
+            let mut value: Value = serde_json::from_str(row).unwrap();
+            value["RESPONSE_BYTES"] = json!(response);
+            value
+        })
+        .collect()
+}
+async fn balances(api: &Api) -> Vec<(i64, i64)> {
+    api.state
+        .db
+        .run(|s| {
+            s.query_all(
+                &sql_stmt!("test.outcome_balances", "sql/outcome_balances.sql"),
+                &[],
+            )
+        })
+        .await
+        .unwrap()
+}
+async fn counts(api: &Api) -> (i64, i64) {
+    api.state
+        .db
+        .run(|s| {
+            s.query_row(
+                &sql_stmt!("test.outcome_counts", "sql/outcome_counts.sql"),
+                &[],
+            )
+        })
+        .await
+        .unwrap()
+}
+async fn scope(api: &Api, token: &str, value: &str) -> String {
+    let hash = bank::shared::auth::token_hash(token);
+    let value = value.to_owned();
+    api.state
+        .db
+        .run(move |s| {
+            let old: String = s.query_row(
+                &sql_stmt!("test.outcome_scope", "sql/outcome_scope.sql"),
+                &[&hash],
+            )?;
+            s.execute(
+                &sql_stmt!("test.outcome_set_scope", "sql/outcome_set_scope.sql"),
+                &[&value, &hash],
+            )?;
+            s.commit()?;
+            Ok(old)
+        })
+        .await
+        .unwrap()
+}
+fn assert_attempt(row: &Value, kind: &str, channel: &str, code: &Value, key: Value) {
+    assert_eq!(row["STATUS"], "REJECTED");
+    assert_eq!(row["RSP_CODE"], *code);
+    assert_eq!(row["REQUEST_TYPE"], kind);
+    assert_eq!(row["CHANNEL"], channel);
+    assert_eq!(row["BANK_TRAN_ID"], key);
+    for name in ["IDEM_SCOPE", "IDEM_KEY", "REQUEST_HASH"] {
+        assert!(row[name].is_null(), "{row}");
+    }
+}
+
 async fn related(api: &Api, id: &str) -> Vec<Value> {
     let id = id.to_owned();
     let rows: Vec<String> = api
@@ -234,8 +310,115 @@ impl Coverage<'_> {
         };
         if let Some(kind) = request_type {
             assert_eq!(event["payload"]["request_type"], kind);
+            // T4: an unclaimed conflict leaves the original bytes and every balance intact.
+            let original = attempts(self.api, &id).await;
+            let before = balances(self.api).await;
+            let before_count = counts(self.api).await;
+            let mut changed = request_body.clone();
+            let mut conflict_path = path.to_owned();
+            if kind == "INBOUND" {
+                changed["req_list"][0]["tran_amt"] = json!("124");
+            } else if kind == "TERM_CLOSE" {
+                let target = path.split('/').nth(4).unwrap().parse::<i64>().unwrap() + 1;
+                conflict_path = format!("/v2.0/ext/deposits/{target}/close");
+            } else {
+                changed["tran_amt"] = json!("101");
+            }
+            let conflict_id = new_id();
+            let (conflict_status, conflict_body) = raw(
+                router,
+                method,
+                &conflict_path,
+                &conflict_id,
+                token,
+                changed.to_string(),
+                "application/json",
+            )
+            .await;
+            assert_eq!(
+                conflict_status,
+                StatusCode::CONFLICT,
+                "{kind}: {conflict_body}"
+            );
+            assert_eq!(conflict_body["rsp_code"], "A0007");
+            let rows = attempts(self.api, &conflict_id).await;
+            assert_eq!(rows.len(), 1);
+            let key = if inbound {
+                &request_body["req_list"][0]["bank_tran_id"]
+            } else {
+                &request_body["bank_tran_id"]
+            };
+            assert_attempt(
+                &rows[0],
+                kind,
+                if inbound { "EXTERNAL" } else { "MOBILE" },
+                &json!("A0007"),
+                key.clone(),
+            );
+            assert_eq!(counts(self.api).await, (before_count.0 + 1, before_count.1));
+            assert_eq!(attempts(self.api, &id).await, original);
+            assert_eq!(balances(self.api).await, before);
+            let conflict_event =
+                assert_completion(self.api, &conflict_id, method, template, conflict_status).await;
+            assert_eq!(conflict_event["payload"]["request_type"], kind);
+            // T4: both authorization failure paths persist exactly one unclaimed attempt.
+            for forbidden in [false, true] {
+                let auth_id = new_id();
+                let old_scope = if forbidden {
+                    Some(scope(self.api, token.unwrap(), "inquiry").await)
+                } else {
+                    None
+                };
+                let answer = raw(
+                    router,
+                    method,
+                    path,
+                    &auth_id,
+                    if forbidden { token } else { None },
+                    request_body.to_string(),
+                    "application/json",
+                )
+                .await;
+                if let Some(old) = old_scope {
+                    scope(self.api, token.unwrap(), &old).await;
+                }
+                assert_eq!(
+                    answer.0,
+                    if forbidden {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    },
+                    "{kind}: {}",
+                    answer.1
+                );
+                let rows = attempts(self.api, &auth_id).await;
+                assert_eq!(rows.len(), 1);
+                assert_attempt(
+                    &rows[0],
+                    kind,
+                    if inbound { "EXTERNAL" } else { "MOBILE" },
+                    &answer.1["rsp_code"],
+                    Value::Null,
+                );
+                let event = assert_completion(self.api, &auth_id, method, template, answer.0).await;
+                assert_eq!(event["payload"]["request_type"], kind);
+            }
+            let malformed = new_id();
+            let answer = raw(
+                router,
+                method,
+                path,
+                &malformed,
+                token,
+                "{".into(),
+                "application/json",
+            )
+            .await;
+            assert_eq!(answer.0, StatusCode::BAD_REQUEST);
+            assert!(attempts(self.api, &malformed).await.is_empty());
             let replay_id = new_id();
-            let (replay_status, _) = if inbound {
+            let (replay_status, replay_body) = if inbound {
                 raw(
                     router,
                     method,
@@ -247,9 +430,22 @@ impl Coverage<'_> {
                 )
                 .await
             } else {
-                call(router, method, path, &replay_id, token, Some(request_body)).await
+                call(
+                    router,
+                    method,
+                    path,
+                    &replay_id,
+                    token,
+                    Some(request_body.clone()),
+                )
+                .await
             };
             assert_eq!(replay_status, status);
+            assert_eq!(
+                common::deposits::core(replay_body),
+                common::deposits::core(response.clone())
+            );
+            assert_eq!(attempts(self.api, &id).await, original);
             let replay =
                 assert_completion(self.api, &replay_id, method, template, replay_status).await;
             assert_eq!(related(self.api, &replay_id).await.len(), 1);
@@ -557,6 +753,159 @@ async fn outcomes() {
     let sender = format!("94{}", unique_digits(10));
     seed_counterparty(&api, &sender).await;
     coverage.success("POST", "/v2.0/transfer/deposit/fin_num", "/v2.0/transfer/deposit/fin_num", Some(client_token), Some(json!({"cntr_account_type": "N", "cntr_account_num": sender, "wd_print_content": "송금", "name_check_option": "off", "tran_dtime": dt, "req_cnt": "1", "req_list": [{"tran_no": "1", "bank_tran_id": bank_tran_id(), "fintech_use_num": b.fin, "print_content": "입금", "tran_amt": "123", "req_client_name": "외부수취인", "transfer_purpose": "TR"}]})), false).await;
+    // T4: request-ID reuse never changes the original movement or replay result.
+    let path = "/v2.0/transfer/withdraw/fin_num";
+    let transfer = json!({"bank_tran_id": bank_tran_id(), "fintech_use_num": a.fin, "tran_amt": "10",
+        "tran_dtime": dt, "transfer_purpose": "TR", "recv_client_name": "김수취",
+        "recv_client_bank_code": "998", "recv_client_account_num": b.account});
+    let reused_id = new_id();
+    let first = call(
+        &api.public,
+        "POST",
+        path,
+        &reused_id,
+        Some(&a.token),
+        Some(transfer.clone()),
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK);
+    let original = attempts(&api, &reused_id).await;
+    let before = balances(&api).await;
+    let before_count = counts(&api).await;
+    let mut second = transfer.clone();
+    second["bank_tran_id"] = json!(bank_tran_id());
+    second["tran_amt"] = json!("11");
+    let answer = call(
+        &api.public,
+        "POST",
+        path,
+        &reused_id,
+        Some(&a.token),
+        Some(second),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::CONFLICT);
+    assert_eq!(answer.1["rsp_code"], "A0007");
+    let rows = attempts(&api, &reused_id).await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.contains(&original[0]));
+    let rejected = rows
+        .iter()
+        .find(|row| row["REUSED_REQUEST_ID"] == reused_id)
+        .unwrap();
+    assert_ne!(rejected["REQUEST_ID"], reused_id);
+    let completion: Vec<_> = related(&api, &reused_id)
+        .await
+        .into_iter()
+        .filter(|e| e["event_type"] == "request.completed")
+        .collect();
+    assert_eq!(completion.len(), 2);
+    assert_eq!(
+        completion[1]["payload"]["attempt_id"],
+        rejected["REQUEST_ID"]
+    );
+    assert_eq!(completion[1]["payload"]["http_status"], 409);
+    assert_eq!(balances(&api).await, before);
+    assert_eq!(counts(&api).await, (before_count.0 + 1, before_count.1));
+    let replay = call(
+        &api.public,
+        "POST",
+        path,
+        &reused_id,
+        Some(&a.token),
+        Some(transfer.clone()),
+    )
+    .await;
+    assert_eq!(replay.0, first.0);
+    assert_eq!(
+        common::deposits::core(replay.1),
+        common::deposits::core(first.1)
+    );
+    assert_eq!(attempts(&api, &reused_id).await, rows);
+
+    // Eight simultaneous duplicates each complete, while only one claims the key and posts.
+    let mut concurrent = transfer;
+    concurrent["bank_tran_id"] = json!(bank_tran_id());
+    let before_a = common::deposits::snapshot(&api, &a.fin).await;
+    let before_b = common::deposits::snapshot(&api, &b.fin).await;
+    let before_count = counts(&api).await;
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let router = api.public.clone();
+        let token = a.token.clone();
+        let body = concurrent.clone();
+        tasks.spawn(async move {
+            let id = new_id();
+            let answer = call(&router, "POST", path, &id, Some(&token), Some(body)).await;
+            (id, answer)
+        });
+    }
+    let mut answers = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let (id, answer) = result.unwrap();
+        assert_eq!(answer.0, StatusCode::OK);
+        assert_completion(&api, &id, "POST", path, answer.0).await;
+        answers.push(common::deposits::core(answer.1));
+    }
+    assert_eq!(answers.len(), 8);
+    assert!(answers.iter().all(|answer| answer == &answers[0]));
+    assert_eq!(counts(&api).await, (before_count.0 + 1, before_count.1 + 1));
+    assert_eq!(
+        common::deposits::snapshot(&api, &a.fin).await.0,
+        before_a.0 - 10
+    );
+    assert_eq!(
+        common::deposits::snapshot(&api, &b.fin).await.0,
+        before_b.0 + 10
+    );
+
+    // Unknown inbound senders retain a replayable, claimed rejection.
+    let unknown = json!({"cntr_account_type": "N", "cntr_account_num": "9999999999999999",
+        "wd_print_content": "송금", "name_check_option": "off", "tran_dtime": dt,
+        "req_cnt": "1", "req_list": [{"tran_no": "1", "bank_tran_id": bank_tran_id(),
+        "fintech_use_num": b.fin, "print_content": "입금", "tran_amt": "123",
+        "req_client_name": "외부수취인", "transfer_purpose": "TR"}]});
+    let path = "/v2.0/transfer/deposit/fin_num";
+    let id = new_id();
+    let before_count = counts(&api).await;
+    let before = balances(&api).await;
+    let answer = call(
+        &api.generator,
+        "POST",
+        path,
+        &id,
+        Some(client_token),
+        Some(unknown.clone()),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::BAD_REQUEST);
+    assert_eq!(answer.1["rsp_code"], "A0002");
+    let rows = attempts(&api, &id).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["STATUS"], "REJECTED");
+    assert_eq!(rows[0]["RSP_CODE"], "A0002");
+    for key in ["IDEM_SCOPE", "IDEM_KEY", "REQUEST_HASH", "RESPONSE_BYTES"] {
+        assert!(rows[0][key].is_string());
+    }
+    assert_completion(&api, &id, "POST", path, answer.0).await;
+    let replay = call(
+        &api.generator,
+        "POST",
+        path,
+        &new_id(),
+        Some(client_token),
+        Some(unknown),
+    )
+    .await;
+    assert_eq!(replay.0, answer.0);
+    assert_eq!(
+        common::deposits::core(replay.1),
+        common::deposits::core(answer.1)
+    );
+    assert_eq!(counts(&api).await, (before_count.0 + 1, before_count.1));
+    assert_eq!(balances(&api).await, before);
+    assert_eq!(attempts(&api, &id).await, rows);
+
     assert_eq!(
         coverage.covered,
         contract_operations(),

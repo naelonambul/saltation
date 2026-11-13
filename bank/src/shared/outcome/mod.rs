@@ -175,9 +175,23 @@ impl Recorder {
         if let Some(replayed) = metadata.replayed {
             event.payload["replayed"] = replayed.into();
         }
+        let operation = if matches!(response.status().as_u16(), 401 | 403) {
+            money_operation(&self.method, &self.endpoint)
+        } else {
+            None
+        };
+        let ctx = self.ctx.clone();
         if state
             .db
             .run_in(&self.stats, move |s| {
+                if let Some((kind, channel)) = operation {
+                    event.channel = channel;
+                    event.payload["request_type"] = kind.into();
+                    let (id, reused) = reject_attempt(s, &ctx, &event, None)?;
+                    if reused {
+                        event.payload["attempt_id"] = id.into();
+                    }
+                }
                 outbox::record(s, &event)?;
                 s.commit()
             })
@@ -190,5 +204,89 @@ impl Recorder {
             }
         }
         response
+    }
+}
+
+/// Records an unclaimed rejection in the caller's transaction. The event supplies
+/// the response codes, request type, identity and business time.
+pub fn reject_attempt(
+    session: &mut crate::shared::db::Session,
+    ctx: &RequestContext,
+    event: &Event,
+    bank_tran_id: Option<&str>,
+) -> Result<(String, bool), crate::shared::db::DbError> {
+    use crate::shared::db::{DbError, SqlStmt};
+    const INSERT: SqlStmt = crate::sql_stmt!("outcome.insert_rejected", "sql/insert_rejected.sql");
+    let at = DateTime::parse_from_rfc3339(&event.occurred_at)
+        .map_err(|e| DbError::Config(format!("attempt time: {e}")))?;
+    let kind = event.payload["request_type"]
+        .as_str()
+        .ok_or_else(|| DbError::Config("rejected attempt needs request_type".into()))?;
+    let insert = |s: &mut crate::shared::db::Session, id: &str, reused: Option<&str>| {
+        s.execute(
+            &INSERT,
+            &[
+                &id,
+                &reused,
+                &kind,
+                &event.channel,
+                &ctx.listener.as_str(),
+                &event.rsp_code,
+                &event.bank_rsp_code,
+                &bank_tran_id,
+                &event.session_id,
+                &event.device_id,
+                &ctx.ip,
+                &ctx.region,
+                &at,
+            ],
+        )
+    };
+    match insert(session, &ctx.request_id, None) {
+        Ok(_) => Ok((ctx.request_id.clone(), false)),
+        Err(e) if e.ora_code() == Some(1) => {
+            let id = ulid::Ulid::new().to_string();
+            insert(session, &id, Some(&ctx.request_id))?;
+            Ok((id, true))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Persists a conflict and its completion atomically, without claiming the key.
+pub fn conflict(
+    session: &mut crate::shared::db::Session,
+    ctx: &RequestContext,
+    now: DateTime<FixedOffset>,
+    kind: &'static str,
+    channel: &'static str,
+    key: &str,
+    identity: (Option<&str>, Option<&str>),
+) -> Result<(), crate::shared::db::DbError> {
+    let mut event = Event::for_request(ctx, "request.completed", now, channel, "rejected")
+        .codes("A0007", None)
+        .payload(serde_json::json!({"http_status": 409, "request_type": kind}));
+    event.customer_no = identity.0.map(str::to_owned);
+    event.session_id = identity.1.map(str::to_owned);
+    let (id, reused) = reject_attempt(session, ctx, &event, Some(key))?;
+    if reused {
+        event.payload["attempt_id"] = id.into();
+    }
+    outbox::record(session, &event)?;
+    session.commit()
+}
+
+fn money_operation(method: &str, route: &str) -> Option<(&'static str, &'static str)> {
+    if method != "POST" {
+        return None;
+    }
+    match route {
+        "/v2.0/transfer/withdraw/fin_num" => Some(("TRANSFER", "MOBILE")),
+        "/v2.0/transfer/deposit/fin_num" => Some(("INBOUND", "EXTERNAL")),
+        "/v2.0/ext/deposits" => Some(("TERM_OPEN", "MOBILE")),
+        "/v2.0/ext/deposits/{id}/close" => Some(("TERM_CLOSE", "MOBILE")),
+        "/v2.0/ext/loans" => Some(("LOAN_TAKE", "MOBILE")),
+        "/v2.0/ext/loans/{id}/repay" => Some(("LOAN_REPAY", "MOBILE")),
+        _ => None,
     }
 }

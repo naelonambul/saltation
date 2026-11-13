@@ -24,7 +24,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=14).collect::<Vec<_>>()
+        (1..=15).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -48,6 +48,14 @@ async fn migrations_apply_once_and_are_recorded() {
         .await
         .expect("inspect");
     db.run(|s| {
+        let column: (String, i64, String) = s.query_row(
+            &sql_stmt!(
+                "test.reused_request_column",
+                "sql/reused_request_column.sql"
+            ),
+            &[],
+        )?;
+        assert_eq!(column, ("VARCHAR2".into(), 26, "Y".into()));
         let absent: Option<&str> = None;
         for id in ["migration14-rejected-1", "migration14-rejected-2"] {
             s.execute(

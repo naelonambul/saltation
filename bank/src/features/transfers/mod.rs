@@ -283,6 +283,17 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&plan.scope, &req.bank_tran_id])?;
+            if stored.as_ref().is_none_or(|row| row.0 != plan.hash) {
+                crate::shared::outcome::conflict(
+                    s,
+                    ctx,
+                    plan.now,
+                    "TRANSFER",
+                    "MOBILE",
+                    &req.bank_tran_id,
+                    (Some(&plan.customer_no), Some(&plan.session_id)),
+                )?;
+            }
             return match stored {
                 Some((hash, status, rsp_code, response)) => Ok(Attempt::Replayed {
                     hash,
