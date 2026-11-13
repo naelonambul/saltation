@@ -8,6 +8,11 @@ const COUNT_MIGRATIONS: SqlStmt = sql_stmt!("test.count_migrations", "sql/count_
 const OUTBOX_TABLESPACE: SqlStmt = sql_stmt!("test.outbox_tablespace", "sql/outbox_tablespace.sql");
 const COUNT_TABLES: SqlStmt = sql_stmt!("test.count_tables", "sql/count_tables.sql");
 
+const COUNT_PERFORMANCE_INDEXES: SqlStmt = sql_stmt!(
+    "test.count_performance_indexes",
+    "sql/count_performance_indexes.sql"
+);
+
 #[tokio::test]
 async fn migrations_apply_once_and_are_recorded() {
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
@@ -27,6 +32,8 @@ async fn migrations_apply_once_and_are_recorded() {
             let recorded: i64 = s.query_row(&COUNT_MIGRATIONS, &[])?;
             let outbox_ts: String = s.query_row(&OUTBOX_TABLESPACE, &[])?;
             let tables: i64 = s.query_row(&COUNT_TABLES, &[])?;
+            let indexes: i64 = s.query_row(&COUNT_PERFORMANCE_INDEXES, &[])?;
+            assert_eq!(indexes, 3, "all performance indexes exist");
             Ok((recorded, outbox_ts, tables))
         })
         .await

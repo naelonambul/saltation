@@ -30,8 +30,6 @@ const SELECT_CUSTOMER_ID: SqlStmt =
 const INSERT_CREDENTIAL: SqlStmt =
     sql_stmt!("internal.insert_credential", "sql/insert_credential.sql");
 const INSERT_ACCOUNT: SqlStmt = sql_stmt!("internal.insert_account", "sql/insert_account.sql");
-const SELECT_ACCOUNT_ID: SqlStmt =
-    sql_stmt!("internal.select_account_id", "sql/select_account_id.sql");
 const INSERT_FINTECH: SqlStmt = sql_stmt!("internal.insert_fintech", "sql/insert_fintech.sql");
 const INSERT_STATUS: SqlStmt = sql_stmt!(
     "internal.insert_status_history",
@@ -141,7 +139,7 @@ async fn seed_customers(
         .db
         .run_in(&stats, move |s| {
             for (ci, hash, c) in &rows {
-                s.execute(
+                let id = s.insert_returning_id(
                     &INSERT_CUSTOMER,
                     &[
                         &c.customer_no,
@@ -153,7 +151,6 @@ async fn seed_customers(
                         &now,
                     ],
                 )?;
-                let id: i64 = s.query_row(&SELECT_CUSTOMER_ID, &[&c.customer_no])?;
                 s.execute(&INSERT_CREDENTIAL, &[&id, hash, &now])?;
             }
             s.commit()
@@ -207,8 +204,8 @@ async fn seed_accounts(
             let mut out = Vec::with_capacity(accounts.len());
             for a in &accounts {
                 let customer_id: i64 = s.query_row(&SELECT_CUSTOMER_ID, &[&a.customer_no])?;
-                s.execute(&INSERT_ACCOUNT, &[&a.account_no, &customer_id, &now])?;
-                let account_id: i64 = s.query_row(&SELECT_ACCOUNT_ID, &[&a.account_no])?;
+                let account_id =
+                    s.insert_returning_id(&INSERT_ACCOUNT, &[&a.account_no, &customer_id, &now])?;
                 let fin = fintech_use_num(account_id);
                 s.execute(
                     &INSERT_FINTECH,

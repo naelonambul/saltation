@@ -1,5 +1,5 @@
 -- accounts_lifecycle.candidates: active demand accounts inactive for 365 business dates.
--- Access path: ACCOUNT scan, ordered by primary key.
+-- Access path: ACCOUNT_DORMANCY_IX range scan.
 SELECT account_id FROM account WHERE subtype = 'DEMAND' AND status = 'ACTIVE'
-AND TRUNC(CAST(COALESCE(last_activity_at, opened_at) AT TIME ZONE '+09:00' AS TIMESTAMP)) <= :cutoff
+AND COALESCE(SYS_EXTRACT_UTC(last_activity_at), SYS_EXTRACT_UTC(opened_at)) < :cutoff_utc
 ORDER BY account_id

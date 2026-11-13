@@ -21,7 +21,10 @@ impl RolloverJob for DormancyJob {
 
     fn run<'a>(&'a self, db: &'a Db, date: NaiveDate, at: DateTime<FixedOffset>) -> JobFuture<'a> {
         Box::pin(async move {
-            let cutoff = date - chrono::Duration::days(365);
+            let cutoff = (date - chrono::Duration::days(365) + chrono::Duration::days(1))
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                - chrono::Duration::hours(9);
             let ids: Vec<i64> = db
                 .run(move |s| s.query_all(&CANDIDATES, &[&cutoff]))
                 .await?;
