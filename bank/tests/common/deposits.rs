@@ -49,3 +49,23 @@ pub fn core(mut value: Value) -> Value {
     }
     value
 }
+
+pub async fn counterparties(api: &Api, id: i64, expected_rows: usize) {
+    let sql = sql_stmt!(
+        "test.product_counterparties",
+        "../sql/product_counterparties.sql"
+    );
+    let rows: Vec<(String, String, String, String, String)> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&sql, &[&id]))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), expected_rows);
+    for (bank, account, name, other_account, holder) in rows {
+        assert_eq!(bank, bank::shared::api::fields::BANK_CODE);
+        assert_eq!(account, other_account);
+        assert_eq!(name, holder);
+        assert_eq!(holder, "김수취");
+    }
+}

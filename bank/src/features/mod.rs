@@ -14,3 +14,5 @@ pub mod inbound;
 pub mod password_reset;
 
 pub mod deposits;
+
+pub mod loans;

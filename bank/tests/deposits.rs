@@ -77,6 +77,7 @@ async fn deposits() {
     .await;
     assert_eq!(read["fintech_use_num"], opened["fintech_use_num"]);
     assert_eq!(read["balance_amt"], "100000");
+    counterparties(&api, id, 2).await;
     let rows = movements(&api, id).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -196,6 +197,7 @@ async fn deposits() {
         bank::shared::api::fields::date(api.state.clock.state().await.unwrap().business_time)
     );
     assert_eq!(snapshot(&api, &a.fin).await, before);
+    counterparties(&api, id, 4).await;
     let rows = movements(&api, id).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(

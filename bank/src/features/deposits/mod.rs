@@ -274,7 +274,7 @@ fn missing(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         },
     )
 }
-fn leg(id: i64, amount: i64, initiated: bool) -> Leg {
+fn leg(id: i64, amount: i64, initiated: bool, other: &str, name: &str) -> Leg {
     Leg {
         account_id: id,
         amount,
@@ -282,9 +282,9 @@ fn leg(id: i64, amount: i64, initiated: bool) -> Leg {
         inout_type: if amount < 0 { "출금" } else { "입금" },
         tran_type: "대체",
         print_content: None,
-        counterparty_bank_code: None,
-        counterparty_account_no: None,
-        counterparty_name: None,
+        counterparty_bank_code: Some(fields::BANK_CODE.into()),
+        counterparty_account_no: Some(other.into()),
+        counterparty_name: Some(name.into()),
         transfer_out: 0,
     }
 }
@@ -316,9 +316,9 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
     }
     let id = match &p.operation {
         Operation::Open { fin, terms, amount } => {
-            let payer: Option<i64> = s.query_opt(&PAYER, &[fin, &p.customer])?;
+            let payer: Option<(i64, String)> = s.query_opt(&PAYER, &[fin, &p.customer])?;
             let conditions: Option<(i64, i64, i64)> = s.query_opt(&TERMS, &[terms])?;
-            let (Some(payer), Some((months, min, max))) = (payer, conditions) else {
+            let (Some((payer, name)), Some((months, min, max))) = (payer, conditions) else {
                 return missing(s, p);
             };
             let payer_locks = ledger::lock_accounts(s, &[payer])?;
@@ -366,15 +366,19 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                     amount: *amount,
                     channel: "MOBILE",
                     occurred_at: p.now,
-                    legs: vec![leg(payer, -*amount, true), leg(id, *amount, false)],
+                    legs: vec![
+                        leg(payer, -*amount, true, &number, &name),
+                        leg(id, *amount, false, &from.account_no, &name),
+                    ],
                 },
             )
             .map_err(ledger_error)?;
             id
         }
         Operation::Close { id } => {
-            let info: Option<(i64, i64, String)> = s.query_opt(&CLOSE_INFO, &[id, &p.customer])?;
-            let Some((linked, principal, early)) = info else {
+            let info: Option<(i64, i64, String, String)> =
+                s.query_opt(&CLOSE_INFO, &[id, &p.customer])?;
+            let Some((linked, principal, early, name)) = info else {
                 return missing(s, p);
             };
             let mut locks = ledger::lock_accounts(s, &[*id, linked])?;
@@ -387,6 +391,8 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             if locks.get(linked).expect("linked").status == "CLOSED" {
                 return reject(s, p, "403");
             }
+            let term_no = locks.get(*id).expect("term").account_no.clone();
+            let linked_no = locks.get(linked).expect("linked").account_no.clone();
             ledger::post(
                 s,
                 &mut locks,
@@ -399,7 +405,10 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                     amount: principal,
                     channel: "MOBILE",
                     occurred_at: p.now,
-                    legs: vec![leg(*id, -principal, false), leg(linked, principal, true)],
+                    legs: vec![
+                        leg(*id, -principal, false, &linked_no, &name),
+                        leg(linked, principal, true, &term_no, &name),
+                    ],
                 },
             )
             .map_err(ledger_error)?;
@@ -582,12 +591,14 @@ impl RolloverJob for MaturityJob {
     }
     fn run<'a>(&'a self, db: &'a Db, date: NaiveDate, at: DateTime<FixedOffset>) -> JobFuture<'a> {
         Box::pin(async move {
-            let rows: Vec<(i64, i64, i64)> =
+            let rows: Vec<(i64, i64, i64, String)> =
                 db.run(move |s| s.query_all(&CANDIDATES, &[&date])).await?;
-            for (id, linked, principal) in rows {
+            for (id, linked, principal, name) in rows {
                 db.run(move |s| {
                     let mut locks = ledger::lock_accounts(s, &[id, linked])?;
                     if locks.get(id).expect("term").status != "CLOSED" {
+                        let term_no = locks.get(id).expect("term").account_no.clone();
+                        let linked_no = locks.get(linked).expect("linked").account_no.clone();
                         ledger::post(
                             s,
                             &mut locks,
@@ -601,8 +612,8 @@ impl RolloverJob for MaturityJob {
                                 channel: "SYSTEM",
                                 occurred_at: at,
                                 legs: vec![
-                                    leg(id, -principal, false),
-                                    leg(linked, principal, false),
+                                    leg(id, -principal, false, &linked_no, &name),
+                                    leg(linked, principal, false, &term_no, &name),
                                 ],
                             },
                         )
