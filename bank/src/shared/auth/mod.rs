@@ -162,7 +162,16 @@ impl FromRequestParts<AppState> for AuthCustomer {
             })
             .await
             .map_err(|_| ApiError::internal(&ctx))?;
-        found.ok_or_else(unauthorized)
+        let customer = found.ok_or_else(unauthorized)?;
+        if let Some(slot) = parts
+            .extensions
+            .get::<crate::shared::outcome::IdentitySlot>()
+        {
+            let mut identity = slot.lock().unwrap_or_else(|e| e.into_inner());
+            identity.customer_no = Some(customer.customer_no.clone());
+            identity.session_id = Some(customer.session_id.clone());
+        }
+        Ok(customer)
     }
 }
 
@@ -244,14 +253,23 @@ impl FromRequestParts<AppState> for AuthClient {
                     ApiError::internal(&ctx)
                 }
             })?;
-        row.map(
-            |(counterparty_client_id, client_id, institution_code, scope)| Self {
-                counterparty_client_id,
-                client_id,
-                institution_code,
-                scope,
-            },
-        )
-        .ok_or_else(unauthorized)
+        let client = row
+            .map(
+                |(counterparty_client_id, client_id, institution_code, scope)| Self {
+                    counterparty_client_id,
+                    client_id,
+                    institution_code,
+                    scope,
+                },
+            )
+            .ok_or_else(unauthorized)?;
+        if let Some(slot) = parts
+            .extensions
+            .get::<crate::shared::outcome::IdentitySlot>()
+        {
+            slot.lock().unwrap_or_else(|e| e.into_inner()).client_id =
+                Some(client.client_id.clone());
+        }
+        Ok(client)
     }
 }

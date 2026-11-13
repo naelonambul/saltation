@@ -161,7 +161,17 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
     {
-        let (result, collected) = self.run_collect(work).await;
+        let endpoint = stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .outcome_endpoint
+            .clone();
+        let (result, collected) = self
+            .run_collect(move |session| {
+                session.outcome_endpoint = endpoint;
+                work(session)
+            })
+            .await;
         if let Ok(mut total) = stats.lock() {
             total.merge(&collected);
         }
@@ -190,10 +200,12 @@ impl Db {
             let mut session = Session {
                 conn,
                 stats: StatementStats::default(),
+                pending_completion: false,
+                outcome_endpoint: None,
             };
             let result = work(&mut session);
             if result.is_err() {
-                let _ = session.conn.rollback();
+                let _ = session.rollback();
             }
             (result, session.stats)
         })
@@ -219,12 +231,15 @@ impl Db {
 #[derive(Debug, Default, Clone)]
 pub struct StatementStats {
     pub count: u32,
+    pub completion_committed: bool,
+    pub outcome_endpoint: Option<String>,
     pub slowest: Option<(&'static str, Duration)>,
 }
 
 impl StatementStats {
     pub fn merge(&mut self, other: &StatementStats) {
         self.count += other.count;
+        self.completion_committed |= other.completion_committed;
         if let Some((name, d)) = other.slowest
             && self.slowest.is_none_or(|(_, mine)| d > mine)
         {
@@ -267,6 +282,8 @@ fn with_binds<T>(params: &[&dyn ToSql], f: impl FnOnce(&[&dyn ToSql]) -> T) -> T
 pub struct Session {
     conn: Connection,
     pub stats: StatementStats,
+    pending_completion: bool,
+    pub(crate) outcome_endpoint: Option<String>,
 }
 
 impl Session {
@@ -383,12 +400,19 @@ impl Session {
         })
     }
 
+    pub fn note_completion(&mut self) {
+        self.pending_completion = true;
+    }
+
     pub fn commit(&mut self) -> Result<(), DbError> {
         self.conn.commit()?;
+        self.stats.completion_committed |= self.pending_completion;
+        self.pending_completion = false;
         Ok(())
     }
 
     pub fn rollback(&mut self) -> Result<(), DbError> {
+        self.pending_completion = false;
         self.conn.rollback()?;
         Ok(())
     }

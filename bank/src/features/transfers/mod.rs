@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -572,7 +572,7 @@ async fn withdraw(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<WithdrawRequest>,
+    crate::shared::api::Json(req): crate::shared::api::Json<WithdrawRequest>,
 ) -> Result<Response, ApiError> {
     if !who.has_scope("transfer") {
         return Err(ApiError::new(
@@ -650,7 +650,7 @@ async fn result(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<ResultRequest>,
+    crate::shared::api::Json(req): crate::shared::api::Json<ResultRequest>,
 ) -> Result<Response, ApiError> {
     if req.req_list.is_empty() || req.req_list.len() > 25 {
         return Err(invalid(&ctx, "req_list는 1건 이상 25건 이하여야 합니다"));

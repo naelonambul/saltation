@@ -8,11 +8,11 @@ use crate::shared::db::{DbError, Session, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 const SELECT_INTERNAL: SqlStmt = sql_stmt!("payees.select_internal", "sql/select_internal.sql");
@@ -85,7 +85,7 @@ async fn inquiry(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     _who: AuthCustomer,
-    Json(req): Json<Inquiry>,
+    crate::shared::api::Json(req): crate::shared::api::Json<Inquiry>,
 ) -> Result<Response, ApiError> {
     if !valid_recipient(&req.bank_code_std, &req.account_num)
         || !fields::valid_bank_tran_id(&req.bank_tran_id)
@@ -146,7 +146,7 @@ async fn register(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<Create>,
+    crate::shared::api::Json(req): crate::shared::api::Json<Create>,
 ) -> Result<Response, ApiError> {
     if !valid_recipient(&req.bank_code_std, &req.account_num)
         || req.alias.as_ref().is_some_and(|a| a.chars().count() > 40)
@@ -208,7 +208,7 @@ async fn delete(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Query(req): Query<Delete>,
+    crate::shared::api::Query(req): crate::shared::api::Query<Delete>,
 ) -> Result<Response, ApiError> {
     let c = ctx.clone();
     let deleted = state.db.run_in(&stats, move |s| {

@@ -1,7 +1,7 @@
 //! Open Banking inquiries (spec: Public interface): user info, account list,
 //! balance and transaction history. Numbers are JSON strings, as in KFTC v3.3.6.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
@@ -203,7 +203,7 @@ async fn balance(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Query(q): Query<BalanceQuery>,
+    crate::shared::api::Query(q): crate::shared::api::Query<BalanceQuery>,
 ) -> Result<Response, ApiError> {
     require_scope(&ctx, &who, "inquiry")?;
     if !fields::valid_bank_tran_id(&q.bank_tran_id) || !fields::valid_tran_dtime(&q.tran_dtime) {
@@ -289,7 +289,7 @@ async fn transaction_list(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Query(q): Query<HistoryQuery>,
+    crate::shared::api::Query(q): crate::shared::api::Query<HistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_scope(&ctx, &who, "inquiry")?;
     if !fields::valid_bank_tran_id(&q.bank_tran_id) || !fields::valid_tran_dtime(&q.tran_dtime) {

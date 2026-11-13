@@ -238,6 +238,7 @@ run_target() {
     accounts)    cargo_test accounts ;;
     transfers)   cargo_test transfers ;;
     payees)      cargo_test payees ;;
+    outcomes)    cargo_test outcomes ;;
     inbound)     cargo_test inbound ;;
     password_reset) cargo_test password_reset ;;
     deposits) cargo_test deposits ;;
@@ -254,9 +255,9 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
   run_target observability
 else
   run_target "$target"

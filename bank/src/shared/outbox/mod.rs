@@ -151,9 +151,19 @@ impl Event {
 
 /// Inserts the event into `OUTBOX` in the caller's transaction.
 pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
+    let mut event = event.clone();
+    if event.event_type == "request.completed"
+        && let Some(payload) = event.payload.as_object_mut()
+        && let Some(endpoint) = &session.outcome_endpoint
+    {
+        payload.insert("endpoint".into(), endpoint.clone().into());
+    }
     let json =
-        serde_json::to_string(event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
+        serde_json::to_string(&event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
     session.execute(&INSERT_EVENT, &[&event.event_id, &json])?;
+    if event.event_type == "request.completed" {
+        session.note_completion();
+    }
     Ok(())
 }
 

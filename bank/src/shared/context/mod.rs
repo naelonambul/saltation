@@ -107,6 +107,8 @@ pub async fn attach(listener: Listener, mut req: Request, next: Next) -> Respons
         .map(|c| c.0);
     let ctx = RequestContext::from_headers(listener, req.headers(), peer);
     let request_id = ctx.request_id.clone();
+    req.extensions_mut()
+        .insert(crate::shared::outcome::Arrival(std::time::Instant::now()));
     req.extensions_mut().insert(ctx);
     let mut res = next.run(req).await;
     if let Ok(v) = HeaderValue::from_str(&request_id) {
@@ -211,38 +213,58 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
         .get::<RequestContext>()
         .cloned()
         .unwrap_or_else(|| RequestContext::from_headers(Listener::Public, req.headers(), None));
+    let recorder = crate::shared::outcome::Recorder::attach(&mut req, ctx.clone());
     let (parts, body) = req.into_parts();
-    let bytes = match tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 1_048_576)).await
-    {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) => {
-            return ApiError::new(&ctx, StatusCode::PAYLOAD_TOO_LARGE, "A0002", "invalid body")
-                .into_response();
-        }
-        Err(_) => {
-            return ApiError::new(&ctx, StatusCode::REQUEST_TIMEOUT, "A0002", "body timeout")
-                .into_response();
-        }
+    let read = tokio::time::timeout(Duration::from_secs(10), to_bytes(body, 1_048_576)).await;
+    let (bytes, rejection) = match read {
+        Ok(Ok(bytes)) => (bytes, None),
+        Ok(Err(_)) => (
+            Default::default(),
+            Some(
+                ApiError::new(&ctx, StatusCode::PAYLOAD_TOO_LARGE, "A0002", "invalid body")
+                    .into_response(),
+            ),
+        ),
+        Err(_) => (
+            Default::default(),
+            Some(
+                ApiError::new(&ctx, StatusCode::REQUEST_TIMEOUT, "A0002", "body timeout")
+                    .into_response(),
+            ),
+        ),
     };
     req = Request::from_parts(parts, Body::from(bytes));
     let ticket = match state.clock.enter().await {
         Ok(ticket) => ticket,
-        Err(DbError::Busy) => {
-            tracing::warn!(request_id = %ctx.request_id, "operation clock read is busy");
-            return ApiError::busy(&ctx).into_response();
+        Err(error) => {
+            recorder.unrecorded();
+            return rejection.unwrap_or_else(|| match error {
+                DbError::Busy => ApiError::busy(&ctx).into_response(),
+                _ => ApiError::internal(&ctx).into_response(),
+            });
         }
-        Err(_) => return ApiError::internal(&ctx).into_response(),
     };
-    req.extensions_mut().insert(BusinessTime(ticket.now));
+    let now = ticket.now;
+    req.extensions_mut().insert(BusinessTime(now));
+    let task_recorder = recorder.clone();
+    let task_state = state.clone();
     // Detach on cancellation: blocking database work must retain the read guard.
     match tokio::spawn(async move {
-        let response = next.run(req).await;
+        let response = match rejection {
+            Some(response) => response,
+            None => next.run(req).await,
+        };
+        let response = task_recorder.finish(&task_state, now, response).await;
         drop(ticket);
         response
     })
     .await
     {
         Ok(response) => response,
-        Err(_) => ApiError::internal(&ctx).into_response(),
+        Err(_) => {
+            recorder
+                .finish(&state, now, ApiError::internal(&ctx).into_response())
+                .await
+        }
     }
 }

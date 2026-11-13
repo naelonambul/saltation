@@ -7,7 +7,7 @@ use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -251,7 +251,7 @@ async fn sms(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Path(phone): Path<String>,
+    crate::shared::api::Path(phone): crate::shared::api::Path<String>,
 ) -> Result<Response, ApiError> {
     let key = phone.clone();
     let found: Option<(String, DateTime<FixedOffset>)> = state

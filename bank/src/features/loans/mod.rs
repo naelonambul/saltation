@@ -1,5 +1,5 @@
 //! Customer loans with atomic disbursement and repayment.
-use axum::extract::{Path, State, rejection::JsonRejection};
+use axum::extract::{State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -106,7 +106,7 @@ async fn read(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Path(id): Path<String>,
+    crate::shared::api::Path(id): crate::shared::api::Path<String>,
 ) -> Result<Response, ApiError> {
     require_scope(&ctx, &who, "inquiry")?;
     let id = id.parse::<i64>().unwrap_or(-1);
@@ -522,7 +522,7 @@ async fn repay(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Path(id): Path<String>,
+    crate::shared::api::Path(id): crate::shared::api::Path<String>,
     body: Result<Json<RepayRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     require_scope(&ctx, &who, "transfer")?;
