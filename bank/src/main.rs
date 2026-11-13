@@ -88,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
     for job in bank::features::accounts_lifecycle::jobs() {
         registry.register(job);
     }
+    registry.register(std::sync::Arc::new(
+        bank::features::daily_close::DailyCloseJob,
+    ));
     let clock = Clock::init(db.clone(), registry)
         .await
         .context("initialise the clock")?;

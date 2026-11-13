@@ -17,6 +17,10 @@ const COUNT_PERFORMANCE_INDEXES: SqlStmt = sql_stmt!(
 async fn migrations_apply_once_and_are_recorded() {
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
 
+    assert_eq!(
+        MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
+        (1..=13).collect::<Vec<_>>()
+    );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
         first,

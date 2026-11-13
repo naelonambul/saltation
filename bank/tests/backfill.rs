@@ -1,5 +1,7 @@
 //! One ordered sequence over a freshly reset schema, including crash recovery.
 mod common;
+#[path = "common/daily_close.rs"]
+mod daily_close_tests;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1040,6 +1042,8 @@ async fn live_switch_is_one_way(api: &Api, recording: &Arc<Mutex<Recording>>) {
 
 #[tokio::test]
 async fn backfill_sequence() {
+    let close_logs = daily_close_tests::capture_logs();
+    let close_metrics = bank::shared::telemetry::metrics_handle();
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrations");
@@ -1053,6 +1057,7 @@ async fn backfill_sequence() {
     }
     registry.register(Arc::new(bank::features::deposits::MaturityJob));
     registry.register(Arc::new(bank::features::accounts_lifecycle::DormancyJob));
+    registry.register(Arc::new(bank::features::daily_close::DailyCloseJob));
     let clock = Clock::init(db.clone(), registry).await.expect("clock");
     let state = AppState {
         db,
@@ -1086,5 +1091,7 @@ async fn backfill_sequence() {
     dormancy_and_reactivation(&api).await;
     term_deposit_matured(&api, deposits).await;
     password_reset_code_expires(&api).await;
+    let restoration = daily_close_tests::sequence(&api, &close_logs, &close_metrics).await;
     live_switch_is_one_way(&api, &recording).await;
+    daily_close_tests::final_check(&api, &close_logs, restoration).await;
 }
