@@ -207,6 +207,10 @@ e2e() {
   echo "e2e: seeding counterparties and switching to live"
   "${gen[@]}" seed-parties --counterparties 50
   "${gen[@]}" clock live
+  # Other targets reset the Oracle schema; a roster kept from an earlier run
+  # would name customers the bank no longer has.
+  "${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
+    --eval 'db.getSiblingDB("truth").roster.deleteMany({})' >/dev/null
   echo "e2e: seeding 1,000 customers from #$start"
   "${gen[@]}" seed --customers 1000 --start "$start"
   echo "e2e: 10 minutes of normal transfers at 5 per second"
