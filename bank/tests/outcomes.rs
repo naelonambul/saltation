@@ -1150,7 +1150,7 @@ async fn outcomes() {
     );
     assert_eq!(completed[1]["payload"]["http_status"], 409);
 
-    // F2: unclaimed auth rejections are relocated, then the original ID can claim.
+    // F2: a request ID first answered 401 stays with that rejection; reusing it is a 409.
     let mut retry_transfer = transfer.clone();
     retry_transfer["bank_tran_id"] = json!(bank_tran_id());
     let retry_inbound = json!({"cntr_account_type": "N", "cntr_account_num": sender,
@@ -1176,37 +1176,121 @@ async fn outcomes() {
         let original = attempts(&api, &id).await;
         assert_eq!(original.len(), 1);
         assert!(original[0]["IDEM_KEY"].is_null());
-        let accepted = call(router, "POST", retry_path, &id, Some(token), Some(body)).await;
-        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+        let conflict = call(
+            router,
+            "POST",
+            retry_path,
+            &id,
+            Some(token),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(conflict.0, StatusCode::CONFLICT);
+        assert_eq!(conflict.1["rsp_code"], "A0007");
         let rows = attempts(&api, &id).await;
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows.iter()
-                .filter(|r| r["REQUEST_ID"] == id && r["IDEM_KEY"].is_string())
-                .count(),
-            1
+            rows.iter().find(|r| r["REQUEST_ID"] == id).unwrap(),
+            &original[0]
         );
-        let moved = rows.iter().find(|r| r["REUSED_REQUEST_ID"] == id).unwrap();
-        assert_ne!(moved["REQUEST_ID"], id);
-        assert_eq!(moved["STATUS"], "REJECTED");
-        assert!(moved["IDEM_KEY"].is_null());
-        let mut expected_rejection = original[0].clone();
-        expected_rejection["REQUEST_ID"] = moved["REQUEST_ID"].clone();
-        expected_rejection["REUSED_REQUEST_ID"] = json!(id);
-        assert_eq!(*moved, expected_rejection);
+        let rejected = rows.iter().find(|r| r["REUSED_REQUEST_ID"] == id).unwrap();
+        assert_ne!(rejected["REQUEST_ID"], id);
+        assert_eq!(rejected["STATUS"], "REJECTED");
+        assert!(rejected["IDEM_KEY"].is_null());
+        assert_eq!(rejected["RSP_CODE"], "A0007");
         let completed = events(&api, &id).await;
         assert_eq!(completed.len(), 2);
         assert_eq!(completed[0]["payload"]["http_status"], 401);
-        assert_eq!(completed[1]["payload"]["http_status"], 200);
+        assert_eq!(completed[1]["payload"]["http_status"], 409);
+        assert_eq!(
+            completed[1]["payload"]["attempt_id"],
+            rejected["REQUEST_ID"]
+        );
+        assert_eq!(common::deposits::snapshot(&api, &b.fin).await, before);
+        assert_eq!(counts(&api).await, (before_counts.0 + 2, before_counts.1));
+        let accepted = call(
+            router,
+            "POST",
+            retry_path,
+            &new_id(),
+            Some(token),
+            Some(body),
+        )
+        .await;
+        assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
         assert_eq!(
             common::deposits::snapshot(&api, &b.fin).await.0,
             before.0 + amount
         );
-        assert_eq!(
-            counts(&api).await,
-            (before_counts.0 + 2, before_counts.1 + 1)
-        );
     }
+
+    // An existing rejection takes precedence even when another request owns the key.
+    let r = new_id();
+    let r0 = new_id();
+    let mut reused_key = transfer.clone();
+    reused_key["bank_tran_id"] = json!(bank_tran_id());
+    let unauthorized = call(
+        &api.public,
+        "POST",
+        path,
+        &r,
+        None,
+        Some(reused_key.clone()),
+    )
+    .await;
+    assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
+    let original = attempts(&api, &r).await;
+    assert_eq!(original.len(), 1);
+    assert!(original[0]["IDEM_KEY"].is_null());
+    let accepted = call(
+        &api.public,
+        "POST",
+        path,
+        &r0,
+        Some(&a.token),
+        Some(reused_key.clone()),
+    )
+    .await;
+    assert_eq!(accepted.0, StatusCode::OK);
+    let before = balances(&api).await;
+    let before_counts = counts(&api).await;
+    let owner = attempts(&api, &r0).await;
+    let conflict = call(
+        &api.public,
+        "POST",
+        path,
+        &r,
+        Some(&a.token),
+        Some(reused_key),
+    )
+    .await;
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
+    assert_eq!(conflict.1["rsp_code"], "A0007");
+    let rows = attempts(&api, &r).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter().find(|row| row["REQUEST_ID"] == r).unwrap(),
+        &original[0]
+    );
+    let rejected = rows
+        .iter()
+        .find(|row| row["REUSED_REQUEST_ID"] == r)
+        .unwrap();
+    assert_ne!(rejected["REQUEST_ID"], r);
+    assert_eq!(rejected["STATUS"], "REJECTED");
+    assert!(rejected["IDEM_KEY"].is_null());
+    assert_eq!(rejected["RSP_CODE"], "A0007");
+    let completed = events(&api, &r).await;
+    assert_eq!(completed.len(), 2);
+    assert_eq!(completed[0]["payload"]["http_status"], 401);
+    assert_eq!(completed[1]["payload"]["http_status"], 409);
+    assert_eq!(
+        completed[1]["payload"]["attempt_id"],
+        rejected["REQUEST_ID"]
+    );
+    assert_eq!(attempts(&api, &r0).await, owner);
+    assert_eq!(balances(&api).await, before);
+    assert_eq!(counts(&api).await, (before_counts.0 + 1, before_counts.1));
 
     // Eight simultaneous duplicates each complete, while only one claims the key and posts.
     let mut concurrent = transfer;

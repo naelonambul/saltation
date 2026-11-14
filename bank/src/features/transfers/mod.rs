@@ -263,8 +263,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     let ctx = &plan.ctx;
     let req = &plan.req;
     let human = ctx.listener.as_str();
-    if let Err(e) = crate::shared::outcome::claim(
-        s,
+    if let Err(e) = s.execute(
         &INSERT_REQUEST,
         &[
             &ctx.request_id,
@@ -279,9 +278,6 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             &ctx.region,
             &plan.now,
         ],
-        &ctx.request_id,
-        &plan.scope,
-        &req.bank_tran_id,
     ) {
         if e.ora_code() == Some(1) {
             s.rollback()?;

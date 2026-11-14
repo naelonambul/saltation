@@ -300,37 +300,7 @@ fn money_operation(method: &str, route: &str) -> Option<(&'static str, &'static 
     }
 }
 
-/// Claims a key, relocating an earlier unclaimed rejection atomically on PK collision.
-pub fn claim(
-    s: &mut crate::shared::db::Session,
-    stmt: &crate::shared::db::SqlStmt,
-    params: &[&dyn oracle::sql_type::ToSql],
-    id: &str,
-    scope: &str,
-    key: &str,
-) -> Result<u64, crate::shared::db::DbError> {
-    match s.execute(stmt, params) {
-        Err(error) if error.ora_code() == Some(1) => {
-            let existing: Option<String> = s.query_opt(
-                &crate::sql_stmt!("outcome.key_owner", "sql/key_owner.sql"),
-                &[&scope, &key],
-            )?;
-            if existing.is_none() {
-                let moved = s.execute(
-                    &crate::sql_stmt!("outcome.relocate_rejection", "sql/relocate_rejection.sql"),
-                    &[&ulid::Ulid::new().to_string(), &id, &id],
-                )?;
-                if moved == 1 {
-                    return s.execute(stmt, params);
-                }
-            }
-            Err(error)
-        }
-        result => result,
-    }
-}
-
-/// A claimed request ID belonging to another key takes precedence over replay.
+/// A request ID already used by another key, or by a rejection that claimed no key, takes precedence over replay.
 pub fn claimed_elsewhere(
     s: &mut crate::shared::db::Session,
     id: &str,
@@ -342,7 +312,6 @@ pub fn claimed_elsewhere(
         &[&id],
     )?;
     Ok(row.is_some_and(|(stored_scope, stored_key)| {
-        stored_key.is_some()
-            && (stored_scope.as_deref() != Some(scope) || stored_key.as_deref() != Some(key))
+        stored_scope.as_deref() != Some(scope) || stored_key.as_deref() != Some(key)
     }))
 }
