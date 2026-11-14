@@ -31,13 +31,35 @@ fn secret(value: &str) {
         secrets.push(value.to_owned());
     }
 }
+/// A digit-only secret (PIN, reset code) leaks only as a standalone value: the
+/// same digits inside a longer number or token, such as a timestamp's
+/// fraction, are not the secret. Other secrets match as substrings.
+fn leaks(text: &str, secret: &str) -> bool {
+    if secret.is_empty() || !secret.bytes().all(|b| b.is_ascii_digit()) {
+        return text.contains(secret);
+    }
+    let bytes = text.as_bytes();
+    let joined = |b: u8| b.is_ascii_alphanumeric() || b == b'.';
+    text.match_indices(secret).any(|(i, _)| {
+        (i == 0 || !joined(bytes[i - 1]))
+            && (i + secret.len() == text.len() || !joined(bytes[i + secret.len()]))
+    })
+}
+#[test]
+fn leak_check_ignores_embedded_digits() {
+    assert!(leaks(r#"{"pin":"7391"}"#, "7391"));
+    assert!(leaks("pin 7391,", "7391"));
+    assert!(!leaks(r#""2026-11-15T08:29:26.077391525+09:00""#, "7391"));
+    assert!(!leaks(r#""01M7E69W7391AHQ""#, "7391"));
+    assert!(leaks("token-abc", "abc"));
+}
 fn collect_secrets(body: &Value) {
     match body {
         Value::Object(fields) => {
             for (key, value) in fields {
                 if matches!(
                     key.as_str(),
-                    "password" | "new_password" | "code" | "client_secret"
+                    "password" | "new_password" | "code" | "client_secret" | "pin" | "atm_pin"
                 ) {
                     if let Some(value) = value.as_str() {
                         secret(value);
@@ -146,6 +168,34 @@ async fn restore(api: &Api) {
         })
         .await
         .unwrap();
+}
+
+async fn atm_rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
+    let key = key.to_owned();
+    let rows: Vec<String> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&stmt, &[&key]))
+        .await
+        .unwrap();
+    rows.iter()
+        .map(|row| serde_json::from_str(row).unwrap())
+        .collect()
+}
+const ATM_SESSIONS: SqlStmt = sql_stmt!("test.atm_sessions", "sql/atm_sessions.sql");
+const ATM_ENDS: SqlStmt = sql_stmt!("test.atm_session_events", "sql/atm_session_events.sql");
+async fn atm_credential(api: &Api, account: &str) -> (String, i64, Option<String>) {
+    let account = account.to_owned();
+    api.state
+        .db
+        .run(move |s| {
+            s.query_row(
+                &sql_stmt!("test.atm_credential", "sql/atm_credential.sql"),
+                &[&account],
+            )
+        })
+        .await
+        .unwrap()
 }
 fn unrecorded(handle: &metrics_exporter_prometheus::PrometheusHandle) -> u64 {
     handle
@@ -313,7 +363,8 @@ impl Coverage<'_> {
             template,
             "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num"
         );
-        let router = if inbound {
+        let atm = template.starts_with("/atm/v1/");
+        let router = if inbound || atm {
             &self.api.generator
         } else {
             &self.api.public
@@ -333,7 +384,12 @@ impl Coverage<'_> {
                     | "/v2.0/ext/deposits/{id}/close"
                     | "/v2.0/ext/loans"
                     | "/v2.0/ext/loans/{id}/repay"
-            ) | ("DELETE", "/v2.0/ext/payees")
+                    | "/atm/v1/session"
+                    | "/atm/v1/session/end"
+                    | "/atm/v1/cash/withdraw"
+                    | "/atm/v1/cash/deposit"
+            ) | ("GET", "/atm/v1/balance")
+                | ("DELETE", "/v2.0/ext/payees")
         ) {
             let before_state = state_snapshot(self.api).await;
             let before_balances = balances(self.api).await;
@@ -368,6 +424,9 @@ impl Coverage<'_> {
                 .await
             };
             restore(self.api).await;
+            if atm {
+                assert_atm_response(method, template, answer.0.as_u16(), &answer.1);
+            }
             assert_eq!(
                 answer.0,
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -425,17 +484,30 @@ impl Coverage<'_> {
             call(router, method, path, &id, token, body).await
         };
         assert_eq!(status, StatusCode::OK, "{method} {template}: {response}");
+        if atm {
+            assert_atm_response(method, template, status.as_u16(), &response);
+        }
         // T1/T3: every route has one completion, after all domain events.
         let event = assert_completion(self.api, &id, method, template, status).await;
         assert!(envelope_errors(&event).is_empty(), "{event}");
         assert_eq!(event["rsp_code"], response["rsp_code"]);
         assert_eq!(
             event["channel"],
-            if inbound { "EXTERNAL" } else { "MOBILE" }
+            if atm {
+                "ATM"
+            } else if inbound {
+                "EXTERNAL"
+            } else {
+                "MOBILE"
+            }
         );
         assert_eq!(
             event["listener"],
-            if inbound { "generator" } else { "public" }
+            if inbound || atm {
+                "generator"
+            } else {
+                "public"
+            }
         );
         // T7: business time, authenticated identity and the single-account rule.
         let after = self.api.state.clock.state().await.unwrap().business_time;
@@ -446,7 +518,10 @@ impl Coverage<'_> {
         if inbound {
             assert_eq!(event["device_id"], "outcome-sim-device");
         }
-        if !inbound && let Some(token) = token {
+        if !inbound
+            && !atm
+            && let Some(token) = token
+        {
             let hash = bank::shared::auth::token_hash(token);
             let (customer, session): (String, String) = self
                 .api
@@ -491,6 +566,21 @@ impl Coverage<'_> {
                 .await
                 .unwrap();
             assert_eq!(event["account_no"], account, "{template}");
+        } else if atm {
+            let account = event["account_no"].as_str().expect("ATM account");
+            if template == "/atm/v1/session" {
+                assert_eq!(account, request_body["account_no"].as_str().unwrap());
+            }
+            let domain_events = related(self.api, &id).await;
+            let operation = domain_events
+                .iter()
+                .find(|e| {
+                    e["event_type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("atm."))
+                })
+                .expect("ATM domain event");
+            assert_eq!(operation["account_no"], account);
         } else {
             assert!(event["account_no"].is_null(), "{template}: {event}");
         }
@@ -576,7 +666,13 @@ impl Coverage<'_> {
             assert_attempt(
                 &rows[0],
                 kind,
-                if inbound { "EXTERNAL" } else { "MOBILE" },
+                if atm {
+                    "ATM"
+                } else if inbound {
+                    "EXTERNAL"
+                } else {
+                    "MOBILE"
+                },
                 &json!("A0007"),
                 key.clone(),
             );
@@ -632,7 +728,13 @@ impl Coverage<'_> {
                 assert_attempt(
                     &rows[0],
                     kind,
-                    if inbound { "EXTERNAL" } else { "MOBILE" },
+                    if atm {
+                        "ATM"
+                    } else if inbound {
+                        "EXTERNAL"
+                    } else {
+                        "MOBILE"
+                    },
                     &answer.1["rsp_code"],
                     Value::Null,
                 );
@@ -742,7 +844,7 @@ async fn raw(
 fn contract_operations() -> BTreeSet<(String, String)> {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
     let mut operations = BTreeSet::new();
-    for name in ["public", "inbound"] {
+    for name in ["public", "inbound", "atm"] {
         let text = std::fs::read_to_string(format!("{dir}/openapi/{name}.yaml")).unwrap();
         let mut path = None;
         for line in text.lines() {
@@ -1375,12 +1477,220 @@ async fn outcomes() {
     assert_eq!(balances(&api).await, before);
     assert_eq!(attempts(&api, &id).await, rows);
 
+    let terminal = format!("T{}", unique_digits(15));
+    let seeded = call(&api.generator, "POST", "/internal/v1/seed/atm_terminals", &new_id(), None,
+        Some(json!({"atm_terminals": [{"terminal_id": terminal, "region": "KR-11", "location": "서울",
+            "latitude": "37.566500", "longitude": "126.978000"}]}))).await;
+    assert_eq!(seeded.0, StatusCode::OK);
+    let atm_customer = customer(&api, 10000).await;
+    let session_body =
+        json!({"terminal_id": terminal, "account_no": atm_customer.account, "pin": TEST_ATM_PIN});
+    let started = coverage
+        .success(
+            "POST",
+            "/atm/v1/session",
+            "/atm/v1/session",
+            None,
+            Some(session_body.clone()),
+            false,
+        )
+        .await;
+    let atm_token = started["atm_session_token"].as_str().unwrap();
+    for op in ["withdraw", "deposit"] {
+        let path = format!("/atm/v1/cash/{op}");
+        coverage
+            .success(
+                "POST",
+                &path,
+                &path,
+                Some(atm_token),
+                Some(json!({"idempotency_key": &new_id()[..20], "amount": "100"})),
+                false,
+            )
+            .await;
+    }
+    coverage
+        .success(
+            "GET",
+            "/atm/v1/balance",
+            "/atm/v1/balance",
+            Some(atm_token),
+            None,
+            false,
+        )
+        .await;
+    coverage
+        .success(
+            "POST",
+            "/atm/v1/session/end",
+            "/atm/v1/session/end",
+            Some(atm_token),
+            None,
+            false,
+        )
+        .await;
     assert_eq!(
         coverage.covered,
         contract_operations(),
         "every OpenAPI operation has a successful witness"
     );
 
+    // Wrong PIN must roll back its counter and event with the refused completion.
+    let mut wrong_pin = session_body.clone();
+    wrong_pin["pin"] = json!(WRONG_ATM_PIN);
+    collect_secrets(&wrong_pin);
+    let before = state_snapshot(&api).await;
+    let credential_before = atm_credential(&api, &atm_customer.account).await;
+    let id = new_id();
+    refuse(&api, &id, false).await;
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &id,
+        None,
+        Some(wrong_pin.clone()),
+    )
+    .await;
+    restore(&api).await;
+    assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_atm_response("POST", "/atm/v1/session", answer.0.as_u16(), &answer.1);
+    assert!(related(&api, &id).await.is_empty());
+    assert_eq!(state_snapshot(&api).await, before);
+    assert_eq!(
+        atm_credential(&api, &atm_customer.account).await,
+        credential_before
+    );
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &new_id(),
+        None,
+        Some(wrong_pin),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(answer.1["bank_rsp_code"], "410");
+    assert_atm_response("POST", "/atm/v1/session", answer.0.as_u16(), &answer.1);
+    assert_eq!(
+        atm_credential(&api, &atm_customer.account).await.1,
+        credential_before.1 + 1
+    );
+
+    // Present an expired token, with the same SQL time adjustment as the ATM suite.
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &new_id(),
+        None,
+        Some(session_body.clone()),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::OK);
+    let token = answer.1["atm_session_token"].as_str().unwrap();
+    let hash = bank::shared::auth::token_hash(token);
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(
+                &sql_stmt!("test.atm_expire_session", "sql/atm_expire_session.sql"),
+                &[&hash],
+            )?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    let before = state_snapshot(&api).await;
+    let id = new_id();
+    refuse(&api, &id, false).await;
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/withdraw",
+        &id,
+        Some(token),
+        Some(json!({"idempotency_key": &new_id()[..20], "amount": "1"})),
+    )
+    .await;
+    restore(&api).await;
+    assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_atm_response(
+        "POST",
+        "/atm/v1/cash/withdraw",
+        answer.0.as_u16(),
+        &answer.1,
+    );
+    assert!(related(&api, &id).await.is_empty());
+    assert!(attempts(&api, &id).await.is_empty());
+    assert_eq!(state_snapshot(&api).await, before);
+    let sessions = atm_rows(&api, ATM_SESSIONS, &terminal).await;
+    let expired_hash = bank::shared::auth::token_hash(token);
+    let expired_session = sessions
+        .iter()
+        .find(|s| s["token_hash"] == expired_hash)
+        .unwrap();
+    assert!(expired_session["ended_at"].is_null());
+
+    // The rollover job must also preserve the open session if its end event fails.
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &new_id(),
+        None,
+        Some(session_body),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::OK);
+    let sessions = atm_rows(&api, ATM_SESSIONS, &terminal).await;
+    let session = sessions.last().unwrap();
+    let session_id = session["session_id"].as_str().unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339(session["expires_at"].as_str().unwrap()).unwrap()
+        + chrono::Duration::seconds(1);
+    let id = session_id.to_owned();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(
+                &sql_stmt!(
+                    "test.outcome_refuse_session",
+                    "sql/outcome_refuse_session.sql"
+                ),
+                &[&id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    use bank::shared::rollover::RolloverJob;
+    let result = bank::features::atm::AtmSessionExpiryJob
+        .run(&api.state.db, at.date_naive(), at)
+        .await;
+    restore(&api).await;
+    assert!(result.is_err());
+    let sessions = atm_rows(&api, ATM_SESSIONS, &terminal).await;
+    let session = sessions
+        .iter()
+        .find(|s| s["session_id"] == session_id)
+        .unwrap();
+    assert!(session["ended_at"].is_null());
+    assert!(atm_rows(&api, ATM_ENDS, session_id).await.is_empty());
+    bank::features::atm::AtmSessionExpiryJob
+        .run(&api.state.db, at.date_naive(), at)
+        .await
+        .unwrap();
+    let sessions = atm_rows(&api, ATM_SESSIONS, &terminal).await;
+    let session = sessions
+        .iter()
+        .find(|s| s["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(session["end_reason"], "expired");
+    let ended = atm_rows(&api, ATM_ENDS, session_id).await;
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0]["payload"]["reason"], "expired");
+    assert!(envelope_errors(&ended[0]).is_empty());
     let expired_token = format!("outcome-expired-token-{}", new_id());
     let hash = bank::shared::auth::token_hash(&expired_token);
     let source = bank::shared::auth::token_hash(&a.token);
@@ -1611,7 +1921,7 @@ async fn outcomes() {
     let rows: Vec<String> = api.state.db.run(|s| s.query_all(&ALL, &[])).await.unwrap();
     for text in rows {
         for secret in SECRETS.lock().unwrap().iter() {
-            assert!(!text.contains(secret), "secret leaked into OUTBOX");
+            assert!(!leaks(&text, secret), "secret leaked into OUTBOX");
         }
         let event: Value = serde_json::from_str(&text).unwrap();
         if event["event_type"] == "request.completed" {

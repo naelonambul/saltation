@@ -372,3 +372,46 @@ pub fn assert_atm_contract(schema_name: &str, value: &Value) {
         .collect();
     assert!(errors.is_empty(), "{schema_name}: {errors:?}");
 }
+
+/// Validate every documented ATM response, including rejection and retry paths.
+pub fn assert_atm_response(method: &str, path: &str, status: u16, body: &Value) {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
+    let text = std::fs::read_to_string(format!("{dir}/openapi/atm.yaml")).expect("ATM contract");
+    let doc: Value = serde_yaml::from_str(&text).expect("ATM YAML");
+    let method = method.to_lowercase();
+    let mut response = doc["paths"][path][&method]["responses"]
+        .get(status.to_string())
+        .unwrap_or_else(|| panic!("undocumented ATM response: {method} {path} {status}"));
+    while let Some(reference) = response.get("$ref") {
+        response = doc
+            .pointer(
+                reference
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix('#')
+                    .expect("local response reference"),
+            )
+            .expect("response reference resolves");
+    }
+    let content = response["content"]["application/json"]["schema"].clone();
+    assert!(
+        content.is_object(),
+        "response schema: {method} {path} {status}"
+    );
+    let components: Value = serde_json::from_str(
+        &doc["components"]
+            .to_string()
+            .replace("#/components/", "#/$defs/"),
+    )
+    .unwrap();
+    let content: Value =
+        serde_json::from_str(&content.to_string().replace("#/components/", "#/$defs/")).unwrap();
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": components,
+        "allOf": [content]
+    });
+    let validator = jsonschema::draft202012::new(&schema).expect("ATM response schema");
+    let errors: Vec<_> = validator.iter_errors(body).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{method} {path} {status}: {errors:?}");
+}

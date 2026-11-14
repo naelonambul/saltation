@@ -22,4 +22,10 @@ UNION ALL
 SELECT 'token:' || json_object('hash' VALUE token_hash, 'revoked' VALUE revoked_at) AS value FROM access_token
 UNION ALL
 SELECT 'session:' || json_object('id' VALUE session_id, 'ended' VALUE ended_at, 'reason' VALUE end_reason) AS value FROM auth_session
+UNION ALL
+SELECT 'atm_session:' || json_object('session_id' VALUE session_id, 'ended_at' VALUE ended_at, 'end_reason' VALUE end_reason, 'expires_at' VALUE expires_at) AS value FROM atm_session
+UNION ALL
+SELECT 'atm_credential:' || json_object('account_no' VALUE account_no, 'failed_count' VALUE failed_count, 'locked_until' VALUE locked_until) AS value FROM atm_credential
+UNION ALL
+SELECT 'daily_account_total:' || json_object(t.*) AS value FROM daily_account_total t
 ) ORDER BY value

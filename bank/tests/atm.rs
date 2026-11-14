@@ -395,7 +395,9 @@ async fn start_session(
     let res = api.generator.clone().oneshot(req).await.unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap())
+    let body = serde_json::from_slice(&bytes).unwrap();
+    common::assert_atm_response("POST", "/atm/v1/session", status.as_u16(), &body);
+    (status, body)
 }
 fn at(value: &Value) -> chrono::DateTime<chrono::FixedOffset> {
     chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap()
@@ -416,7 +418,7 @@ fn check_location(e: &Value, terminal: &str, account: &str, request: &str) {
     assert!(common::envelope_errors(e).is_empty());
 }
 async fn finish_session(api: &Api, token: &str, id: &str) -> (StatusCode, Value) {
-    call(
+    let r = call(
         &api.generator,
         "POST",
         "/atm/v1/session/end",
@@ -424,8 +426,11 @@ async fn finish_session(api: &Api, token: &str, id: &str) -> (StatusCode, Value)
         Some(token),
         None,
     )
-    .await
+    .await;
+    common::assert_atm_response("POST", "/atm/v1/session/end", r.0.as_u16(), &r.1);
+    r
 }
+
 #[tokio::test]
 async fn session_start_and_end() {
     let _guard = TEST_LOCK.lock().await;
@@ -910,6 +915,7 @@ async fn cash(
         Some(json!({"idempotency_key": key, "amount": amount.to_string()})),
     )
     .await;
+    common::assert_atm_response("POST", &format!("/atm/v1/cash/{op}"), r.0.as_u16(), &r.1);
     if r.0 == StatusCode::OK {
         common::assert_atm_contract("CashResponse", &r.1);
         assert_eq!(r.1["rsp_message"], "");
@@ -927,6 +933,7 @@ async fn inquiry(api: &Api, token: &str, id: &str) -> (StatusCode, Value) {
         None,
     )
     .await;
+    common::assert_atm_response("GET", "/atm/v1/balance", r.0.as_u16(), &r.1);
     if r.0 == StatusCode::OK {
         common::assert_atm_contract("BalanceResponse", &r.1);
     }
@@ -1649,4 +1656,92 @@ async fn closed_account_is_refused() {
         assert_eq!(events[1]["payload"]["http_status"], 422);
         assert!(rows(&api, SESSIONS, &t).await[0]["ended_at"].is_null());
     }
+}
+
+async fn one_step_event(
+    api: &Api,
+    id: &str,
+    kind: &str,
+    terminal: &str,
+    account: &str,
+    operation: Option<&str>,
+) {
+    let events = rows(api, REQUEST_EVENTS, id).await;
+    let atm: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"].as_str().unwrap().starts_with("atm."))
+        .collect();
+    assert_eq!(atm.len(), 1, "{events:?}");
+    assert_eq!(atm[0]["event_type"], kind);
+    assert_eq!(atm[0]["request_id"], id);
+    check_location(atm[0], terminal, account, id);
+    if let Some(operation) = operation {
+        assert_eq!(atm[0]["payload"]["operation"], operation);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event_type"] == "request.completed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn every_step_writes_one_located_event() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c) = fixture(&api).await;
+    let id = new_id();
+    let answer = start_session(&api, &t, &c.account, common::WRONG_ATM_PIN, &id).await;
+    assert_eq!(answer.0, StatusCode::UNPROCESSABLE_ENTITY);
+    one_step_event(&api, &id, "atm.session_rejected", &t, &c.account, None).await;
+    let id = new_id();
+    let (status, body) = start_session(&api, &t, &c.account, TEST_ATM_PIN, &id).await;
+    assert_eq!(status, StatusCode::OK);
+    one_step_event(&api, &id, "atm.session_started", &t, &c.account, None).await;
+    let token = body["atm_session_token"].as_str().unwrap();
+    for op in ["withdraw", "deposit", "balance"] {
+        let id = new_id();
+        let answer = if op == "balance" {
+            inquiry(&api, token, &id).await
+        } else {
+            cash(&api, token, op, &new_id()[..20], 100, &id).await
+        };
+        assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+        one_step_event(&api, &id, "atm.operation", &t, &c.account, Some(op)).await;
+    }
+    let id = new_id();
+    assert_eq!(finish_session(&api, token, &id).await.0, StatusCode::OK);
+    one_step_event(&api, &id, "atm.session_ended", &t, &c.account, None).await;
+}
+
+#[tokio::test]
+async fn replaced_session_has_one_end_event() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c) = fixture(&api).await;
+    open_for(&api, &t, &c.account).await;
+    let sessions = rows(&api, SESSIONS, &t).await;
+    let session_id = sessions[0]["session_id"].as_str().unwrap();
+    let id = new_id();
+    assert_eq!(
+        start_session(&api, &t, &c.account, TEST_ATM_PIN, &id)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let events = rows(
+        &api,
+        sql_stmt!(
+            "test.atm_replaced_session_events",
+            "sql/atm_replaced_session_events.sql"
+        ),
+        session_id,
+    )
+    .await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["request_id"], id);
+    assert_eq!(events[0]["payload"]["reason"], "replaced");
+    check_location(&events[0], &t, &c.account, &id);
 }
