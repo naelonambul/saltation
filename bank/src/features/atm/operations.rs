@@ -188,12 +188,48 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
         s.commit()?;
         return Ok(unauthorized());
     }
-    if !p.op.cash() {
-        if locked(s, p, &row)? {
-            end_row(s, &p.ctx, p.now, &t, &row, "locked", p.now)?;
-            return reject(s, p, &row, &t, None, "409");
+    if locked(s, p, &row)? {
+        end_row(s, &p.ctx, p.now, &t, &row, "locked", p.now)?;
+        let req = serde_json::from_slice::<Cash>(&p.body).ok();
+        let amount = req.as_ref().and_then(|r| r.amount.parse::<i64>().ok());
+        let mut e = completed(p, &row, 422, codes::BANK_REJECTED, Some("409"));
+        if p.op.cash() {
+            let (id, reused) = outcome::reject_attempt(
+                s,
+                &p.ctx,
+                &e,
+                // Only a well-formed key fits the bank_tran_id column.
+                req.as_ref()
+                    .map(|r| r.idempotency_key.as_str())
+                    .filter(|k| {
+                        (1..=20).contains(&k.len()) && k.bytes().all(|c| (32..=126).contains(&c))
+                    }),
+                Some(&row.5),
+            )?;
+            if reused {
+                e.payload["attempt_id"] = id.into();
+            }
         }
-        let (_, balance): (i64, i64) = s.query_row(&ACCOUNT, &[&row.1])?;
+        operation(s, p, &row, &t, amount, Some("409"))?;
+        let mut completion = completed(p, &row, 422, codes::BANK_REJECTED, Some("409"));
+        completion.payload = e.payload;
+        if let Some(amount) = amount {
+            completion.payload["tran_amt"] = amount.into();
+        }
+        outbox::record(s, &completion)?;
+        s.commit()?;
+        return Ok(ResultRow {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: codes::BANK_REJECTED,
+            body: json!({"bank_rsp_code": "409", "bank_rsp_message": "참가기관 거부"}),
+            replayed: false,
+        });
+    }
+    if !p.op.cash() {
+        let (_, balance, status): (i64, i64, String) = s.query_row(&ACCOUNT, &[&row.1])?;
+        if status == "CLOSED" {
+            return reject(s, p, &row, &t, None, "403");
+        }
         operation(s, p, &row, &t, None, None)?;
         outbox::record(s, &completed(p, &row, 200, codes::SUCCESS, Some("000")))?;
         s.commit()?;
@@ -296,11 +332,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
             codes::DUPLICATE_REQUEST,
         ));
     }
-    if locked(s, p, &row)? {
-        end_row(s, &p.ctx, p.now, &t, &row, "locked", p.now)?;
-        return reject(s, p, &row, &t, Some(amount), "409");
-    }
-    let (account_id, _): (i64, i64) = s.query_row(&ACCOUNT, &[&row.1])?;
+    let (account_id, _, _): (i64, i64, String) = s.query_row(&ACCOUNT, &[&row.1])?;
     let mut locks = ledger::lock_accounts(s, &[account_id])?;
     let account = locks
         .get(account_id)
