@@ -3,7 +3,7 @@
 INSERT INTO transaction_request (
  request_id, reused_request_id, request_type, channel, listener,
  idem_scope, idem_key, request_hash, status, rsp_code, bank_rsp_code,
- bank_tran_id, session_id, device_id, ip, region, occurred_at)
+ bank_tran_id, session_id, device_id, ip, region, occurred_at, terminal_id)
 VALUES (:id, :reused, :kind, :channel, :listener,
  NULL, NULL, NULL, 'REJECTED', :code, :bank_code,
- :bank_id, :session_id, :device, :ip, :region, :at)
+ :bank_id, :session_id, :device, :ip, :region, :at, :terminal)

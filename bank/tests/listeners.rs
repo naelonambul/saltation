@@ -103,6 +103,23 @@ async fn listeners_expose_only_their_routes() {
         );
     }
 
+    for (router, expected) in [
+        (&public, StatusCode::NOT_FOUND),
+        (&generator, StatusCode::BAD_REQUEST),
+    ] {
+        let res = router
+            .clone()
+            .oneshot(
+                Request::post("/atm/v1/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{} "))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(res.status(), expected, "ATM listener separation");
+    }
+
     for router in [&public, &generator] {
         let (status, _, _) = get(router, "/metrics", None).await;
         assert_eq!(

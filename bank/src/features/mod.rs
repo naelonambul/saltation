@@ -18,3 +18,5 @@ pub mod deposits;
 pub mod loans;
 
 pub mod daily_close;
+
+pub mod atm;

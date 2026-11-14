@@ -317,3 +317,498 @@ async fn captured_logs_include_any_line() {
             .any(|v| v["message"].as_str() == Some(&message))
     );
 }
+
+const SESSIONS: SqlStmt = sql_stmt!("test.atm_sessions", "sql/atm_sessions.sql");
+const REQUESTS: SqlStmt = sql_stmt!("test.atm_requests", "sql/atm_requests.sql");
+const REQUEST_EVENTS: SqlStmt = sql_stmt!("test.atm_request_events", "sql/atm_request_events.sql");
+const SESSION_EVENTS: SqlStmt = sql_stmt!("test.atm_session_events", "sql/atm_session_events.sql");
+const DELETE_CREDENTIAL: SqlStmt = sql_stmt!(
+    "test.atm_delete_credential",
+    "sql/atm_delete_credential.sql"
+);
+const CLOSE_ACCOUNT: SqlStmt = sql_stmt!("test.atm_close_account", "sql/atm_close_account.sql");
+const EXPIRE_SESSION: SqlStmt = sql_stmt!("test.atm_expire_session", "sql/atm_expire_session.sql");
+async fn fixture(api: &Api) -> (String, common::Customer) {
+    let terminal = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(api, vec![self::terminal(&terminal)]).await.0,
+        StatusCode::OK
+    );
+    (terminal, common::customer(api, 10000).await)
+}
+async fn rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
+    let key = key.to_owned();
+    let result: Vec<String> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&stmt, &[&key]))
+        .await
+        .unwrap();
+    result
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect()
+}
+async fn start_session(
+    api: &Api,
+    terminal: &str,
+    account: &str,
+    pin: &str,
+    id: &str,
+) -> (StatusCode, Value) {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let req = Request::post("/atm/v1/session")
+        .header("content-type", "application/json")
+        .header("x-request-id", id)
+        .header("x-sim-ip", "192.0.2.53")
+        .header("x-sim-region", "KR-26")
+        .header("x-sim-device", "atm-test")
+        .body(Body::from(
+            json!({"terminal_id": terminal, "account_no": account, "pin": pin}).to_string(),
+        ))
+        .unwrap();
+    let res = api.generator.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+fn at(value: &Value) -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap()
+}
+fn check_location(e: &Value, terminal: &str, account: &str, request: &str) {
+    assert_eq!(e["channel"], "ATM");
+    assert_eq!(e["account_no"], account);
+    for (key, value) in [
+        ("terminal_id", terminal),
+        ("region", "KR-11"),
+        ("latitude", "37.566500"),
+        ("longitude", "126.978000"),
+        ("account_no", account),
+        ("request_id", request),
+    ] {
+        assert_eq!(e["payload"][key], value, "{key}");
+    }
+    assert!(common::envelope_errors(e).is_empty());
+}
+async fn finish_session(api: &Api, token: &str, id: &str) -> (StatusCode, Value) {
+    call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session/end",
+        id,
+        Some(token),
+        None,
+    )
+    .await
+}
+#[tokio::test]
+async fn session_start_and_end() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let id = new_id();
+    let (status, body) = start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    common::assert_atm_contract("SessionResponse", &body);
+    let token = body["atm_session_token"].as_str().unwrap();
+    let sessions = rows(&api, SESSIONS, &terminal).await;
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session["token_hash"], auth::token_hash(token));
+    assert_eq!(
+        at(&session["expires_at"]) - at(&session["started_at"]),
+        chrono::Duration::seconds(180)
+    );
+    assert_eq!(at(&body["expires_at"]), at(&session["expires_at"]));
+    let events = rows(&api, REQUEST_EVENTS, &id).await;
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e["event_type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["atm.session_started", "request.completed"]
+    );
+    check_location(&events[0], &terminal, &customer.account, &id);
+    assert_eq!(events[1]["payload"]["http_status"], 200);
+    let end_id = new_id();
+    let (status, body) = finish_session(&api, token, &end_id).await;
+    assert_eq!(status, StatusCode::OK);
+    common::assert_atm_contract("Envelope", &body);
+    let ended = rows(&api, SESSIONS, &terminal).await;
+    assert_eq!(ended[0]["end_reason"], "ended");
+    let session_id = session["session_id"].as_str().unwrap();
+    let ends = rows(&api, SESSION_EVENTS, session_id).await;
+    assert_eq!(ends.len(), 1);
+    check_location(&ends[0], &terminal, &customer.account, &end_id);
+    let second_id = new_id();
+    let (status, body) = finish_session(&api, token, &second_id).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["rsp_code"], "O0001");
+    assert_eq!(rows(&api, SESSION_EVENTS, session_id).await.len(), 1);
+    let events = rows(&api, REQUEST_EVENTS, &second_id).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_type"], "request.completed");
+    assert_eq!(events[0]["payload"]["http_status"], 401);
+}
+async fn check_refusal(
+    api: &Api,
+    terminal: &str,
+    account: &str,
+    pin: &str,
+    status: StatusCode,
+    bank: Option<&str>,
+    exists: bool,
+) {
+    let id = new_id();
+    let (actual, body) = start_session(api, terminal, account, pin, &id).await;
+    assert_eq!(actual, status, "{body}");
+    let code = if bank.is_some() { "A0004" } else { "A0003" };
+    assert_eq!(body["rsp_code"], code);
+    assert_eq!(body.get("bank_rsp_code").and_then(Value::as_str), bank);
+    let requests = rows(api, REQUESTS, &id).await;
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["status"], "REJECTED");
+    assert_eq!(request["request_type"], "ATM_SESSION");
+    assert_eq!(request["channel"], "ATM");
+    assert_eq!(request["rsp_code"], code);
+    assert_eq!(request["bank_rsp_code"], json!(bank));
+    assert_eq!(
+        request["terminal_id"],
+        if exists { json!(terminal) } else { Value::Null }
+    );
+    assert!(request["idem_scope"].is_null());
+    assert!(request["idem_key"].is_null());
+    assert_eq!(request["ip"], "192.0.2.53");
+    assert_eq!(request["region"], "KR-26");
+    assert_eq!(request["device_id"], "atm-test");
+    let events = rows(api, REQUEST_EVENTS, &id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event_type"] == "request.completed")
+            .count(),
+        1
+    );
+    let rejected: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"] == "atm.session_rejected")
+        .collect();
+    assert_eq!(rejected.len(), usize::from(exists));
+    if exists {
+        check_location(rejected[0], terminal, account, &id);
+    }
+}
+#[tokio::test]
+async fn every_refusal_is_stored() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    check_refusal(
+        &api,
+        &format!("U{}", common::unique_digits(15)),
+        &customer.account,
+        TEST_ATM_PIN,
+        StatusCode::NOT_FOUND,
+        None,
+        false,
+    )
+    .await;
+    check_refusal(
+        &api,
+        &terminal,
+        &format!("99{}", common::unique_digits(12)),
+        TEST_ATM_PIN,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Some("404"),
+        true,
+    )
+    .await;
+    let no_pin = common::customer(&api, 0).await;
+    let account = no_pin.account.clone();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(&DELETE_CREDENTIAL, &[&account])?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    check_refusal(
+        &api,
+        &terminal,
+        &no_pin.account,
+        TEST_ATM_PIN,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Some("404"),
+        true,
+    )
+    .await;
+    let closed = common::customer(&api, 0).await;
+    let account = closed.account.clone();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(&CLOSE_ACCOUNT, &[&account])?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    check_refusal(
+        &api,
+        &terminal,
+        &closed.account,
+        TEST_ATM_PIN,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Some("403"),
+        true,
+    )
+    .await;
+    check_refusal(
+        &api,
+        &terminal,
+        &customer.account,
+        "0000",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Some("410"),
+        true,
+    )
+    .await;
+}
+#[tokio::test]
+async fn lock_after_three_wrong_pins() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let before = api
+        .state
+        .clock
+        .state()
+        .await
+        .unwrap()
+        .business_time
+        .with_timezone(&bank::shared::clock::kst());
+    for i in 0..3 {
+        let id = new_id();
+        let (status, body) = start_session(&api, &terminal, &customer.account, "0000", &id).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["bank_rsp_code"], "410");
+        let events = rows(&api, REQUEST_EVENTS, &id).await;
+        assert_eq!(events[0]["payload"]["locked"], i == 2);
+    }
+    let (_, failed, locked) = credential(&api, &customer.account).await;
+    assert_eq!(failed, 3);
+    assert_eq!(
+        locked.unwrap(),
+        before
+            .date_naive()
+            .succ_opt()
+            .unwrap()
+            .format("%Y%m%d000000")
+            .to_string()
+    );
+    for pin in [TEST_ATM_PIN, "0000"] {
+        check_refusal(
+            &api,
+            &terminal,
+            &customer.account,
+            pin,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("409"),
+            true,
+        )
+        .await;
+    }
+}
+async fn concurrent_starts(
+    api: &Api,
+    terminal: &str,
+    account: &str,
+    pin: &str,
+) -> Vec<(String, StatusCode, Value)> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let api = Api {
+            generator: api.generator.clone(),
+            public: api.public.clone(),
+            state: api.state.clone(),
+        };
+        let (terminal, account, pin) = (terminal.to_owned(), account.to_owned(), pin.to_owned());
+        tasks.spawn(async move {
+            let id = new_id();
+            let (status, body) = start_session(&api, &terminal, &account, &pin, &id).await;
+            (id, status, body)
+        });
+    }
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.unwrap());
+    }
+    results
+}
+#[tokio::test]
+async fn concurrent_wrong_pins_lock_once() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let results = concurrent_starts(&api, &terminal, &customer.account, "0000").await;
+    for (_, status, _) in &results {
+        assert_eq!(*status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, _, b)| b["bank_rsp_code"] == "410")
+            .count(),
+        3
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(_, _, b)| b["bank_rsp_code"] == "409")
+            .count(),
+        5
+    );
+    let mut locked = 0;
+    for (id, _, _) in results {
+        locked += rows(&api, REQUEST_EVENTS, &id)
+            .await
+            .iter()
+            .filter(|e| e["event_type"] == "atm.session_rejected" && e["payload"]["locked"] == true)
+            .count();
+    }
+    assert_eq!(locked, 1);
+    assert_eq!(credential(&api, &customer.account).await.1, 3);
+}
+#[tokio::test]
+async fn concurrent_starts_replace() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let results = concurrent_starts(&api, &terminal, &customer.account, TEST_ATM_PIN).await;
+    for (_, status, body) in results {
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let sessions = rows(&api, SESSIONS, &terminal).await;
+    assert_eq!(sessions.len(), 8);
+    assert_eq!(
+        sessions.iter().filter(|s| s["ended_at"].is_null()).count(),
+        1
+    );
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|s| s["end_reason"] == "replaced")
+            .count(),
+        7
+    );
+    for session in sessions {
+        let events = rows(
+            &api,
+            SESSION_EVENTS,
+            session["session_id"].as_str().unwrap(),
+        )
+        .await;
+        assert!(events.len() <= 1);
+        if session["end_reason"] == "replaced" {
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["payload"]["session_id"], session["session_id"]);
+            assert_eq!(
+                events[0]["payload"]["start_request_id"],
+                session["request_id"]
+            );
+            assert_ne!(events[0]["request_id"], session["request_id"]);
+        }
+    }
+}
+#[tokio::test]
+async fn no_token_or_pin_leaks() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let begin = common::logs().len();
+    let (status, mut started) =
+        start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id()).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = started["atm_session_token"].as_str().unwrap().to_owned();
+    let ended = finish_session(&api, &token, &new_id()).await.1;
+    let wrong = start_session(&api, &terminal, &customer.account, "0000", &new_id())
+        .await
+        .1;
+    assert_eq!(
+        started.as_object_mut().unwrap().remove("atm_session_token"),
+        Some(json!(token))
+    );
+    let responses = vec![started, ended, wrong];
+    let logs = common::logs();
+    let raw: Vec<String> = api
+        .state
+        .db
+        .run(|s| s.query_all(&EVENTS, &[]))
+        .await
+        .unwrap();
+    let events: Vec<Value> = raw
+        .iter()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let hash = credential(&api, &customer.account).await.0;
+    for (what, values) in [
+        ("responses", responses.as_slice()),
+        ("logs", &logs[begin..]),
+        ("outbox", events.as_slice()),
+    ] {
+        assert_no_pin(what, values, TEST_ATM_PIN);
+        for value in values {
+            let text = value.to_string();
+            assert!(!text.contains(&token), "{what} contains session token");
+            assert!(!text.contains(&hash), "{what} contains PIN hash");
+            assert!(!text.contains("$argon2id$"), "{what} contains PIN hash");
+        }
+    }
+}
+#[tokio::test]
+async fn presented_expired_session_ends_once() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let (status, started) =
+        start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id()).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = started["atm_session_token"].as_str().unwrap();
+    let hash = auth::token_hash(token);
+    api.state
+        .db
+        .run(move |s| {
+            assert_eq!(s.execute(&EXPIRE_SESSION, &[&hash])?, 1);
+            s.commit()
+        })
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let id = new_id();
+        let (status, body) = finish_session(&api, token, &id).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["rsp_code"], "O0001");
+        let events = rows(&api, REQUEST_EVENTS, &id).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event_type"] == "request.completed")
+                .count(),
+            1
+        );
+    }
+    let sessions = rows(&api, SESSIONS, &terminal).await;
+    assert_eq!(sessions[0]["end_reason"], "expired");
+    assert_eq!(sessions[0]["ended_at"], sessions[0]["expires_at"]);
+    let events = rows(
+        &api,
+        SESSION_EVENTS,
+        sessions[0]["session_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["payload"]["reason"], "expired");
+}

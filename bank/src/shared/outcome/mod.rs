@@ -15,6 +15,7 @@ use crate::shared::telemetry::RequestStats;
 
 #[derive(Clone, Debug, Default)]
 pub struct ResponseMetadata {
+    pub terminal_id: Option<String>,
     pub rsp_code: Option<String>,
     pub bank_rsp_code: Option<String>,
     pub account_no: Option<String>,
@@ -39,6 +40,8 @@ pub fn annotate(
 
 #[derive(Clone, Debug, Default)]
 pub struct Identity {
+    pub terminal_id: Option<String>,
+    pub account_no: Option<String>,
     pub device_id: Option<String>,
     pub customer_no: Option<String>,
     pub session_id: Option<String>,
@@ -104,7 +107,9 @@ impl Recorder {
                 .unwrap_or(Arrival(Instant::now())),
             endpoint,
             method: req.method().to_string(),
-            channel: if matches!(path, "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num") {
+            channel: if path.starts_with("/atm/v1/") {
+                "ATM"
+            } else if matches!(path, "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num") {
                 "EXTERNAL"
             } else {
                 "MOBILE"
@@ -160,7 +165,8 @@ impl Recorder {
         );
         event.rsp_code = metadata.rsp_code;
         event.bank_rsp_code = metadata.bank_rsp_code;
-        event.account_no = metadata.account_no;
+        event.account_no = metadata.account_no.or(identity.account_no);
+        let terminal_id = metadata.terminal_id.or(identity.terminal_id);
         event.customer_no = identity.customer_no;
         event.session_id = identity.session_id;
         if event.device_id.is_none() {
@@ -190,7 +196,8 @@ impl Recorder {
                 if let Some((kind, channel)) = operation {
                     event.channel = channel;
                     event.payload["request_type"] = kind.into();
-                    let (id, reused) = reject_attempt(s, &ctx, &event, None)?;
+                    let (id, reused) =
+                        reject_attempt(s, &ctx, &event, None, terminal_id.as_deref())?;
                     if reused {
                         event.payload["attempt_id"] = id.into();
                     }
@@ -217,6 +224,7 @@ pub fn reject_attempt(
     ctx: &RequestContext,
     event: &Event,
     bank_tran_id: Option<&str>,
+    terminal_id: Option<&str>,
 ) -> Result<(String, bool), crate::shared::db::DbError> {
     use crate::shared::db::{DbError, SqlStmt};
     const INSERT: SqlStmt = crate::sql_stmt!("outcome.insert_rejected", "sql/insert_rejected.sql");
@@ -248,6 +256,7 @@ pub fn reject_attempt(
                 &ctx.ip,
                 &ctx.region,
                 &at,
+                &terminal_id,
             ],
         )
     };
@@ -277,7 +286,7 @@ pub fn conflict(
         .payload(serde_json::json!({"http_status": 409, "request_type": kind}));
     event.customer_no = identity.0.map(str::to_owned);
     event.session_id = identity.1.map(str::to_owned);
-    let (id, reused) = reject_attempt(session, ctx, &event, Some(key))?;
+    let (id, reused) = reject_attempt(session, ctx, &event, Some(key), None)?;
     if reused {
         event.payload["attempt_id"] = id.into();
     }
