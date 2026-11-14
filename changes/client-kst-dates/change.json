@@ -15,7 +15,8 @@
     "web/apps/mobile/src/shared/**",
     "web/apps/mobile/e2e/**",
     "web/apps/mobile/playwright.config.ts",
-    "scripts/dev/it-oracle.sh"
+    "scripts/dev/it-oracle.sh",
+    "checks.json"
   ],
   "approvals": []
 }
