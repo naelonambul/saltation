@@ -125,6 +125,30 @@ fn store(s: &mut Session, p: &Plan, body: &Value, bank: Option<&str>) -> Result<
     )?;
     Ok(())
 }
+fn bank_message(code: &str) -> &'static str {
+    match code {
+        "403" => "계좌 상태 오류",
+        "405" => "잔액 부족",
+        "406" => "한도 초과",
+        "409" => "PIN 입력 횟수 초과",
+        _ => "참가기관 거부",
+    }
+}
+fn amount(value: &str) -> Option<i64> {
+    if value.len() > 12
+        || !value
+            .as_bytes()
+            .first()
+            .is_some_and(|c| (b'1'..=b'9').contains(c))
+        || !value.bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    value
+        .parse()
+        .ok()
+        .filter(|n| (1..=999_999_999_999).contains(n))
+}
 fn reject(
     s: &mut Session,
     p: &Plan,
@@ -133,7 +157,7 @@ fn reject(
     amount: Option<i64>,
     bank: &'static str,
 ) -> Result<ResultRow, DbError> {
-    let body = json!({"bank_rsp_code": bank, "bank_rsp_message": "참가기관 거부"});
+    let body = json!({"bank_rsp_code": bank, "bank_rsp_message": bank_message(bank)});
     if p.op.cash() {
         store(s, p, &body, Some(bank))?;
     }
@@ -191,7 +215,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
     if locked(s, p, &row)? {
         end_row(s, &p.ctx, p.now, &t, &row, "locked", p.now)?;
         let req = serde_json::from_slice::<Cash>(&p.body).ok();
-        let amount = req.as_ref().and_then(|r| r.amount.parse::<i64>().ok());
+        let amount = req.as_ref().and_then(|r| amount(&r.amount));
         let mut e = completed(p, &row, 422, codes::BANK_REJECTED, Some("409"));
         if p.op.cash() {
             let (id, reused) = outcome::reject_attempt(
@@ -221,7 +245,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
         return Ok(ResultRow {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: codes::BANK_REJECTED,
-            body: json!({"bank_rsp_code": "409", "bank_rsp_message": "참가기관 거부"}),
+            body: json!({"bank_rsp_code": "409", "bank_rsp_message": bank_message("409")}),
             replayed: false,
         });
     }
@@ -242,17 +266,10 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
     }
     let req = serde_json::from_slice::<Cash>(&p.body).ok();
     let valid = req.as_ref().and_then(|r| {
-        let amount = r.amount.parse::<i64>().ok()?;
+        let amount = amount(&r.amount)?;
         (r.idempotency_key.len() <= 20
             && !r.idempotency_key.is_empty()
-            && r.idempotency_key.bytes().all(|c| (32..=126).contains(&c))
-            && r.amount
-                .as_bytes()
-                .first()
-                .is_some_and(|c| (b'1'..=b'9').contains(c))
-            && r.amount.len() <= 12
-            && r.amount.bytes().all(|c| c.is_ascii_digit())
-            && (1..=999_999_999_999).contains(&amount))
+            && r.idempotency_key.bytes().all(|c| (32..=126).contains(&c)))
         .then_some(amount)
     });
     let (Some(req), Some(amount)) = (req, valid) else {
@@ -403,7 +420,15 @@ async fn run(state: AppState, stats: RequestStats, p: Plan) -> Result<Response, 
         let plan = p.clone();
         match state.db.run_in(&stats, move |s| attempt(s, &plan)).await {
             Ok(r) => {
-                let mut response = api::respond(&p.ctx, r.status, r.code, "", r.body);
+                let message = match r.code {
+                    codes::SUCCESS => "",
+                    codes::BANK_REJECTED => "참가기관 거부",
+                    codes::INVALID_PARAMETER => "요청 항목 오류",
+                    codes::UNAUTHORIZED => "인증 실패",
+                    codes::DUPLICATE_REQUEST => "중복 요청",
+                    _ => "시스템 오류",
+                };
+                let mut response = api::respond(&p.ctx, r.status, r.code, message, r.body);
                 outcome::annotate(
                     &mut response,
                     None,

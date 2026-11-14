@@ -156,6 +156,9 @@ async fn seeding_terminals_validates_every_field() {
         ("latitude", "38.700001".to_owned()),
         ("latitude", "37.1234567".to_owned()),
         ("latitude", "1e1".to_owned()),
+        ("latitude", "0037.5".to_owned()),
+        ("latitude", "037.5".to_owned()),
+        ("longitude", "0126.5".to_owned()),
         ("latitude", "abc".to_owned()),
         ("longitude", "124.499999".to_owned()),
         ("longitude", "132.000001".to_owned()),
@@ -909,6 +912,8 @@ async fn cash(
     .await;
     if r.0 == StatusCode::OK {
         common::assert_atm_contract("CashResponse", &r.1);
+        assert_eq!(r.1["rsp_message"], "");
+        assert!(r.1.get("bank_rsp_message").is_none());
     }
     r
 }
@@ -944,6 +949,16 @@ async fn cash_rejected(api: &Api, token: &str, amount: i64, bank: &str) -> Strin
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(b["rsp_code"], "A0004");
     assert_eq!(b["bank_rsp_code"], bank);
+    assert_eq!(b["rsp_message"], "참가기관 거부");
+    assert_eq!(
+        b["bank_rsp_message"],
+        match bank {
+            "405" => "잔액 부족",
+            "406" => "한도 초과",
+            "409" => "PIN 입력 횟수 초과",
+            _ => panic!("unexpected bank code"),
+        }
+    );
     let req = rows(api, CASH_REQUEST, &id).await;
     assert_eq!(req.len(), 1);
     assert_eq!(req[0]["status"], "REJECTED");
@@ -1106,6 +1121,8 @@ async fn cash_idempotency() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["bank_rsp_code"], "405");
+    assert_eq!(body["rsp_message"], "참가기관 거부");
+    assert_eq!(body["bank_rsp_message"], "잔액 부족");
     let replay_id = new_id();
     let (status, body) = cash(
         &api,
@@ -1118,6 +1135,8 @@ async fn cash_idempotency() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["bank_rsp_code"], "405");
+    assert_eq!(body["rsp_message"], "참가기관 거부");
+    assert_eq!(body["bank_rsp_message"], "잔액 부족");
     assert_eq!(rows(&api, CASH_REQUEST, &rejected_id).await.len(), 1);
     assert!(rows(&api, CASH_REQUEST, &replay_id).await.is_empty());
     let key = common::unique_digits(20);
@@ -1257,6 +1276,38 @@ async fn dormant_reactivation() {
             .count(),
         1
     );
+}
+#[tokio::test]
+async fn locked_withdrawal_does_not_record_invalid_amount() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c, token) = open_cash(&api, 100_000).await;
+    let other = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(&api, vec![terminal(&other)]).await.0,
+        StatusCode::OK
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            start_session(&api, &other, &c.account, common::WRONG_ATM_PIN, &new_id())
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let id = cash_rejected(&api, &token, -5, "409").await;
+    let events = rows(&api, REQUEST_EVENTS, &id).await;
+    let operation = events
+        .iter()
+        .find(|e| e["event_type"] == "atm.operation")
+        .unwrap();
+    assert_eq!(operation["payload"]["amount"], Value::Null);
+    let completed = events
+        .iter()
+        .find(|e| e["event_type"] == "request.completed")
+        .unwrap();
+    assert!(completed["payload"].get("tran_amt").is_none());
+    assert_eq!(rows(&api, SESSIONS, &t).await[0]["end_reason"], "locked");
 }
 #[tokio::test]
 async fn locked_account_ends_other_sessions() {

@@ -523,6 +523,8 @@ struct SeedAtmTerminals {
 fn coordinate(value: &str, min: u64, max: u64) -> bool {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
+        || whole.len() > 3
+        || (whole.len() > 1 && whole.starts_with('0'))
         || !whole.bytes().all(|b| b.is_ascii_digit())
         || (value.contains('.') && fraction.is_empty())
         || fraction.len() > 6
