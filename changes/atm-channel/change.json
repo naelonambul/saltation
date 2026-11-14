@@ -5,7 +5,7 @@
   "title": "ATM channel: terminals, PIN credentials, sessions, cash (stage 3)",
   "base": {
     "ref": "main",
-    "commit": "f44c4da842d822c6c1f2eddc741f494da5b579e2"
+    "commit": "001c3d227172499581395ecc9a61955eba9eac8c"
   },
   "baseline": {
     "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
