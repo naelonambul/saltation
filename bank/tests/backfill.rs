@@ -1055,6 +1055,7 @@ async fn backfill_sequence() {
             recording: recording.clone(),
         }));
     }
+    registry.register(Arc::new(bank::features::atm::AtmSessionExpiryJob));
     registry.register(Arc::new(bank::features::deposits::MaturityJob));
     registry.register(Arc::new(bank::features::accounts_lifecycle::DormancyJob));
     registry.register(Arc::new(bank::features::daily_close::DailyCloseJob));
@@ -1091,7 +1092,278 @@ async fn backfill_sequence() {
     dormancy_and_reactivation(&api).await;
     term_deposit_matured(&api, deposits).await;
     password_reset_code_expires(&api).await;
+    atm_sessions_in_business_time(&api).await;
     let restoration = daily_close_tests::sequence(&api, &close_logs, &close_metrics).await;
     live_switch_is_one_way(&api, &recording).await;
     daily_close_tests::final_check(&api, &close_logs, restoration).await;
+}
+
+const ATM_SESSIONS: SqlStmt = sql_stmt!(
+    "test.backfill_atm_sessions",
+    "sql/backfill_atm_sessions.sql"
+);
+const ATM_CREDENTIAL: SqlStmt = sql_stmt!(
+    "test.backfill_atm_credential",
+    "sql/backfill_atm_credential.sql"
+);
+const ATM_END_EVENTS: SqlStmt = sql_stmt!("test.atm_session_events", "sql/atm_session_events.sql");
+const ATM_REQUEST_EVENTS: SqlStmt =
+    sql_stmt!("test.atm_request_events", "sql/atm_request_events.sql");
+
+async fn atm_rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
+    let key = key.to_owned();
+    let rows: Vec<String> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&stmt, &[&key]))
+        .await
+        .unwrap();
+    rows.iter()
+        .map(|row| serde_json::from_str(row).unwrap())
+        .collect()
+}
+
+fn atm_at(value: &Value) -> DateTime<FixedOffset> {
+    DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap()
+}
+
+async fn atm_advance(api: &Api, seconds: i64) {
+    let (status, _) = post(
+        api,
+        "/internal/v1/clock/advance",
+        Some(json!({"seconds": seconds})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn atm_start(
+    api: &Api,
+    terminal: &str,
+    account: &str,
+    pin: &str,
+    request: &str,
+) -> (StatusCode, Value) {
+    call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        request,
+        None,
+        Some(json!({"terminal_id": terminal, "account_no": account, "pin": pin})),
+    )
+    .await
+}
+
+async fn atm_finish(api: &Api, token: &str, request: &str) -> (StatusCode, Value) {
+    call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session/end",
+        request,
+        Some(token),
+        None,
+    )
+    .await
+}
+
+async fn atm_assert_expired(
+    api: &Api,
+    terminal: &str,
+    index: usize,
+    request: Option<&str>,
+) -> Value {
+    let rows = atm_rows(api, ATM_SESSIONS, terminal).await;
+    let row = &rows[index];
+    assert_eq!(row["end_reason"], "expired");
+    assert_eq!(atm_at(&row["ended_at"]), atm_at(&row["expires_at"]));
+    assert_eq!(
+        atm_at(&row["ended_at"]) - atm_at(&row["started_at"]),
+        chrono::Duration::seconds(180)
+    );
+    let events = atm_rows(api, ATM_END_EVENTS, row["session_id"].as_str().unwrap()).await;
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event["request_id"], json!(request));
+    assert_eq!(event["payload"]["request_id"], json!(request));
+    assert_eq!(event["payload"]["session_id"], row["session_id"]);
+    assert_eq!(
+        atm_at(&event["payload"]["ended_at"]),
+        atm_at(&row["expires_at"])
+    );
+    assert_eq!(event["payload"]["reason"], "expired");
+    assert_eq!(event["channel"], "ATM");
+    assert_eq!(event["payload"]["terminal_id"], terminal);
+    assert_eq!(event["payload"]["region"], "KR-11");
+    assert_eq!(event["payload"]["latitude"], "37.566500");
+    assert_eq!(event["payload"]["longitude"], "126.978000");
+    event.clone()
+}
+
+async fn atm_sessions_in_business_time(api: &Api) {
+    let customer = common::customer(api, 10000).await;
+    let terminals: Vec<String> = (0..3)
+        .map(|_| format!("T{}", common::unique_digits(15)))
+        .collect();
+    let (status, _) = post(api, "/internal/v1/seed/atm_terminals", Some(json!({"atm_terminals": terminals.iter().map(|t|
+        json!({"terminal_id": t, "region": "KR-11", "location": "서울", "latitude": "37.566500", "longitude": "126.978000"})
+    ).collect::<Vec<_>>()}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let day = business_date(now(api).await).succ_opt().unwrap();
+    let time = |date: NaiveDate, h, m, s| {
+        kst()
+            .from_local_datetime(&date.and_hms_opt(h, m, s).unwrap())
+            .single()
+            .unwrap()
+    };
+    set(api, time(day, 12, 0, 0)).await;
+    let t = &terminals[0];
+    let start_id = new_id();
+    let (status, body) =
+        atm_start(api, t, &customer.account, common::TEST_ATM_PIN, &start_id).await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["atm_session_token"].as_str().unwrap();
+    atm_advance(api, 180).await;
+    let request = new_id();
+    let (status, body) = atm_finish(api, token, &request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["rsp_code"], "O0001");
+    let event = atm_assert_expired(api, t, 0, Some(&request)).await;
+    assert_eq!(event["payload"]["start_request_id"], start_id);
+    let events = atm_rows(api, ATM_REQUEST_EVENTS, &request).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event_type"] == "request.completed")
+            .count(),
+        1
+    );
+    let (status, body) = atm_finish(api, token, &new_id()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["rsp_code"], "O0001");
+    atm_assert_expired(api, t, 0, Some(&request)).await;
+
+    let first_request = new_id();
+    assert_eq!(
+        atm_start(
+            api,
+            t,
+            &customer.account,
+            common::TEST_ATM_PIN,
+            &first_request
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    atm_advance(api, 240).await;
+    let replacement = new_id();
+    assert_eq!(
+        atm_start(
+            api,
+            t,
+            &customer.account,
+            common::TEST_ATM_PIN,
+            &replacement
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let event = atm_assert_expired(api, t, 1, Some(&replacement)).await;
+    assert_eq!(event["payload"]["start_request_id"], first_request);
+
+    for pin in ["0000", "0000", "0000", common::TEST_ATM_PIN] {
+        let (status, body) = atm_start(api, t, &customer.account, pin, &new_id()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["bank_rsp_code"],
+            if pin == common::TEST_ATM_PIN {
+                "409"
+            } else {
+                "410"
+            }
+        );
+    }
+    set(api, time(day, 23, 59, 0)).await;
+    let (status, body) =
+        atm_start(api, t, &customer.account, common::TEST_ATM_PIN, &new_id()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["bank_rsp_code"], "409");
+    atm_advance(api, 90).await;
+    let (status, body) = atm_start(api, t, &customer.account, "0000", &new_id()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["bank_rsp_code"], "410");
+    let account = customer.account.clone();
+    let credential: (i64, Option<String>) = api
+        .state
+        .db
+        .run(move |s| s.query_row(&ATM_CREDENTIAL, &[&account]))
+        .await
+        .unwrap();
+    assert_eq!(credential, (1, None));
+    assert_eq!(
+        atm_start(api, t, &customer.account, common::TEST_ATM_PIN, &new_id())
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let d = day.succ_opt().unwrap();
+    set(api, time(d, 22, 0, 0)).await;
+    let a_request = new_id();
+    assert_eq!(
+        atm_start(
+            api,
+            &terminals[1],
+            &customer.account,
+            common::TEST_ATM_PIN,
+            &a_request
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    set(api, time(d, 23, 59, 0)).await;
+    let (status, b) = atm_start(
+        api,
+        &terminals[2],
+        &customer.account,
+        common::TEST_ATM_PIN,
+        &new_id(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    atm_advance(api, 120).await;
+    let event = atm_assert_expired(api, &terminals[1], 0, None).await;
+    assert_eq!(event["payload"]["start_request_id"], a_request);
+    assert_eq!(
+        atm_at(&event["occurred_at"]),
+        bank::shared::rollover::last_instant(d)
+    );
+    assert_eq!(event["account_no"], customer.account);
+    assert_eq!(event["payload"]["account_no"], customer.account);
+    let b_rows = atm_rows(api, ATM_SESSIONS, &terminals[2]).await;
+    assert!(b_rows[0]["ended_at"].is_null());
+    // A direct retry of the date job must also leave B open and A unchanged.
+    bank::features::atm::AtmSessionExpiryJob
+        .run(&api.state.db, d, bank::shared::rollover::last_instant(d))
+        .await
+        .unwrap();
+    atm_assert_expired(api, &terminals[1], 0, None).await;
+    assert!(atm_rows(api, ATM_SESSIONS, &terminals[2]).await[0]["ended_at"].is_null());
+    assert_eq!(
+        atm_finish(api, b["atm_session_token"].as_str().unwrap(), &new_id())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let b_rows = atm_rows(api, ATM_SESSIONS, &terminals[2]).await;
+    assert_eq!(b_rows[0]["end_reason"], "ended");
+    assert_eq!(atm_at(&b_rows[0]["ended_at"]), now(api).await);
+    let b_id = b_rows[0]["session_id"].as_str().unwrap();
+    assert_eq!(atm_rows(api, ATM_END_EVENTS, b_id).await.len(), 1);
+    atm_advance(api, 86400).await;
+    atm_assert_expired(api, &terminals[1], 0, None).await;
+    assert_eq!(atm_rows(api, ATM_END_EVENTS, b_id).await.len(), 1);
 }

@@ -410,3 +410,50 @@ async fn end(
         Err(unauthorized(&ctx))
     }
 }
+
+/// End sessions that have reached their expiry by the business date cutoff.
+pub struct AtmSessionExpiryJob;
+
+impl crate::shared::rollover::RolloverJob for AtmSessionExpiryJob {
+    fn name(&self) -> &'static str {
+        "atm_session_expiry"
+    }
+
+    fn run<'a>(
+        &'a self,
+        db: &'a crate::shared::db::Db,
+        _date: chrono::NaiveDate,
+        at: At,
+    ) -> crate::shared::rollover::JobFuture<'a> {
+        Box::pin(async move {
+            const CANDIDATES: SqlStmt =
+                sql_stmt!("atm.expiry_candidates", "sql/expiry_candidates.sql");
+            const EXPIRE: SqlStmt = sql_stmt!("atm.expire_session", "sql/expire_session.sql");
+            let rows: Vec<(String, String, At, String, String)> =
+                db.run(move |s| s.query_all(&CANDIDATES, &[&at])).await?;
+            for (id, account, expires, start_request, terminal_id) in rows {
+                db.run(move |s| {
+                    if s.execute(&EXPIRE, &[&id])? == 1 {
+                        let terminal: Terminal = s.query_row(&TERMINAL, &[&terminal_id])?;
+                        let mut e = Event::system("atm.session_ended", at, "completed")
+                            .account(&account)
+                            .session(&id)
+                            .payload(json!({
+                                "terminal_id": terminal.0, "region": terminal.1,
+                                "latitude": terminal.2, "longitude": terminal.3,
+                                "account_no": account, "request_id": null,
+                                "reason": "expired", "session_id": id,
+                                "start_request_id": start_request,
+                                "ended_at": expires.to_rfc3339()
+                            }));
+                        e.channel = "ATM";
+                        outbox::record(s, &e)?;
+                    }
+                    s.commit()
+                })
+                .await?;
+            }
+            Ok(())
+        })
+    }
+}
