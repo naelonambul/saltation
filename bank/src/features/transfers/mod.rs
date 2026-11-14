@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -137,6 +137,7 @@ struct Plan {
     hash: String,
     scope: String,
     customer_id: i64,
+    customer_no: String,
     session_id: String,
     ctx: RequestContext,
     now: chrono::DateTime<chrono::FixedOffset>,
@@ -203,7 +204,7 @@ fn reject(
         "REJECTED",
         rsp_code,
         Some(bank_rsp_code),
-        &body,
+        (&body, account_no),
         message,
     )?;
     let mut event = Event::for_request(
@@ -213,9 +214,10 @@ fn reject(
         "MOBILE",
         "rejected",
     )
+    .customer(plan.customer_no.clone())
     .session(plan.session_id.clone())
     .codes(rsp_code, Some(bank_rsp_code))
-    .payload(json!({ "endpoint": ENDPOINT, "tran_amt": plan.amount, "reason": message }));
+    .payload(json!({ "endpoint": ENDPOINT, "http_status": status.as_u16(), "request_type": "TRANSFER", "tran_amt": plan.amount, "reason": message }));
     if let Some(c) = customer_no {
         event = event.customer(c);
     }
@@ -238,10 +240,12 @@ fn finish(
     status: &str,
     rsp_code: &str,
     bank_rsp_code: Option<&str>,
-    body: &Value,
+    result: (&Value, Option<&str>),
     message: &str,
 ) -> Result<(), DbError> {
-    let stored = json!({ "rsp_message": message, "body": body }).to_string();
+    let (body, account_no) = result;
+    let stored =
+        json!({ "rsp_message": message, "body": body, "account_no": account_no }).to_string();
     s.execute(
         &FINISH_REQUEST,
         &[
@@ -279,6 +283,27 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&plan.scope, &req.bank_tran_id])?;
+            let stored = if crate::shared::outcome::claimed_elsewhere(
+                s,
+                &ctx.request_id,
+                &plan.scope,
+                &req.bank_tran_id,
+            )? {
+                None
+            } else {
+                stored
+            };
+            if stored.as_ref().is_none_or(|row| row.0 != plan.hash) {
+                crate::shared::outcome::conflict(
+                    s,
+                    ctx,
+                    plan.now,
+                    "TRANSFER",
+                    "MOBILE",
+                    &req.bank_tran_id,
+                    (Some(&plan.customer_no), Some(&plan.session_id)),
+                )?;
+            }
             return match stored {
                 Some((hash, status, rsp_code, response)) => Ok(Attempt::Replayed {
                     hash,
@@ -496,7 +521,15 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             .unwrap_or_default(),
         );
     }
-    finish(s, plan, "DONE", codes::SUCCESS, Some("000"), &body, "")?;
+    finish(
+        s,
+        plan,
+        "DONE",
+        codes::SUCCESS,
+        Some("000"),
+        (&body, Some(&sender_no)),
+        "",
+    )?;
     let event = Event::for_request(ctx, "request.completed", plan.now, "MOBILE", "completed")
         .customer(customer_no.clone())
         .account(sender_no.clone())
@@ -504,6 +537,8 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         .codes(codes::SUCCESS, Some("000"))
         .payload(json!({
             "endpoint": ENDPOINT,
+            "http_status": 200,
+            "request_type": "TRANSFER",
             "tran_amt": plan.amount,
             "transfer_id": posted.transfer_id,
             "counterparty_bank_code": req.recv_client_bank_code,
@@ -555,13 +590,14 @@ fn replay(ctx: &RequestContext, plan_hash: &str, a: Attempt) -> Result<Response,
                 StatusCode::UNPROCESSABLE_ENTITY
             };
             let message = stored["rsp_message"].as_str().unwrap_or("").to_owned();
-            Ok(api::respond(
-                ctx,
-                http,
-                code,
-                message,
-                stored["body"].clone(),
-            ))
+            let mut response = api::respond(ctx, http, code, message, stored["body"].clone());
+            crate::shared::outcome::annotate(
+                &mut response,
+                stored["account_no"].as_str().map(str::to_owned),
+                Some("TRANSFER".into()),
+                Some(true),
+            );
+            Ok(response)
         }
     }
 }
@@ -572,8 +608,10 @@ async fn withdraw(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<WithdrawRequest>,
+    crate::shared::api::Json(req): crate::shared::api::Json<WithdrawRequest>,
 ) -> Result<Response, ApiError> {
+    let mut ctx = ctx;
+    ctx.device_id = ctx.device_id.or_else(|| who.device_id.clone());
     if !who.has_scope("transfer") {
         return Err(ApiError::new(
             &ctx,
@@ -614,6 +652,7 @@ async fn withdraw(
         daily_limit: state.limits.transfer_daily,
         scope: format!("C:{}", who.customer_id),
         customer_id: who.customer_id,
+        customer_no: who.customer_no.clone(),
         session_id: who.session_id.clone(),
         ctx: ctx.clone(),
         now,
@@ -650,7 +689,7 @@ async fn result(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<ResultRequest>,
+    crate::shared::api::Json(req): crate::shared::api::Json<ResultRequest>,
 ) -> Result<Response, ApiError> {
     if req.req_list.is_empty() || req.req_list.len() > 25 {
         return Err(invalid(&ctx, "req_list는 1건 이상 25건 이하여야 합니다"));

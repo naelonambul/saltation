@@ -129,7 +129,7 @@ async fn seed_customers(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Json(req): Json<SeedCustomers>,
+    crate::shared::api::Json(req): crate::shared::api::Json<SeedCustomers>,
 ) -> Result<Response, ApiError> {
     if req.customers.is_empty() || req.customers.len() > MAX_BATCH {
         return Err(bad_request(&ctx, "customers must contain 1 to 500 entries"));
@@ -195,7 +195,7 @@ async fn seed_accounts(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Json(req): Json<SeedAccounts>,
+    crate::shared::api::Json(req): crate::shared::api::Json<SeedAccounts>,
 ) -> Result<Response, ApiError> {
     if req.accounts.is_empty() || req.accounts.len() > MAX_BATCH {
         return Err(bad_request(&ctx, "accounts must contain 1 to 500 entries"));
@@ -352,7 +352,7 @@ async fn seed_counterparties(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Json(req): Json<SeedCounterparties>,
+    crate::shared::api::Json(req): crate::shared::api::Json<SeedCounterparties>,
 ) -> Result<Response, ApiError> {
     if req.counterparties.is_empty()
         || req.counterparties.len() > MAX_BATCH

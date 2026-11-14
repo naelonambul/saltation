@@ -1,7 +1,7 @@
 //! The Open Banking-shaped response envelope (spec: Public interface).
 //! `api_tran_dtm` is the system time of the response, as at the KFTC gateway.
 
-use axum::Json;
+use axum::Json as AxumJson;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
@@ -67,7 +67,7 @@ pub fn ok<T: Serialize>(ctx: &RequestContext, body: T) -> Response {
         request_id: ctx.request_id.clone(),
         body,
     };
-    (StatusCode::OK, Json(env)).into_response()
+    metadata_response(StatusCode::OK, codes::SUCCESS, &env.body, AxumJson(&env))
 }
 
 /// A response with an explicit HTTP status and response code (used to replay
@@ -87,7 +87,7 @@ pub fn respond<T: Serialize>(
         request_id: ctx.request_id.clone(),
         body,
     };
-    (status, Json(env)).into_response()
+    metadata_response(status, rsp_code, &env.body, AxumJson(&env))
 }
 
 /// An error response with an Open Banking response code and a Korean message.
@@ -143,7 +143,7 @@ impl IntoResponse for ApiError {
             request_id: self.request_id,
             body: serde_json::Map::new(),
         };
-        (self.status, Json(env)).into_response()
+        metadata_response(self.status, self.rsp_code, &env.body, AxumJson(&env))
     }
 }
 
@@ -208,3 +208,96 @@ pub mod fields {
         }
     }
 }
+
+fn metadata_response<T: Serialize>(
+    status: StatusCode,
+    code: &str,
+    body: &T,
+    content: impl IntoResponse,
+) -> Response {
+    let value = serde_json::to_value(body).unwrap_or_default();
+    let bank_code = value
+        .get("bank_rsp_code")
+        .or_else(|| value.get("res_list")?.get(0)?.get("bank_rsp_code"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let mut response = (status, content).into_response();
+    response
+        .extensions_mut()
+        .insert(crate::shared::outcome::ResponseMetadata {
+            rsp_code: Some(code.to_owned()),
+            bank_rsp_code: bank_code,
+            ..Default::default()
+        });
+    response
+}
+
+fn invalid_extractor(ctx: &RequestContext) -> ApiError {
+    ApiError::new(
+        ctx,
+        StatusCode::BAD_REQUEST,
+        codes::INVALID_PARAMETER,
+        "요청 항목 오류",
+    )
+}
+
+macro_rules! parts_extractor {
+    ($name:ident) => {
+        pub struct $name<T>(pub T);
+        impl<S, T> axum::extract::FromRequestParts<S> for $name<T>
+        where
+            S: Send + Sync,
+            T: serde::de::DeserializeOwned + Send,
+        {
+            type Rejection = ApiError;
+            async fn from_request_parts(
+                parts: &mut axum::http::request::Parts,
+                state: &S,
+            ) -> Result<Self, Self::Rejection> {
+                let ctx = RequestContext::from_request_parts(parts, state)
+                    .await
+                    .unwrap_or_else(|e| match e {});
+                axum::extract::$name::<T>::from_request_parts(parts, state)
+                    .await
+                    .map(|v| Self(v.0))
+                    .map_err(|_| invalid_extractor(&ctx))
+            }
+        }
+    };
+}
+parts_extractor!(Query);
+parts_extractor!(Path);
+
+macro_rules! body_extractor {
+    ($name:ident) => {
+        pub struct $name<T>(pub T);
+        impl<S, T> axum::extract::FromRequest<S> for $name<T>
+        where
+            S: Send + Sync,
+            T: serde::de::DeserializeOwned + Send,
+        {
+            type Rejection = ApiError;
+            async fn from_request(
+                req: axum::extract::Request,
+                state: &S,
+            ) -> Result<Self, Self::Rejection> {
+                let (mut parts, body) = req.into_parts();
+                let ctx =
+                    <RequestContext as axum::extract::FromRequestParts<S>>::from_request_parts(
+                        &mut parts, state,
+                    )
+                    .await
+                    .unwrap_or_else(|e| match e {});
+                axum::$name::<T>::from_request(
+                    axum::extract::Request::from_parts(parts, body),
+                    state,
+                )
+                .await
+                .map(|v| Self(v.0))
+                .map_err(|_| invalid_extractor(&ctx))
+            }
+        }
+    };
+}
+body_extractor!(Json);
+body_extractor!(Form);

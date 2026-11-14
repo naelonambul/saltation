@@ -207,6 +207,10 @@ e2e() {
   echo "e2e: seeding counterparties and switching to live"
   "${gen[@]}" seed-parties --counterparties 50
   "${gen[@]}" clock live
+  # Other targets reset the Oracle schema; a roster kept from an earlier run
+  # would name customers the bank no longer has.
+  "${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
+    --eval 'db.getSiblingDB("truth").roster.deleteMany({})' >/dev/null
   echo "e2e: seeding 1,000 customers from #$start"
   "${gen[@]}" seed --customers 1000 --start "$start"
   echo "e2e: 10 minutes of normal transfers at 5 per second"
@@ -222,9 +226,11 @@ e2e() {
   roster=$("${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
     --eval "const r = db.getSiblingDB('truth').roster.find({customer_no: {\$gte: 'C' + String($start).padStart(8, '0')}}).sort({customer_no: 1}).limit(2).toArray(); print(r[0].phone + ' ' + r[0].password + ' ' + r[1].account_no)")
   read -r phone password to_account <<<"$roster"
+  # The browser runs in Korean time, like the customers it stands for: the client sends
+  # local dates, and a UTC browser between 00:00 and 09:00 KST asks for yesterday.
   echo "e2e: browser flow as $phone"
   docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
-    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true \
+    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true -e TZ=Asia/Seoul \
     -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
     mcr.microsoft.com/playwright:v1.55.0-noble sh -c "corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test"
 }
@@ -238,6 +244,7 @@ run_target() {
     accounts)    cargo_test accounts ;;
     transfers)   cargo_test transfers ;;
     payees)      cargo_test payees ;;
+    outcomes)    cargo_test outcomes ;;
     inbound)     cargo_test inbound ;;
     password_reset) cargo_test password_reset ;;
     deposits) cargo_test deposits ;;
@@ -254,9 +261,9 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
   run_target observability
 else
   run_target "$target"

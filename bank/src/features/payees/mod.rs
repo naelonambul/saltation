@@ -8,11 +8,11 @@ use crate::shared::db::{DbError, Session, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 const SELECT_INTERNAL: SqlStmt = sql_stmt!("payees.select_internal", "sql/select_internal.sql");
@@ -85,7 +85,7 @@ async fn inquiry(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     _who: AuthCustomer,
-    Json(req): Json<Inquiry>,
+    crate::shared::api::Json(req): crate::shared::api::Json<Inquiry>,
 ) -> Result<Response, ApiError> {
     if !valid_recipient(&req.bank_code_std, &req.account_num)
         || !fields::valid_bank_tran_id(&req.bank_tran_id)
@@ -146,7 +146,7 @@ async fn register(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Json(req): Json<Create>,
+    crate::shared::api::Json(req): crate::shared::api::Json<Create>,
 ) -> Result<Response, ApiError> {
     if !valid_recipient(&req.bank_code_std, &req.account_num)
         || req.alias.as_ref().is_some_and(|a| a.chars().count() > 40)
@@ -160,8 +160,11 @@ async fn register(
             &name, &req.alias, &now, &CHANNEL, &who.session_id])?;
         let row: PayeeRow = s.query_row(&SELECT_PAYEE, &[&id, &who.customer_id])?;
         outbox::record(s, &Event::for_request(&c, "payee.registered", now, CHANNEL, "completed")
-            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .customer(who.customer_no.clone()).session(who.session_id.clone()).codes(codes::SUCCESS, None)
             .payload(json!({"payee_id": id.to_string(), "bank_code_std": req.bank_code_std, "account_num": req.account_num})))?;
+        outbox::record(s, &Event::for_request(&c, "request.completed", now, CHANNEL, "completed")
+            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .payload(json!({"http_status": 200})))?;
         s.commit()?; Ok(Ok(payee(row)))
     }).await.map_err(|e| {
         if e.ora_code() == Some(1) && e.to_string().to_uppercase().contains("PAYEE_ACTIVE_UK") {
@@ -208,7 +211,7 @@ async fn delete(
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
     who: AuthCustomer,
-    Query(req): Query<Delete>,
+    crate::shared::api::Query(req): crate::shared::api::Query<Delete>,
 ) -> Result<Response, ApiError> {
     let c = ctx.clone();
     let deleted = state.db.run_in(&stats, move |s| {
@@ -216,8 +219,11 @@ async fn delete(
         let Some(row) = row else { return Ok(false) };
         if s.execute(&DELETE_PAYEE, &[&now, &req.payee_id, &who.customer_id])? == 0 { return Ok(false) }
         outbox::record(s, &Event::for_request(&c, "payee.deleted", now, CHANNEL, "completed")
-            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .customer(who.customer_no.clone()).session(who.session_id.clone()).codes(codes::SUCCESS, None)
             .payload(json!({"payee_id": row.0.to_string(), "bank_code_std": row.1, "account_num": row.3})))?;
+        outbox::record(s, &Event::for_request(&c, "request.completed", now, CHANNEL, "completed")
+            .customer(who.customer_no).session(who.session_id).codes(codes::SUCCESS, None)
+            .payload(json!({"http_status": 200})))?;
         s.commit()?; Ok(true)
     }).await.map_err(|e| db_error(&ctx, &e))?;
     if deleted {

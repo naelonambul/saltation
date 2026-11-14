@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::post;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 use chrono::{DateTime, Duration, FixedOffset};
 use serde::Deserialize;
 use serde_json::json;
@@ -87,7 +87,7 @@ async fn login(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Json(req): Json<LoginRequest>,
+    crate::shared::api::Json(req): crate::shared::api::Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let device_id = req.device_id.clone().or_else(|| ctx.device_id.clone());
     let phone = req.phone.clone();
@@ -219,6 +219,21 @@ async fn login(
                 ],
             )?;
             outbox::record(s, &event)?;
+            outbox::complete(
+                s,
+                &c,
+                &event,
+                if outcome == Outcome::Success {
+                    200
+                } else {
+                    401
+                },
+                if outcome == Outcome::Success {
+                    codes::SUCCESS
+                } else {
+                    codes::UNAUTHORIZED
+                },
+            )?;
             s.commit()?;
             Ok((failures, customer_id))
         })
@@ -274,6 +289,7 @@ async fn logout(
                 .customer(who.customer_no.clone())
                 .session(who.session_id.clone());
             outbox::record(s, &event)?;
+            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
             s.commit()
         })
         .await

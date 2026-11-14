@@ -79,8 +79,8 @@ async fn relay_delivers_once_even_after_a_crash() {
     assert_eq!(outbox_count(&api).await, 0, "delivered rows are deleted");
     assert_eq!(
         mongo_count(&events, &first).await,
-        30,
-        "one event per attempt"
+        60,
+        "login.failed and request.completed per attempt"
     );
 
     // Crash between the MongoDB insert and the Oracle delete, then recover.
@@ -89,17 +89,28 @@ async fn relay_delivers_once_even_after_a_crash() {
         .await
         .expect("insert only");
     assert!(
-        outbox_count(&api).await >= 30,
+        outbox_count(&api).await >= 60,
         "rows remain after the simulated crash"
     );
     drain(&api, &events).await;
     assert_eq!(outbox_count(&api).await, 0);
     assert_eq!(
         mongo_count(&events, &second).await,
-        30,
+        60,
         "redelivery adds no duplicates"
     );
 
+    for ids in [&first, &second] {
+        for event_type in ["login.failed", "request.completed"] {
+            assert_eq!(
+                events
+                    .count_documents(doc! {"request_id": {"$in": ids}, "event_type": event_type})
+                    .await
+                    .expect("typed count"),
+                30
+            );
+        }
+    }
     let sample = events
         .find_one(doc! { "request_id": &second[0] })
         .await
