@@ -5,7 +5,7 @@
   "title": "Mobile client sends dates in the browser's time zone",
   "base": {
     "ref": "main",
-    "commit": "0d5703e1198355d67e65ac3f7106e309dfbfcaf2"
+    "commit": "001c3d227172499581395ecc9a61955eba9eac8c"
   },
   "baseline": {
     "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
