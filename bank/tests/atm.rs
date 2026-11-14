@@ -372,6 +372,13 @@ async fn rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
         .map(|s| serde_json::from_str(s).unwrap())
         .collect()
 }
+async fn cash_rows(api: &Api, id: &str) -> Vec<Value> {
+    let result = rows(api, CASH_ROWS, id).await;
+    for row in &result {
+        assert_eq!(row["request_id"], id);
+    }
+    result
+}
 async fn start_session(
     api: &Api,
     terminal: &str,
@@ -975,7 +982,7 @@ async fn cash_rejected(api: &Api, token: &str, amount: i64, bank: &str) -> Strin
     } else {
         assert_eq!(req[0]["idem_key"], key);
     }
-    assert!(rows(api, CASH_ROWS, &id).await.is_empty());
+    assert!(cash_rows(api, &id).await.is_empty());
     id
 }
 #[tokio::test]
@@ -992,7 +999,7 @@ async fn withdraw_and_deposit_post_one_row() {
         let (s, b) = cash(&api, &token, op, &key, amt, &id).await;
         assert_eq!(s, StatusCode::OK, "{b}");
         assert_eq!(b["balance_after"], after.to_string());
-        let tx = rows(&api, CASH_ROWS, &id).await;
+        let tx = cash_rows(&api, &id).await;
         assert_eq!(tx.len(), 1);
         let r = &tx[0];
         assert_eq!(r["amount"], signed);
@@ -1162,8 +1169,8 @@ async fn cash_idempotency() {
     ] {
         assert_eq!(first[field], second[field], "{field}");
     }
-    assert!(rows(&api, CASH_ROWS, &replay_id).await.is_empty());
-    assert_eq!(rows(&api, CASH_ROWS, &first_id).await.len(), 1);
+    assert!(cash_rows(&api, &replay_id).await.is_empty());
+    assert_eq!(cash_rows(&api, &first_id).await.len(), 1);
     let conflict_id = new_id();
     let (s, b) = cash(&api, &token, "withdraw", &key, 101, &conflict_id).await;
     assert_eq!(s, StatusCode::CONFLICT);
@@ -1187,7 +1194,7 @@ async fn cash_idempotency() {
         ] {
             assert_eq!(b[field], results[0].2[field], "{field}");
         }
-        movements += rows(&api, CASH_ROWS, id).await.len();
+        movements += cash_rows(&api, id).await.len();
     }
     assert_eq!(movements, 1);
     let t2 = format!("T{}", common::unique_digits(15));
@@ -1205,7 +1212,7 @@ async fn cash_idempotency() {
         rows(&api, CASH_REQUEST, &id).await[0]["idem_scope"],
         format!("ATM:{t2}")
     );
-    assert_eq!(rows(&api, CASH_ROWS, &id).await.len(), 1);
+    assert_eq!(cash_rows(&api, &id).await.len(), 1);
 }
 #[tokio::test]
 async fn races_for_last_balance_and_limit() {
@@ -1443,6 +1450,83 @@ async fn expired_session_cash_is_recorded() {
     );
 }
 
+// A closure that returns Ok without committing must not leave a transaction or
+// row lock on any pooled connection. Two layers guarantee it: Db::run rolls
+// back after every closure, and the Oracle client also rolls back when a
+// connection is released to the pool, so this test checks the property, not
+// one of the two layers (it still passes with either one removed).
+#[tokio::test]
+async fn successful_uncommitted_run_releases_session_lock() {
+    let _guard = TEST_LOCK.lock().await;
+    let mut api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let token = open_for(&api, &terminal, &customer.account).await;
+    let hash = auth::token_hash(&token);
+    let mut config = bank::shared::db::DbConfig::from_env().unwrap();
+    config.min_sessions = 2;
+    config.max_sessions = 2;
+    api.state.db = bank::shared::db::Db::connect(&config).unwrap();
+    const LOCK: SqlStmt = sql_stmt!(
+        "test.atm_lock_session",
+        "../src/features/atm/sql/lock_session.sql"
+    );
+    const TRANSACTION: SqlStmt = sql_stmt!(
+        "test.atm_local_transaction",
+        "sql/atm_local_transaction.sql"
+    );
+    const LOCK_NOWAIT: SqlStmt = sql_stmt!(
+        "test.atm_lock_session_nowait",
+        "sql/atm_lock_session_nowait.sql"
+    );
+    let session_id = rows(&api, SESSIONS, &terminal).await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key = hash.clone();
+    api.state
+        .db
+        .run(move |s| {
+            let _: String = s.query_row(&LOCK, &[&key])?;
+            // Deliberately return success without committing the row lock.
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(config.max_sessions as usize));
+    let mut checks = Vec::new();
+    for index in 0..config.max_sessions {
+        let db = api.state.db.clone();
+        let barrier = barrier.clone();
+        let hash = hash.clone();
+        let session_id = session_id.clone();
+        checks.push(tokio::spawn(async move {
+            db.run(move |s| {
+                // Hold every pooled connection at once, including the original locker.
+                barrier.wait();
+                let transaction: Option<String> = s.query_row(&TRANSACTION, &[])?;
+                assert!(
+                    transaction.is_none(),
+                    "pooled connection retained a transaction"
+                );
+                if index == 0 {
+                    let locked: String = s.query_row(&LOCK_NOWAIT, &[&hash])?;
+                    assert_eq!(locked, session_id);
+                }
+                Ok(())
+            })
+            .await
+        }));
+    }
+    // Join all workers before asserting so failures still release all connections.
+    let mut results = Vec::new();
+    for check in checks {
+        results.push(check.await.unwrap());
+    }
+    for result in results {
+        result.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn ended_session_releases_locks() {
     let _guard = TEST_LOCK.lock().await;
@@ -1602,7 +1686,7 @@ async fn replay_after_lock_is_refused() {
     assert_eq!(rejected[0]["terminal_id"], t);
     assert!(rejected[0]["idem_key"].is_null());
     assert_eq!(rejected[0]["bank_tran_id"], key);
-    assert!(rows(&api, CASH_ROWS, &id).await.is_empty());
+    assert!(cash_rows(&api, &id).await.is_empty());
     let events = rows(&api, REQUEST_EVENTS, &id).await;
     assert_eq!(events.len(), 3);
     assert_eq!(events[0]["event_type"], "atm.session_ended");
@@ -1641,7 +1725,7 @@ async fn closed_account_is_refused() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["rsp_code"], "A0004");
         assert_eq!(body["bank_rsp_code"], "403");
-        assert!(rows(&api, CASH_ROWS, &id).await.is_empty());
+        assert!(cash_rows(&api, &id).await.is_empty());
         if op != "balance" {
             let rejected = rows(&api, CASH_REQUEST, &id).await;
             assert_eq!(rejected.len(), 1);
