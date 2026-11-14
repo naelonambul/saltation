@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .route("/internal/v1/outbox", get(read_outbox))
         .route("/internal/v1/seed/customers", post(seed_customers))
         .route("/internal/v1/seed/accounts", post(seed_accounts))
+        .route("/internal/v1/seed/atm_terminals", post(seed_atm_terminals))
         .route(
             "/internal/v1/seed/counterparties",
             post(seed_counterparties),
@@ -173,6 +174,7 @@ async fn seed_customers(
 
 #[derive(Debug, Deserialize)]
 struct SeedAccount {
+    atm_pin: String,
     customer_no: String,
     account_no: String,
     /// Optional opening balance, posted as an inbound movement.
@@ -208,15 +210,29 @@ async fn seed_accounts(
         return Err(bad_request(&ctx, "account_no must be up to 16 digits"));
     }
 
-    let accounts = req.accounts;
+    if req
+        .accounts
+        .iter()
+        .any(|a| a.atm_pin.len() != 4 || !a.atm_pin.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(bad_request(&ctx, "atm_pin must be exactly 4 digits"));
+    }
+    let mut accounts = Vec::with_capacity(req.accounts.len());
+    for a in req.accounts {
+        let hash = auth::hash_secret(a.atm_pin.clone())
+            .await
+            .map_err(|_| ApiError::internal(&ctx))?;
+        accounts.push((a, hash));
+    }
     let created = state
         .db
         .run_in(&stats, move |s| {
             let mut out = Vec::with_capacity(accounts.len());
-            for a in &accounts {
+            for (a, hash) in &accounts {
                 let customer_id: i64 = s.query_row(&SELECT_CUSTOMER_ID, &[&a.customer_no])?;
                 let account_id =
                     s.insert_returning_id(&INSERT_ACCOUNT, &[&a.account_no, &customer_id, &now])?;
+                s.execute(&INSERT_ATM_CREDENTIAL, &[&a.account_no, hash])?;
                 let fin = fintech_use_num(account_id);
                 s.execute(
                     &INSERT_FINTECH,
@@ -481,4 +497,101 @@ async fn seed_counterparty_clients(
         .map_err(|e| db_error(&ctx, &e))?
         .ok_or_else(|| bad_request(&ctx, "unknown bank institution"))?;
     Ok(api::ok(&ctx, json!({"created": created})))
+}
+
+const INSERT_ATM_CREDENTIAL: SqlStmt = sql_stmt!(
+    "internal.insert_atm_credential",
+    "sql/insert_atm_credential.sql"
+);
+const INSERT_ATM_TERMINAL: SqlStmt = sql_stmt!(
+    "internal.insert_atm_terminal",
+    "sql/insert_atm_terminal.sql"
+);
+#[derive(Deserialize)]
+struct SeedAtmTerminal {
+    terminal_id: String,
+    region: String,
+    location: String,
+    latitude: String,
+    longitude: String,
+}
+#[derive(Deserialize)]
+struct SeedAtmTerminals {
+    atm_terminals: Vec<SeedAtmTerminal>,
+}
+fn coordinate(value: &str, min: u64, max: u64) -> bool {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+        || fraction.len() > 6
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    let Some(scaled) = whole
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(1_000_000))
+    else {
+        return false;
+    };
+    let part = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u64>().unwrap() * 10u64.pow(6 - fraction.len() as u32)
+    };
+    scaled
+        .checked_add(part)
+        .is_some_and(|n| (min..=max).contains(&n))
+}
+async fn seed_atm_terminals(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    crate::shared::api::Json(req): crate::shared::api::Json<SeedAtmTerminals>,
+) -> Result<Response, ApiError> {
+    if req.atm_terminals.is_empty()
+        || req.atm_terminals.len() > MAX_BATCH
+        || req.atm_terminals.iter().any(|t| {
+            let region = t
+                .region
+                .strip_prefix("KR-")
+                .filter(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|s| s.parse::<u8>().ok());
+            !(1..=20).contains(&t.terminal_id.chars().count())
+                || !region.is_some_and(|r| (11..=50).contains(&r))
+                || !(1..=60).contains(&t.location.chars().count())
+                || !coordinate(&t.latitude, 33_000_000, 38_700_000)
+                || !coordinate(&t.longitude, 124_500_000, 132_000_000)
+        })
+    {
+        return Err(bad_request(&ctx, "invalid atm_terminals"));
+    }
+    let terminals = state
+        .db
+        .run_in(&stats, move |s| {
+            let mut created = Vec::new();
+            for t in req.atm_terminals {
+                match s.execute(
+                    &INSERT_ATM_TERMINAL,
+                    &[
+                        &t.terminal_id,
+                        &t.region,
+                        &t.location,
+                        &t.latitude,
+                        &t.longitude,
+                    ],
+                ) {
+                    Ok(_) => created.push(json!({"terminal_id": t.terminal_id})),
+                    Err(e) if e.ora_code() == Some(1) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            s.commit()?;
+            Ok(created)
+        })
+        .await
+        .map_err(|e| db_error(&ctx, &e))?;
+    Ok(api::ok(&ctx, json!({"atm_terminals": terminals})))
 }

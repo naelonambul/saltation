@@ -651,9 +651,9 @@ async fn dormancy_and_reactivation(api: &Api) {
         api,
         "/internal/v1/seed/accounts",
         Some(json!({"accounts": [
-            {"customer_no": "C_DORM_A", "account_no": x, "opening_balance": 50000},
-            {"customer_no": "C_DORM_A", "account_no": y},
-            {"customer_no": "C_DORM_B", "account_no": z, "opening_balance": 50000}
+            {"customer_no": "C_DORM_A", "atm_pin": common::TEST_ATM_PIN, "account_no": x, "opening_balance": 50000},
+            {"customer_no": "C_DORM_A", "atm_pin": common::TEST_ATM_PIN, "account_no": y},
+            {"customer_no": "C_DORM_B", "atm_pin": common::TEST_ATM_PIN, "account_no": z, "opening_balance": 50000}
         ]})),
     )
     .await;
@@ -793,7 +793,7 @@ async fn term_deposit_open(api: &Api) -> (String, String, i64, i64, i64, String)
         api,
         "/internal/v1/seed/accounts",
         Some(json!({"accounts": [{
-            "customer_no": no, "account_no": account, "opening_balance": 1000000
+            "customer_no": no, "atm_pin": common::TEST_ATM_PIN, "account_no": account, "opening_balance": 1000000
         }]})),
     )
     .await;

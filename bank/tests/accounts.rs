@@ -39,7 +39,7 @@ async fn seed(api: &common::Api, accounts: usize) -> Customer {
     let numbers: Vec<String> = (0..accounts).map(|i| format!("998{n}{i}")).collect();
     let list: Vec<Value> = numbers
         .iter()
-        .map(|a| json!({ "customer_no": customer_no, "account_no": a }))
+        .map(|a| json!({ "customer_no": customer_no, "atm_pin": common::TEST_ATM_PIN, "account_no": a }))
         .collect();
     let (status, body) = call(
         &api.generator,

@@ -27,6 +27,9 @@ def test_seeding_is_deterministic():
     assert a == make_customers(7, 5)
     assert a[0]["customer_no"] == "C00000000" and a[0]["account_no"] == "99800000000"
     assert len({c["phone"] for c in make_customers(7, 100)}) == 100
+    pin_rng = random.Random("7:atm_pin")
+    assert [c["atm_pin"] for c in a] == [f"{pin_rng.randrange(10000):04d}" for _ in a]
+    assert all(re.fullmatch(r"[0-9]{4}", c["atm_pin"]) for c in a)
 
 
 def test_home_context_is_stable_per_customer():

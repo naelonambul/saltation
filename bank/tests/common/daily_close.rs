@@ -8,9 +8,7 @@ use bank::shared::rollover::last_instant;
 use bank::sql_stmt;
 use chrono::{NaiveDate, TimeZone};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::{Layer, Registry};
+use std::sync::Arc;
 const HISTORY: SqlStmt = sql_stmt!("test.close_history", "../sql/close_history.sql");
 const ROWS: SqlStmt = sql_stmt!("test.close_rows", "../sql/close_rows.sql");
 const BALANCE: SqlStmt = sql_stmt!("test.close_balance", "../sql/close_balance.sql");
@@ -37,35 +35,9 @@ const RESTORE_PREVIOUS: SqlStmt = sql_stmt!(
 const CONSISTENT: SqlStmt = sql_stmt!("test.close_consistent", "../sql/close_consistent.sql");
 const FINAL: SqlStmt = sql_stmt!("test.close_final", "../sql/close_final.sql");
 type Row = (String, i64, i64, String, Option<String>);
-pub type Logs = Arc<Mutex<Vec<Value>>>;
-struct Capture(Logs);
-struct Fields(serde_json::Map<String, Value>);
-impl tracing::field::Visit for Fields {
-    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-        self.0.insert(f.name().into(), json!(format!("{v:?}")));
-    }
-    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
-        self.0.insert(f.name().into(), json!(v));
-    }
-    fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
-        self.0.insert(f.name().into(), json!(v));
-    }
-}
-impl<S: tracing::Subscriber> Layer<S> for Capture {
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        let mut f = Fields(Default::default());
-        event.record(&mut f);
-        if f.0.get("message").and_then(Value::as_str) == Some("daily close") {
-            f.0.insert("level".into(), json!(event.metadata().level().as_str()));
-            self.0.lock().unwrap().push(Value::Object(f.0));
-        }
-    }
-}
+pub type Logs = common::Logs;
 pub fn capture_logs() -> Logs {
-    let logs = Logs::default();
-    tracing::subscriber::set_global_default(Registry::default().with(Capture(logs.clone())))
-        .expect("daily-close capture subscriber");
-    logs
+    common::daily_logs()
 }
 async fn date(api: &Api) -> NaiveDate {
     business_date(api.state.clock.state().await.unwrap().business_time)

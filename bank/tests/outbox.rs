@@ -156,8 +156,8 @@ async fn outage_then_full_delivery() {
     )
     .await;
     let (_, seeded) = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None, Some(json!({ "accounts": [
-        { "customer_no": customer_no, "account_no": accounts[0], "opening_balance": 10_000_000 },
-        { "customer_no": customer_no, "account_no": accounts[1], "opening_balance": 10_000_000 } ] }))).await;
+        { "customer_no": customer_no, "atm_pin": common::TEST_ATM_PIN, "account_no": accounts[0], "opening_balance": 10_000_000 },
+        { "customer_no": customer_no, "atm_pin": common::TEST_ATM_PIN, "account_no": accounts[1], "opening_balance": 10_000_000 } ] }))).await;
     let fins: Vec<String> = seeded["accounts"]
         .as_array()
         .expect("accounts")

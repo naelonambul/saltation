@@ -13,7 +13,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 pub async fn state() -> AppState {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    init_logs();
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrate");
     let clock = Clock::init(db.clone(), Registry::default())
@@ -161,7 +161,7 @@ pub async fn customer(api: &Api, opening: i64) -> Customer {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_contract("CreatedResponse", &body);
     let (status, body) = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None,
-        Some(serde_json::json!({"accounts": [{"customer_no": no, "account_no": account, "opening_balance": opening}]}))).await;
+        Some(serde_json::json!({"accounts": [{"customer_no": no, "atm_pin": TEST_ATM_PIN, "account_no": account, "opening_balance": opening}]}))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_contract("SeedAccountsResponse", &body);
     let fin = body["accounts"][0]["fintech_use_num"]
@@ -255,3 +255,96 @@ pub async fn form_call(router: &Router, path: &str, body: String) -> (StatusCode
 }
 
 pub mod deposits;
+
+pub const TEST_ATM_PIN: &str = "7391";
+pub type Logs = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+static DAILY_LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+struct Capture;
+struct Fields(serde_json::Map<String, Value>);
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+        self.0
+            .insert(f.name().into(), serde_json::json!(format!("{v:?}")));
+    }
+    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_bool(&mut self, f: &tracing::field::Field, v: bool) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_f64(&mut self, f: &tracing::field::Field, v: f64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+}
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = Fields(Default::default());
+        event.record(&mut fields);
+        fields.0.insert(
+            "level".into(),
+            serde_json::json!(event.metadata().level().as_str()),
+        );
+        fields.0.insert(
+            "target".into(),
+            serde_json::json!(event.metadata().target()),
+        );
+        let line = Value::Object(fields.0);
+        if line["message"].as_str() == Some("daily close") {
+            DAILY_LOGS
+                .get_or_init(Logs::default)
+                .lock()
+                .unwrap()
+                .push(line.clone());
+        }
+        LOGS.get_or_init(Logs::default).lock().unwrap().push(line);
+    }
+}
+pub fn init_logs() {
+    use tracing_subscriber::prelude::*;
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .with(Capture)
+            .try_init()
+            .expect("shared test log subscriber");
+    });
+}
+pub fn logs() -> Vec<Value> {
+    LOGS.get_or_init(Logs::default).lock().unwrap().clone()
+}
+pub fn daily_logs() -> Logs {
+    init_logs();
+    DAILY_LOGS.get_or_init(Logs::default).clone()
+}
+pub fn find_pin(haystack: &Value, pin: &str) -> Option<String> {
+    match haystack {
+        Value::String(s) => {
+            let boundary = |b: u8| !b.is_ascii_digit() && b != b'.';
+            s.match_indices(pin)
+                .find(|(i, _)| {
+                    (*i == 0 || boundary(s.as_bytes()[i - 1]))
+                        && (*i + pin.len() == s.len() || boundary(s.as_bytes()[i + pin.len()]))
+                })
+                .map(|_| s.clone())
+        }
+        Value::Number(n) => find_pin(&Value::String(n.to_string()), pin),
+        Value::Array(a) => a.iter().find_map(|v| find_pin(v, pin)),
+        Value::Object(o) => o.values().find_map(|v| find_pin(v, pin)),
+        _ => None,
+    }
+}
+pub fn assert_no_pin(what: &str, values: &[Value], pin: &str) {
+    for value in values {
+        if let Some(found) = find_pin(value, pin) {
+            panic!("{what} contains PIN in value {found}");
+        }
+    }
+}

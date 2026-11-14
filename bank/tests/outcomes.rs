@@ -85,7 +85,7 @@ async fn customer(api: &Api, opening: i64) -> Customer {
         Some(json!({"customers": [{"customer_no": no, "name": "김수취", "phone": phone, "customer_type": "INDIVIDUAL", "password": password}]}))).await;
     assert_eq!(seeded.0, StatusCode::OK);
     let seeded = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None,
-        Some(json!({"accounts": [{"customer_no": no, "account_no": account, "opening_balance": opening}]}))).await;
+        Some(json!({"accounts": [{"customer_no": no, "atm_pin": common::TEST_ATM_PIN, "account_no": account, "opening_balance": opening}]}))).await;
     assert_eq!(seeded.0, StatusCode::OK);
     let fin = seeded.1["accounts"][0]["fintech_use_num"]
         .as_str()
