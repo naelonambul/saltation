@@ -287,6 +287,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                 "EXTERNAL",
                 &item.bank_tran_id,
                 (None, None),
+                None,
             )?;
         }
         let (hash, status, code, body) = row.unwrap_or_default();
@@ -355,6 +356,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
     }
     let id = receiver.as_ref().expect("resolved receiver").0;
     let movement = Movement {
+        terminal_id: None,
         kind: Kind::Inbound,
         payee_registered: None,
         request_id: Some(&p.ctx.request_id),

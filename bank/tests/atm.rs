@@ -733,6 +733,13 @@ async fn no_token_or_pin_leaks() {
         start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id()).await;
     assert_eq!(status, StatusCode::OK);
     let token = started["atm_session_token"].as_str().unwrap().to_owned();
+    let cash_deposit = cash(&api, &token, "deposit", "leak-deposit", 123, &new_id())
+        .await
+        .1;
+    let cash_withdraw = cash(&api, &token, "withdraw", "leak-withdraw", 123, &new_id())
+        .await
+        .1;
+    let balance = inquiry(&api, &token, &new_id()).await.1;
     let ended = finish_session(&api, &token, &new_id()).await.1;
     let wrong = start_session(&api, &terminal, &customer.account, "0000", &new_id())
         .await
@@ -741,7 +748,7 @@ async fn no_token_or_pin_leaks() {
         started.as_object_mut().unwrap().remove("atm_session_token"),
         Some(json!(token))
     );
-    let responses = vec![started, ended, wrong];
+    let responses = vec![started, ended, wrong, cash_deposit, cash_withdraw, balance];
     let logs = common::logs();
     let raw: Vec<String> = api
         .state
@@ -811,4 +818,488 @@ async fn presented_expired_session_ends_once() {
     .await;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["reason"], "expired");
+}
+
+const CASH_ROWS: SqlStmt = sql_stmt!("test.atm_cash_rows", "sql/atm_cash_rows.sql");
+const CASH_TOTALS: SqlStmt = sql_stmt!("test.atm_cash_totals", "sql/atm_cash_totals.sql");
+const CASH_REQUEST: SqlStmt = sql_stmt!("test.atm_cash_request", "sql/atm_cash_request.sql");
+const DORMANT: SqlStmt = sql_stmt!("test.atm_dormant", "sql/atm_dormant.sql");
+const ACCOUNT_STATE: SqlStmt = sql_stmt!("test.atm_account_state", "sql/atm_account_state.sql");
+async fn open_cash(api: &Api, opening: i64) -> (String, common::Customer, String) {
+    let terminal = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(api, vec![self::terminal(&terminal)]).await.0,
+        StatusCode::OK
+    );
+    let c = common::customer(api, opening).await;
+    let token = open_for(api, &terminal, &c.account).await;
+    (terminal, c, token)
+}
+async fn open_for(api: &Api, terminal: &str, account: &str) -> String {
+    let (status, b) = start_session(api, terminal, account, TEST_ATM_PIN, &new_id()).await;
+    assert_eq!(status, StatusCode::OK);
+    common::assert_atm_contract("SessionResponse", &b);
+    b["atm_session_token"].as_str().unwrap().into()
+}
+async fn cash(
+    api: &Api,
+    token: &str,
+    op: &str,
+    key: &str,
+    amount: i64,
+    id: &str,
+) -> (StatusCode, Value) {
+    let r = call(
+        &api.generator,
+        "POST",
+        &format!("/atm/v1/cash/{op}"),
+        id,
+        Some(token),
+        Some(json!({"idempotency_key": key, "amount": amount.to_string()})),
+    )
+    .await;
+    if r.0 == StatusCode::OK {
+        common::assert_atm_contract("CashResponse", &r.1);
+    }
+    r
+}
+async fn inquiry(api: &Api, token: &str, id: &str) -> (StatusCode, Value) {
+    let r = call(
+        &api.generator,
+        "GET",
+        "/atm/v1/balance",
+        id,
+        Some(token),
+        None,
+    )
+    .await;
+    if r.0 == StatusCode::OK {
+        common::assert_atm_contract("BalanceResponse", &r.1);
+    }
+    r
+}
+fn custom_limits(api: &Api, per: i64, daily: i64) -> Api {
+    let mut state = api.state.clone();
+    state.limits.atm_withdraw = per;
+    state.limits.atm_withdraw_daily = daily;
+    Api {
+        generator: bank::app::generator_router(state.clone()),
+        public: bank::app::public_router(state.clone()),
+        state,
+    }
+}
+async fn cash_rejected(api: &Api, token: &str, amount: i64, bank: &str) -> String {
+    let id = new_id();
+    let key = format!("k{}", common::unique_digits(15));
+    let (s, b) = cash(api, token, "withdraw", &key, amount, &id).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(b["rsp_code"], "A0004");
+    assert_eq!(b["bank_rsp_code"], bank);
+    let req = rows(api, CASH_REQUEST, &id).await;
+    assert_eq!(req.len(), 1);
+    assert_eq!(req[0]["status"], "REJECTED");
+    assert_eq!(req[0]["idem_key"], key);
+    assert!(rows(api, CASH_ROWS, &id).await.is_empty());
+    id
+}
+#[tokio::test]
+async fn withdraw_and_deposit_post_one_row() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c, token) = open_cash(&api, 100_000).await;
+    for (op, amt, signed, after, inout, print) in [
+        ("deposit", 50_000, 50_000, 150_000, "입금", "ATM입금"),
+        ("withdraw", 30_000, -30_000, 120_000, "출금", "ATM출금"),
+    ] {
+        let id = new_id();
+        let key = format!("k{}", common::unique_digits(15));
+        let (s, b) = cash(&api, &token, op, &key, amt, &id).await;
+        assert_eq!(s, StatusCode::OK, "{b}");
+        assert_eq!(b["balance_after"], after.to_string());
+        let tx = rows(&api, CASH_ROWS, &id).await;
+        assert_eq!(tx.len(), 1);
+        let r = &tx[0];
+        assert_eq!(r["amount"], signed);
+        assert_eq!(r["balance_after"], after);
+        assert_eq!(r["inout_type"], inout);
+        assert_eq!(r["tran_type"], "현금");
+        assert_eq!(r["print_content"], print);
+        assert_eq!(r["channel"], "ATM");
+        assert_eq!(r["terminal_id"], t);
+        assert_eq!(r["kind"], "atm_cash");
+        for k in [
+            "counterparty_bank_code",
+            "counterparty_account_no",
+            "counterparty_name",
+        ] {
+            assert!(r[k].is_null());
+        }
+        let request = rows(&api, CASH_REQUEST, &id).await;
+        assert_eq!(request.len(), 1);
+        assert_eq!(request[0]["status"], "DONE");
+        assert_eq!(request[0]["idem_scope"], format!("ATM:{t}"));
+        let events = rows(&api, REQUEST_EVENTS, &id).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event_type"], "atm.operation");
+        check_location(&events[0], &t, &c.account, &id);
+        assert_eq!(events[0]["payload"]["operation"], op);
+        assert_eq!(events[0]["payload"]["outcome"], "approved");
+        assert_eq!(events[0]["payload"]["amount"], amt);
+        assert_eq!(events[1]["event_type"], "request.completed");
+    }
+    let totals = rows(&api, CASH_TOTALS, &c.account).await;
+    assert_eq!(totals, vec![json!({"cash_in": 50_000, "cash_out": 30_000})]);
+    let id = new_id();
+    let (s, b) = inquiry(&api, &token, &id).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["balance"], "120000");
+    let events = rows(&api, REQUEST_EVENTS, &id).await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["payload"]["operation"], "balance");
+    check_location(&events[0], &t, &c.account, &id);
+}
+#[tokio::test]
+async fn withdraw_limits() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (_, _, token) = open_cash(&api, 20_000_000).await;
+    cash_rejected(&api, &token, 1_000_001, "406").await;
+    for _ in 0..6 {
+        assert_eq!(
+            cash(
+                &api,
+                &token,
+                "withdraw",
+                &common::unique_digits(20),
+                1_000_000,
+                &new_id()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    cash_rejected(&api, &token, 1, "406").await;
+    let api = custom_limits(&api, 2_000, 3_000);
+    let (_, _, token) = open_cash(&api, 20_000).await;
+    cash_rejected(&api, &token, 2_001, "406").await;
+    for amt in [2_000, 1_000] {
+        assert_eq!(
+            cash(
+                &api,
+                &token,
+                "withdraw",
+                &common::unique_digits(20),
+                amt,
+                &new_id()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    cash_rejected(&api, &token, 1, "406").await;
+}
+#[tokio::test]
+async fn withdraw_insufficient_balance() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (_, _, token) = open_cash(&api, 100).await;
+    cash_rejected(&api, &token, 101, "405").await;
+}
+async fn parallel_cash(
+    api: &Api,
+    tokens: &[String],
+    keys: &[String],
+    amount: i64,
+) -> Vec<(String, StatusCode, Value)> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (token, key) in tokens.iter().zip(keys) {
+        let api = Api {
+            generator: api.generator.clone(),
+            public: api.public.clone(),
+            state: api.state.clone(),
+        };
+        let token = token.clone();
+        let key = key.clone();
+        tasks.spawn(async move {
+            let id = new_id();
+            let (s, b) = cash(&api, &token, "withdraw", &key, amount, &id).await;
+            (id, s, b)
+        });
+    }
+    let mut results = vec![];
+    while let Some(r) = tasks.join_next().await {
+        results.push(r.unwrap());
+    }
+    results
+}
+#[tokio::test]
+async fn cash_idempotency() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c, token) = open_cash(&api, 1_000_000).await;
+    let key = common::unique_digits(20);
+    let first_id = new_id();
+    let (s, first) = cash(&api, &token, "withdraw", &key, 100, &first_id).await;
+    assert_eq!(s, StatusCode::OK);
+    let replay_id = new_id();
+    let (s, second) = cash(&api, &token, "withdraw", &key, 100, &replay_id).await;
+    assert_eq!(s, StatusCode::OK);
+    for field in [
+        "rsp_code",
+        "bank_rsp_code",
+        "amount",
+        "balance_after",
+        "account_sequence",
+    ] {
+        assert_eq!(first[field], second[field], "{field}");
+    }
+    assert!(rows(&api, CASH_ROWS, &replay_id).await.is_empty());
+    assert_eq!(rows(&api, CASH_ROWS, &first_id).await.len(), 1);
+    let conflict_id = new_id();
+    let (s, b) = cash(&api, &token, "withdraw", &key, 101, &conflict_id).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(b["rsp_code"], "A0007");
+    let r = rows(&api, CASH_REQUEST, &conflict_id).await;
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["terminal_id"], t);
+    assert_eq!(r[0]["bank_tran_id"], key);
+    assert_eq!(r[0]["status"], "REJECTED");
+    let key = common::unique_digits(20);
+    let results = parallel_cash(&api, &vec![token.clone(); 8], &vec![key.clone(); 8], 100).await;
+    let mut movements = 0;
+    for (id, s, b) in &results {
+        assert_eq!(*s, StatusCode::OK, "{b}");
+        for field in [
+            "rsp_code",
+            "bank_rsp_code",
+            "amount",
+            "balance_after",
+            "account_sequence",
+        ] {
+            assert_eq!(b[field], results[0].2[field], "{field}");
+        }
+        movements += rows(&api, CASH_ROWS, id).await.len();
+    }
+    assert_eq!(movements, 1);
+    let t2 = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(&api, vec![terminal(&t2)]).await.0,
+        StatusCode::OK
+    );
+    let token2 = open_for(&api, &t2, &c.account).await;
+    let id = new_id();
+    assert_eq!(
+        cash(&api, &token2, "withdraw", &key, 100, &id).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        rows(&api, CASH_REQUEST, &id).await[0]["idem_scope"],
+        format!("ATM:{t2}")
+    );
+    assert_eq!(rows(&api, CASH_ROWS, &id).await.len(), 1);
+}
+#[tokio::test]
+async fn races_for_last_balance_and_limit() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    for (api, opening, amount, bank) in [
+        (
+            custom_limits(&api, 1_000_000, 6_000_000),
+            100_000,
+            60_000,
+            "405",
+        ),
+        (
+            custom_limits(&api, 1_000_000, 1_500_000),
+            10_000_000,
+            1_000_000,
+            "406",
+        ),
+    ] {
+        let (_, c, token) = open_cash(&api, opening).await;
+        let t = format!("T{}", common::unique_digits(15));
+        assert_eq!(
+            seed_terminal(&api, vec![terminal(&t)]).await.0,
+            StatusCode::OK
+        );
+        let token2 = open_for(&api, &t, &c.account).await;
+        let r = parallel_cash(
+            &api,
+            &[token, token2],
+            &[common::unique_digits(20), common::unique_digits(20)],
+            amount,
+        )
+        .await;
+        assert_eq!(r.iter().filter(|(_, s, _)| *s == StatusCode::OK).count(), 1);
+        assert_eq!(
+            r.iter()
+                .filter(|(_, s, b)| *s == StatusCode::UNPROCESSABLE_ENTITY
+                    && b["bank_rsp_code"] == bank)
+                .count(),
+            1
+        );
+    }
+}
+#[tokio::test]
+async fn dormant_reactivation() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (_, c, token) = open_cash(&api, 100_000).await;
+    let account = c.account.clone();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(&DORMANT, &[&account])?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    let before = rows(&api, ACCOUNT_STATE, &c.account).await;
+    assert_eq!(before[0]["status"], "DORMANT");
+    assert_eq!(inquiry(&api, &token, &new_id()).await.0, StatusCode::OK);
+    assert_eq!(rows(&api, ACCOUNT_STATE, &c.account).await, before);
+    let id = new_id();
+    assert_eq!(
+        cash(&api, &token, "withdraw", "reactivate", 1, &id).await.0,
+        StatusCode::OK
+    );
+    let after = rows(&api, ACCOUNT_STATE, &c.account).await;
+    assert_eq!(after[0]["status"], "ACTIVE");
+    assert_ne!(after[0]["last_activity_at"], before[0]["last_activity_at"]);
+    assert_eq!(
+        rows(&api, REQUEST_EVENTS, &id)
+            .await
+            .iter()
+            .filter(|e| e["event_type"] == "account.status_changed")
+            .count(),
+        1
+    );
+}
+#[tokio::test]
+async fn locked_account_ends_other_sessions() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, c, token) = open_cash(&api, 100_000).await;
+    let t2 = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(&api, vec![terminal(&t2)]).await.0,
+        StatusCode::OK
+    );
+    for _ in 0..3 {
+        let (s, b) = start_session(&api, &t2, &c.account, "0000", &new_id()).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(b["bank_rsp_code"], "410");
+    }
+    assert!(rows(&api, SESSIONS, &t).await[0]["ended_at"].is_null());
+    let id = cash_rejected(&api, &token, 1, "409").await;
+    let session = rows(&api, SESSIONS, &t).await;
+    assert_eq!(session[0]["end_reason"], "locked");
+    assert_eq!(
+        rows(
+            &api,
+            SESSION_EVENTS,
+            session[0]["session_id"].as_str().unwrap()
+        )
+        .await
+        .len(),
+        1
+    );
+    let events = rows(&api, REQUEST_EVENTS, &id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event_type"] == "atm.operation" && e["payload"]["outcome"] == "rejected")
+            .count(),
+        1
+    );
+    assert_eq!(rows(&api, CASH_REQUEST, &id).await[0]["terminal_id"], t);
+    assert_eq!(
+        cash(&api, &token, "withdraw", "afterlock", 1, &new_id())
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+async fn assert_cash_401(api: &Api, token: &str, terminal: Option<&str>) -> String {
+    let id = new_id();
+    let (s, b) = cash(api, token, "withdraw", "unauthorized", 1, &id).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(b["rsp_code"], "O0001");
+    let r = rows(api, CASH_REQUEST, &id).await;
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["status"], "REJECTED");
+    assert_eq!(r[0]["request_type"], "ATM_WITHDRAW");
+    assert_eq!(r[0]["terminal_id"], json!(terminal));
+    assert_eq!(
+        rows(api, REQUEST_EVENTS, &id)
+            .await
+            .iter()
+            .filter(|e| e["event_type"] == "request.completed")
+            .count(),
+        1
+    );
+    id
+}
+#[tokio::test]
+async fn ended_session_cash_is_recorded() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, _, token) = open_cash(&api, 100).await;
+    assert_eq!(
+        finish_session(&api, &token, &new_id()).await.0,
+        StatusCode::OK
+    );
+    let id = assert_cash_401(&api, &token, Some(&t)).await;
+    assert!(
+        !rows(&api, REQUEST_EVENTS, &id)
+            .await
+            .iter()
+            .any(|e| e["event_type"] == "atm.session_ended")
+    );
+    let session = rows(&api, SESSIONS, &t).await;
+    assert_eq!(
+        rows(
+            &api,
+            SESSION_EVENTS,
+            session[0]["session_id"].as_str().unwrap()
+        )
+        .await
+        .len(),
+        1
+    );
+    assert_cash_401(&api, "unknown-token", None).await;
+}
+#[tokio::test]
+async fn expired_session_cash_is_recorded() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (t, _, token) = open_cash(&api, 100).await;
+    let hash = auth::token_hash(&token);
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(&EXPIRE_SESSION, &[&hash])?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    let id = assert_cash_401(&api, &token, Some(&t)).await;
+    let session = rows(&api, SESSIONS, &t).await;
+    assert_eq!(session[0]["end_reason"], "expired");
+    assert_eq!(session[0]["ended_at"], session[0]["expires_at"]);
+    let events = rows(&api, REQUEST_EVENTS, &id).await;
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["event_type"], "atm.session_ended");
+    assert_eq!(
+        rows(
+            &api,
+            SESSION_EVENTS,
+            session[0]["session_id"].as_str().unwrap()
+        )
+        .await
+        .len(),
+        1
+    );
 }

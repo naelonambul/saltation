@@ -12,7 +12,8 @@ use crate::sql_stmt;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use axum::routing::post;
+use axum::routing::{get, post};
+mod operations;
 use axum::{Extension, Router};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Timelike};
 use serde::Deserialize;
@@ -38,6 +39,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/atm/v1/session", post(start))
         .route("/atm/v1/session/end", post(end))
+        .route("/atm/v1/cash/withdraw", post(operations::withdraw))
+        .route("/atm/v1/cash/deposit", post(operations::deposit))
+        .route("/atm/v1/balance", get(operations::balance))
 }
 fn db_error(ctx: &RequestContext, error: DbError) -> ApiError {
     if matches!(error, DbError::Busy) {

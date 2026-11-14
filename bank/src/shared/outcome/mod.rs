@@ -272,6 +272,7 @@ pub fn reject_attempt(
 }
 
 /// Persists a conflict and its completion atomically, without claiming the key.
+#[allow(clippy::too_many_arguments)]
 pub fn conflict(
     session: &mut crate::shared::db::Session,
     ctx: &RequestContext,
@@ -280,13 +281,14 @@ pub fn conflict(
     channel: &'static str,
     key: &str,
     identity: (Option<&str>, Option<&str>),
+    terminal_id: Option<&str>,
 ) -> Result<(), crate::shared::db::DbError> {
     let mut event = Event::for_request(ctx, "request.completed", now, channel, "rejected")
         .codes("A0007", None)
         .payload(serde_json::json!({"http_status": 409, "request_type": kind}));
     event.customer_no = identity.0.map(str::to_owned);
     event.session_id = identity.1.map(str::to_owned);
-    let (id, reused) = reject_attempt(session, ctx, &event, Some(key), None)?;
+    let (id, reused) = reject_attempt(session, ctx, &event, Some(key), terminal_id)?;
     if reused {
         event.payload["attempt_id"] = id.into();
     }
@@ -299,6 +301,8 @@ fn money_operation(method: &str, route: &str) -> Option<(&'static str, &'static 
         return None;
     }
     match route {
+        "/atm/v1/cash/withdraw" => Some(("ATM_WITHDRAW", "ATM")),
+        "/atm/v1/cash/deposit" => Some(("ATM_DEPOSIT", "ATM")),
         "/v2.0/transfer/withdraw/fin_num" => Some(("TRANSFER", "MOBILE")),
         "/v2.0/transfer/deposit/fin_num" => Some(("INBOUND", "EXTERNAL")),
         "/v2.0/ext/deposits" => Some(("TERM_OPEN", "MOBILE")),

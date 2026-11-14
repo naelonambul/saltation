@@ -242,6 +242,7 @@ async fn seed_accounts(
                 if a.opening_balance > 0 {
                     let mut locks = ledger::lock_accounts(s, &[account_id])?;
                     let movement = Movement {
+                        terminal_id: None,
                         kind: Kind::Inbound,
                         payee_registered: None,
                         request_id: None,

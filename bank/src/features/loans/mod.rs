@@ -308,6 +308,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                     "MOBILE",
                     &p.key,
                     (Some(&p.customer_no), Some(&p.session)),
+                    None,
                 )?;
             }
             return Ok(Attempt::Stored(stored));
@@ -353,6 +354,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                 s,
                 &mut locks,
                 &Movement {
+                    terminal_id: None,
                     kind: Kind::LoanDisburse,
                     payee_registered: None,
                     request_id: Some(&p.ctx.request_id),
@@ -394,6 +396,7 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
                 s,
                 &mut locks,
                 &Movement {
+                    terminal_id: None,
                     kind: Kind::LoanRepay,
                     payee_registered: None,
                     request_id: Some(&p.ctx.request_id),
