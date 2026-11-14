@@ -339,6 +339,61 @@ pub async fn sequence(
     inbound(api, &inbound_token, &altered, &external).await;
     inbound(api, &inbound_token, &empty, &external).await;
     transfer(api, &sender, "998", &receiver.account, 10).await;
+    let atm = common::customer(api, 10000).await;
+    let terminal = format!("T{}", common::unique_digits(15));
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/internal/v1/seed/atm_terminals",
+        &new_id(),
+        None,
+        Some(json!({"atm_terminals": [{"terminal_id": terminal, "region": "KR-11", "location": "서울", "latitude": "37.566500", "longitude": "126.978000"}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &new_id(),
+        None,
+        Some(json!({"terminal_id": terminal, "account_no": atm.account, "pin": common::TEST_ATM_PIN})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["atm_session_token"].as_str().unwrap();
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/withdraw",
+        &new_id(),
+        Some(token),
+        Some(json!({"idempotency_key": common::unique_digits(20), "amount": "100"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let atm_id = legs(api, &atm.account, bad_date).await[0];
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/deposit",
+        &new_id(),
+        Some(token),
+        Some(json!({"idempotency_key": common::unique_digits(20), "amount": "200"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session/end",
+        &new_id(),
+        Some(token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_clean(api, bad_date, logs, metrics).await;
     let altered_id = legs(api, &altered.account, bad_date).await[0];
     let leg_id = legs(api, &sender.account, bad_date).await[0];
     let empty_id = legs(api, &empty.account, bad_date).await[0];
@@ -377,7 +432,7 @@ pub async fn sequence(
     assert_clean(api, bad_date, logs, metrics).await;
 
     // Each corruption starts from, and returns to, an entirely clean close.
-    for witness in 0..7 {
+    for witness in 0..8 {
         let idle_no = idle.account.clone();
         let sender_no = sender.account.clone();
         let empty_no = empty.account.clone();
@@ -386,6 +441,7 @@ pub async fn sequence(
         let touched_id = match witness {
             1 | 6 => altered_id,
             4 => receiver_id,
+            7 => atm_id,
             _ => empty_id,
         };
         let saved: String = api
@@ -399,6 +455,9 @@ pub async fn sequence(
                     }
                     1 => {
                         assert_eq!(s.execute(&AMOUNT, &[&1i64, &altered_id])?, 1);
+                    }
+                    7 => {
+                        assert_eq!(s.execute(&AMOUNT, &[&1i64, &atm_id])?, 1);
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&1i64, &leg_id])?, 1);
@@ -445,6 +504,7 @@ pub async fn sequence(
             ),
             5 => (1, 0, vec![(&idle.account, "no previous close")]),
             6 => (1, 1, vec![(&altered.account, "row without transfer")]),
+            7 => (1, 1, vec![(&atm.account, "balance:")]),
             _ => unreachable!(),
         };
         let report = rerun(api, bad_date, logs, metrics).await;
@@ -459,11 +519,16 @@ pub async fn sequence(
         );
         let actual = rows(api, bad_date).await;
         assert_bad_rows(&actual, &expected);
-        if witness == 1 {
+        if witness == 1 || witness == 7 {
+            let account = if witness == 1 {
+                &altered.account
+            } else {
+                &atm.account
+            };
             assert!(
                 actual
                     .iter()
-                    .find(|r| r.0 == altered.account)
+                    .find(|r| &r.0 == account)
                     .unwrap()
                     .4
                     .as_ref()
@@ -483,7 +548,7 @@ pub async fn sequence(
                     0 => {
                         assert_eq!(s.execute(&BALANCE, &[&-1i64, &idle_no])?, 1);
                     }
-                    1 | 4 | 6 => {
+                    1 | 4 | 6 | 7 => {
                         assert_eq!(s.execute(&DELETE, &[&touched_id])?, 1);
                         assert_eq!(s.execute(&RESTORE, &[&saved])?, 1);
                     }
