@@ -20,5 +20,14 @@
     "infra/compose/compose.yml",
     "infra/compose/.env.example"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8b51b2dff367eac760559fa1c040cb2675fddce6f089abea5dc4d102d2d7e402",
+      "by": "naelonambul",
+      "at": "2026-11-14T21:46:40Z",
+      "write_scope_sha256": "sha256:2720c182401feeec3b07057de7c1fdd19fc2d360287c0d6828a5b15b2d708714",
+      "note": "\uc2b9\uc778 (ATM\ub9cc, open question (a) \ub864\uc624\ubc84 \uc791\uc5c5); \uc2b9\uc778 \uae30\ub85d"
+    }
+  ]
 }
