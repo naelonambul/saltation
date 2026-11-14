@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "atm-channel",
+  "kind": "implementation",
+  "title": "ATM channel: terminals, PIN credentials, sessions, cash (stage 3)",
+  "base": {
+    "ref": "main",
+    "commit": "f44c4da842d822c6c1f2eddc741f494da5b579e2"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/**",
+    "contracts/**",
+    "generator/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/dev-host.md",
+    "infra/compose/compose.yml",
+    "infra/compose/.env.example"
+  ],
+  "approvals": []
+}
