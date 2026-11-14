@@ -17,16 +17,16 @@ Spec requirement concerned: F-38's history view (balances and history in the mob
 | Path | Change |
 |---|---|
 | `web/apps/mobile/src/shared/ids.ts` | `tranDtime()` and `ymd()` format in KST from the instant's UTC time plus 9 hours, not from local fields |
-| `web/apps/mobile/src/shared/ids.test.ts` | the existing date test builds its instants in UTC; new cases at both sides of 15:00 UTC (00:00 KST) |
-| `web/apps/mobile/playwright.config.ts`, `web/apps/mobile/e2e/` | `timezoneId` from `E2E_TIMEZONE` (default `Asia/Seoul`) |
+| `web/apps/mobile/src/shared/ids.test.ts` | the existing date test builds its instants in UTC; new cases at both sides of 15:00 UTC (00:00 KST), each run with `process.env.TZ` set in turn to `UTC`, `Asia/Seoul` and `America/Los_Angeles` inside the test (Node applies a changed `TZ` at run time), so the registered `web-test` check covers the three zones without a script change |
+| `web/apps/mobile/playwright.config.ts`, `web/apps/mobile/e2e/smoke.spec.ts` | `timezoneId` from `E2E_TIMEZONE` when it is set, otherwise the container's own zone (UTC); the smoke test records and prints the history request's `from_date` and `to_date` and checks `to_date` is Korea's date |
 | `scripts/dev/it-oracle.sh` | `e2e` passes `E2E_TIMEZONE`; once the client is fixed, the browser no longer needs the `TZ=Asia/Seoul` that `request-outcomes` adds, and that line is removed (this branch is rebased onto `main` after #9 is merged) |
 
 ## Order of work
 
-1. **Reproduce on the base.** Unit level: a test that formats `2026-11-14T17:38:00Z` and expects `20261115` and `20261115023800` fails on the base, run as `TZ=UTC pnpm --filter @saltation/mobile test` in `web/`. Whole product: `E2E_TIMEZONE=Etc/GMT+12 scripts/dev/it-oracle.sh e2e` on the OCI host, run before 21:00 KST (the browser's date then differs from Korea's), fails at the history step on the base with the history request's `to_date` one day behind; the request is read from the bank's `request.completed` event for that request ID. Both outputs are kept as evidence for the pull request.
+1. **Reproduce on the base.** Unit level: a test that formats `2026-11-14T17:38:00Z` and expects `20261115` and `20261115023800` fails on the base, run as `TZ=UTC pnpm --filter @saltation/mobile test` in `web/`. Whole product: `E2E_TIMEZONE=Etc/GMT+12 scripts/dev/it-oracle.sh e2e` on the OCI host, run before 21:00 KST (the browser's date then differs from Korea's), fails at the history step on the base; the smoke test records the history request's URL (`page.on("request")`) and prints its `to_date`, one day behind Korea's date. The bank's events do not keep query strings, so the browser side is the evidence. Both outputs are kept as evidence for the pull request.
 2. **Fix** `ids.ts` and its tests.
-   - Proof: `TZ=UTC`, `TZ=Asia/Seoul` and `TZ=America/Los_Angeles` runs of the mobile unit tests pass; `python3 scripts/repo.py verify --change client-kst-dates --group web`.
-3. **Drive again.** `E2E_TIMEZONE=Etc/GMT+12 scripts/dev/it-oracle.sh e2e` passes, and so does the default (`Asia/Seoul`). The `TZ` line in `it-oracle.sh` is removed.
+   - Proof: the mobile unit tests pass, including the three-zone cases; `python3 scripts/repo.py verify --change client-kst-dates --group web`.
+3. **Drive again.** The `TZ` line in `it-oracle.sh` is removed, so the default `e2e` browser runs in UTC, not in Korean time. `E2E_TIMEZONE=Etc/GMT+12 scripts/dev/it-oracle.sh e2e` passes and prints a `to_date` equal to Korea's date, and so does the default run.
    - Proof: both runs, then `python3 scripts/repo.py verify --change client-kst-dates --full`.
 
 ## Tests and proof
