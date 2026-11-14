@@ -37,6 +37,8 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(11, "0011_performance"),
     migration!(12, "0012_token_subject"),
     migration!(13, "0013_close_indexes"),
+    migration!(14, "0014_request_attempts"),
+    migration!(15, "0015_reused_request_id"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

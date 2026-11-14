@@ -7,7 +7,7 @@ use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -115,6 +115,7 @@ async fn request(
                 event = event.payload(json!({"reason": "unknown"}));
             }
             outbox::record(s, &event)?;
+            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
             s.commit()
         })
         .await
@@ -231,6 +232,17 @@ async fn confirm(
                 event = event.customer(no);
             }
             outbox::record(s, &event)?;
+            outbox::complete(
+                s,
+                &c,
+                &event,
+                if success { 200 } else { 401 },
+                if success {
+                    codes::SUCCESS
+                } else {
+                    RESET_REJECTED
+                },
+            )?;
             s.commit()?;
             Ok(success)
         })
@@ -251,7 +263,7 @@ async fn sms(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Path(phone): Path<String>,
+    crate::shared::api::Path(phone): crate::shared::api::Path<String>,
 ) -> Result<Response, ApiError> {
     let key = phone.clone();
     let found: Option<(String, DateTime<FixedOffset>)> = state

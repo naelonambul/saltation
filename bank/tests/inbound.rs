@@ -326,12 +326,22 @@ async fn inbound_credentials_and_deposits() {
     assert_eq!(core(body), core(replay.clone()));
     assert_eq!(snapshot(&api, &closed.account).await, before);
     let request_id = replay["request_id"].as_str().unwrap().to_owned();
-    // Replays emit no additional completed event.
+    // The replay request receives its own fallback completion event.
     let events: Vec<String> = api
         .state
         .db
         .run(move |s| s.query_all(&EVENT, &[&request_id]))
         .await
         .unwrap();
-    assert!(events.is_empty());
+    assert_eq!(events.len(), 1);
+    let event: Value = serde_json::from_str(&events[0]).unwrap();
+    assert_eq!(event["outcome"], "rejected");
+    assert_eq!(event["rsp_code"], replay["rsp_code"]);
+    assert_eq!(event["bank_rsp_code"], "403");
+    assert_eq!(event["channel"], "EXTERNAL");
+    assert_eq!(event["listener"], "generator");
+    assert_eq!(event["payload"]["endpoint"], ENDPOINT);
+    assert_eq!(event["payload"]["method"], "POST");
+    assert_eq!(event["payload"]["http_status"], 422);
+    assert!(event["payload"]["duration_ms"].as_u64().is_some());
 }

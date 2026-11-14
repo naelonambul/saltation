@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "request-outcomes",
+  "kind": "implementation",
+  "title": "Record every request's outcome (F-19, F-35)",
+  "base": {
+    "ref": "main",
+    "commit": "0d5703e1198355d67e65ac3f7106e309dfbfcaf2"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/**",
+    "contracts/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/dev-host.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:710b3e0d3a26402b59519fd3ae08116cab1e168f8c1689b9ff12471a065119f4",
+      "by": "naelonambul",
+      "at": "2026-11-13T09:33:01Z",
+      "write_scope_sha256": "sha256:185870c47c998e81e7e9da7cd16f3ac37163fdacdb8c73b6abe9f2c1b5b37ef1",
+      "note": "Owner in session: \uc2b9\uc778 (request-outcomes revised plan sha256:710b3e0d)"
+    }
+  ]
+}

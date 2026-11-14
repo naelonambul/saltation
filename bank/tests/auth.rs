@@ -96,7 +96,10 @@ async fn login_lockout_logout_and_events() {
     let token = body["access_token"].as_str().expect("token").to_owned();
     assert_eq!(body["scope"], "login inquiry transfer");
     assert_eq!(body["user_seq_no"].as_str().map(str::len), Some(10));
-    assert_eq!(events(&api, &r).await, "login.succeeded,device.new");
+    assert_eq!(
+        events(&api, &r).await,
+        "login.succeeded,device.new,request.completed"
+    );
     assert_eq!(attempt(&api, &r).await, ("SUCCESS".into(), "Y".into()));
 
     // Same device again: no device.new.
@@ -111,7 +114,7 @@ async fn login_lockout_logout_and_events() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(events(&api, &r).await, "login.succeeded");
+    assert_eq!(events(&api, &r).await, "login.succeeded,request.completed");
 
     // Logout revokes the token.
     let r = new_id();
@@ -125,7 +128,7 @@ async fn login_lockout_logout_and_events() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(events(&api, &r).await, "logout");
+    assert_eq!(events(&api, &r).await, "logout,request.completed");
     let (status, body) = call(
         &api.generator,
         "POST",
@@ -158,7 +161,7 @@ async fn login_lockout_logout_and_events() {
         attempt(&api, &r).await,
         ("UNKNOWN_PHONE".into(), "N".into())
     );
-    assert_eq!(events(&api, &r).await, "login.failed");
+    assert_eq!(events(&api, &r).await, "login.failed,request.completed");
 
     // Five wrong passwords lock the credential; the correct password is then refused.
     for i in 1..=5 {
@@ -174,7 +177,7 @@ async fn login_lockout_logout_and_events() {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(attempt(&api, &r).await.0, "WRONG_PASSWORD");
-        assert_eq!(events(&api, &r).await, "login.failed");
+        assert_eq!(events(&api, &r).await, "login.failed,request.completed");
         if i == 5 {
             assert!(
                 body["rsp_message"].as_str().unwrap_or("").contains("잠겼"),
@@ -194,5 +197,5 @@ async fn login_lockout_logout_and_events() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(attempt(&api, &r).await.0, "LOCKED");
-    assert_eq!(events(&api, &r).await, "login.failed");
+    assert_eq!(events(&api, &r).await, "login.failed,request.completed");
 }

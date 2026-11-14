@@ -10,3 +10,5 @@ pub mod limits;
 pub mod outbox;
 pub mod rollover;
 pub mod telemetry;
+
+pub mod outcome;

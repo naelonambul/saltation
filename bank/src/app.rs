@@ -39,6 +39,21 @@ fn public_routes() -> Router<AppState> {
 
 fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) -> Router {
     router
+        .fallback(
+            |ctx: context::RequestContext, uri: axum::http::Uri| async move {
+                fallback_error(ctx, uri, axum::http::StatusCode::NOT_FOUND, "A0003")
+            },
+        )
+        .method_not_allowed_fallback(
+            |ctx: context::RequestContext, uri: axum::http::Uri| async move {
+                fallback_error(
+                    ctx,
+                    uri,
+                    axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                    "A0002",
+                )
+            },
+        )
         .layer(from_fn_with_state(state.clone(), operation_routes))
         .layer(from_fn(move |req, next| {
             telemetry::request_log(listener, req, next)
@@ -47,6 +62,29 @@ fn with_layers(router: Router<AppState>, listener: Listener, state: AppState) ->
             context::attach(listener, req, next)
         }))
         .with_state(state)
+}
+
+fn fallback_error(
+    ctx: context::RequestContext,
+    uri: axum::http::Uri,
+    status: axum::http::StatusCode,
+    code: &'static str,
+) -> Response {
+    use axum::response::IntoResponse;
+    if matches!(uri.path(), "/healthz" | "/metrics") || uri.path().starts_with("/internal/") {
+        return status.into_response();
+    }
+    crate::shared::api::ApiError::new(
+        &ctx,
+        status,
+        code,
+        if code == "A0003" {
+            "대상 없음"
+        } else {
+            "요청 항목 오류"
+        },
+    )
+    .into_response()
 }
 
 /// CORS for the public listener (spec: Runtime topology): only the SPA
