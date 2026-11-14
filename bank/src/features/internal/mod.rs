@@ -560,7 +560,8 @@ async fn seed_atm_terminals(
                 .strip_prefix("KR-")
                 .filter(|s| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|s| s.parse::<u8>().ok());
-            !(1..=20).contains(&t.terminal_id.chars().count())
+            !(1..=20).contains(&t.terminal_id.len())
+                || !t.terminal_id.bytes().all(|b| (0x21..=0x7e).contains(&b))
                 || !region.is_some_and(|r| (11..=50).contains(&r))
                 || !(1..=60).contains(&t.location.chars().count())
                 || !coordinate(&t.latitude, 33_000_000, 38_700_000)

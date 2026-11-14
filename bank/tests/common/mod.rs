@@ -257,6 +257,7 @@ pub async fn form_call(router: &Router, path: &str, body: String) -> (StatusCode
 pub mod deposits;
 
 pub const TEST_ATM_PIN: &str = "7391";
+pub const WRONG_ATM_PIN: &str = "8462";
 pub type Logs = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
 static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
 static DAILY_LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
@@ -337,7 +338,13 @@ pub fn find_pin(haystack: &Value, pin: &str) -> Option<String> {
         }
         Value::Number(n) => find_pin(&Value::String(n.to_string()), pin),
         Value::Array(a) => a.iter().find_map(|v| find_pin(v, pin)),
-        Value::Object(o) => o.values().find_map(|v| find_pin(v, pin)),
+        Value::Object(o) => o.iter().find_map(|(key, value)| {
+            if key == "pin" || key == "atm_pin" {
+                Some(key.clone())
+            } else {
+                find_pin(value, pin)
+            }
+        }),
         _ => None,
     }
 }

@@ -38,3 +38,5 @@ CREATE UNIQUE INDEX atm_session_terminal_open_uk ON atm_session (
 )
 /
 CREATE INDEX atm_session_account_ix ON atm_session (account_no)
+/
+CREATE INDEX atm_session_open_expiry_ix ON atm_session (CASE WHEN ended_at IS NULL THEN expires_at END)

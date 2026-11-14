@@ -1192,7 +1192,10 @@ async fn atm_assert_expired(
         atm_at(&row["expires_at"])
     );
     assert_eq!(event["payload"]["reason"], "expired");
-    assert_eq!(event["channel"], "ATM");
+    assert_eq!(
+        event["channel"],
+        if request.is_none() { "SYSTEM" } else { "ATM" }
+    );
     assert_eq!(event["payload"]["terminal_id"], terminal);
     assert_eq!(event["payload"]["region"], "KR-11");
     assert_eq!(event["payload"]["latitude"], "37.566500");
@@ -1273,7 +1276,12 @@ async fn atm_sessions_in_business_time(api: &Api) {
     let event = atm_assert_expired(api, t, 1, Some(&replacement)).await;
     assert_eq!(event["payload"]["start_request_id"], first_request);
 
-    for pin in ["0000", "0000", "0000", common::TEST_ATM_PIN] {
+    for pin in [
+        common::WRONG_ATM_PIN,
+        common::WRONG_ATM_PIN,
+        common::WRONG_ATM_PIN,
+        common::TEST_ATM_PIN,
+    ] {
         let (status, body) = atm_start(api, t, &customer.account, pin, &new_id()).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
@@ -1291,7 +1299,8 @@ async fn atm_sessions_in_business_time(api: &Api) {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["bank_rsp_code"], "409");
     atm_advance(api, 90).await;
-    let (status, body) = atm_start(api, t, &customer.account, "0000", &new_id()).await;
+    let (status, body) =
+        atm_start(api, t, &customer.account, common::WRONG_ATM_PIN, &new_id()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["bank_rsp_code"], "410");
     let account = customer.account.clone();
@@ -1302,6 +1311,35 @@ async fn atm_sessions_in_business_time(api: &Api) {
         .await
         .unwrap();
     assert_eq!(credential, (1, None));
+    assert_eq!(
+        atm_start(api, t, &customer.account, common::TEST_ATM_PIN, &new_id())
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let account = customer.account.clone();
+    let credential: (i64, Option<String>) = api
+        .state
+        .db
+        .run(move |s| s.query_row(&ATM_CREDENTIAL, &[&account]))
+        .await
+        .unwrap();
+    assert_eq!(credential, (0, None));
+    for _ in 0..2 {
+        let (status, body) =
+            atm_start(api, t, &customer.account, common::WRONG_ATM_PIN, &new_id()).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["bank_rsp_code"], "410");
+    }
+    let account = customer.account.clone();
+    let credential: (i64, Option<String>) = api
+        .state
+        .db
+        .run(move |s| s.query_row(&ATM_CREDENTIAL, &[&account]))
+        .await
+        .unwrap();
+    assert_eq!(credential, (2, None));
     assert_eq!(
         atm_start(api, t, &customer.account, common::TEST_ATM_PIN, &new_id())
             .await

@@ -1,5 +1,5 @@
 -- test.backfill_atm_sessions: inspect business-clock session state without secrets.
--- Access path: ATM_SESSION terminal index.
+-- Access path: ATM_SESSION full scan (test helper).
 SELECT JSON_OBJECT('session_id' VALUE session_id,
  'started_at' VALUE TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'),
  'expires_at' VALUE TO_CHAR(expires_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'),

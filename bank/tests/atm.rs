@@ -161,6 +161,8 @@ async fn seeding_terminals_validates_every_field() {
         ("longitude", "132.000001".to_owned()),
         ("location", "x".repeat(61)),
         ("terminal_id", "x".repeat(21)),
+        ("terminal_id", "가1234567890123456789".to_owned()),
+        ("terminal_id", "T 1".to_owned()),
         ("location", String::new()),
         ("terminal_id", String::new()),
         ("latitude", "+37.5".to_owned()),
@@ -177,6 +179,14 @@ async fn seeding_terminals_validates_every_field() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {body}");
         assert!(terminal_rows(&api, &rejected_id).await.is_empty());
         assert!(terminal_rows(&api, &companion).await.is_empty());
+        if field == "terminal_id" {
+            assert_eq!(
+                start_session(&api, &rejected_id, "1234567890", TEST_ATM_PIN, &new_id())
+                    .await
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
     }
     let id = format!("T{}", common::unique_digits(15));
     let (status, body) = seed_terminal(&api, vec![terminal(&id)]).await;
@@ -229,7 +239,11 @@ async fn seeding_pins_validates_and_hashes() {
             .await
             .unwrap()
     );
-    assert!(!auth::verify_secret(hash, "0000".into()).await.unwrap());
+    assert!(
+        !auth::verify_secret(hash, common::WRONG_ATM_PIN.into())
+            .await
+            .unwrap()
+    );
     assert_eq!(failed, 0);
     assert!(locked.is_none());
 }
@@ -274,6 +288,7 @@ async fn seeding_leaks_no_pin() {
         ("outbox", events.as_slice()),
     ] {
         assert_no_pin(what, values, TEST_ATM_PIN);
+        assert_no_pin(what, values, common::WRONG_ATM_PIN);
         for value in values {
             let text = value.to_string();
             assert!(!text.contains(&hash), "{what} contains stored PIN hash");
@@ -294,7 +309,12 @@ async fn secret_checks_catch_a_planted_pin() {
     assert!(find_pin(&json!(lines), TEST_ATM_PIN).is_some());
     let event = json!({"payload": {"x": "7391"}});
     assert!(find_pin(&event, TEST_ATM_PIN).is_some());
-    for values in [vec![json!({"note": "pin 7391 here"})], vec![event]] {
+    for values in [
+        vec![json!({"note": "pin 7391 here"})],
+        vec![event],
+        vec![json!({"nested": [{"pin": "redacted"}]})],
+        vec![json!({"nested": {"atm_pin": null}})],
+    ] {
         assert!(
             std::panic::catch_unwind(|| assert_no_pin("planted", &values, TEST_ATM_PIN)).is_err()
         );
@@ -570,7 +590,7 @@ async fn every_refusal_is_stored() {
         &api,
         &terminal,
         &customer.account,
-        "0000",
+        common::WRONG_ATM_PIN,
         StatusCode::UNPROCESSABLE_ENTITY,
         Some("410"),
         true,
@@ -592,7 +612,14 @@ async fn lock_after_three_wrong_pins() {
         .with_timezone(&bank::shared::clock::kst());
     for i in 0..3 {
         let id = new_id();
-        let (status, body) = start_session(&api, &terminal, &customer.account, "0000", &id).await;
+        let (status, body) = start_session(
+            &api,
+            &terminal,
+            &customer.account,
+            common::WRONG_ATM_PIN,
+            &id,
+        )
+        .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["bank_rsp_code"], "410");
         let events = rows(&api, REQUEST_EVENTS, &id).await;
@@ -609,7 +636,7 @@ async fn lock_after_three_wrong_pins() {
             .format("%Y%m%d000000")
             .to_string()
     );
-    for pin in [TEST_ATM_PIN, "0000"] {
+    for pin in [TEST_ATM_PIN, common::WRONG_ATM_PIN] {
         check_refusal(
             &api,
             &terminal,
@@ -624,18 +651,17 @@ async fn lock_after_three_wrong_pins() {
 }
 async fn concurrent_starts(
     api: &Api,
-    terminal: &str,
-    account: &str,
+    attempts: Vec<(String, String)>,
     pin: &str,
 ) -> Vec<(String, StatusCode, Value)> {
     let mut tasks = tokio::task::JoinSet::new();
-    for _ in 0..8 {
+    for (terminal, account) in attempts {
         let api = Api {
             generator: api.generator.clone(),
             public: api.public.clone(),
             state: api.state.clone(),
         };
-        let (terminal, account, pin) = (terminal.to_owned(), account.to_owned(), pin.to_owned());
+        let pin = pin.to_owned();
         tasks.spawn(async move {
             let id = new_id();
             let (status, body) = start_session(&api, &terminal, &account, &pin, &id).await;
@@ -653,7 +679,16 @@ async fn concurrent_wrong_pins_lock_once() {
     let _guard = TEST_LOCK.lock().await;
     let api = live().await;
     let (terminal, customer) = fixture(&api).await;
-    let results = concurrent_starts(&api, &terminal, &customer.account, "0000").await;
+    let mut attempts = vec![(terminal, customer.account.clone())];
+    for _ in 1..8 {
+        let t = format!("T{}", common::unique_digits(15));
+        assert_eq!(
+            seed_terminal(&api, vec![self::terminal(&t)]).await.0,
+            StatusCode::OK
+        );
+        attempts.push((t, customer.account.clone()));
+    }
+    let results = concurrent_starts(&api, attempts, common::WRONG_ATM_PIN).await;
     for (_, status, _) in &results {
         assert_eq!(*status, StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -687,7 +722,14 @@ async fn concurrent_starts_replace() {
     let _guard = TEST_LOCK.lock().await;
     let api = live().await;
     let (terminal, customer) = fixture(&api).await;
-    let results = concurrent_starts(&api, &terminal, &customer.account, TEST_ATM_PIN).await;
+    let mut attempts = vec![(terminal.clone(), customer.account)];
+    for _ in 1..8 {
+        attempts.push((
+            terminal.clone(),
+            common::customer(&api, 10000).await.account,
+        ));
+    }
+    let results = concurrent_starts(&api, attempts, TEST_ATM_PIN).await;
     for (_, status, body) in results {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
@@ -741,9 +783,15 @@ async fn no_token_or_pin_leaks() {
         .1;
     let balance = inquiry(&api, &token, &new_id()).await.1;
     let ended = finish_session(&api, &token, &new_id()).await.1;
-    let wrong = start_session(&api, &terminal, &customer.account, "0000", &new_id())
-        .await
-        .1;
+    let wrong = start_session(
+        &api,
+        &terminal,
+        &customer.account,
+        common::WRONG_ATM_PIN,
+        &new_id(),
+    )
+    .await
+    .1;
     assert_eq!(
         started.as_object_mut().unwrap().remove("atm_session_token"),
         Some(json!(token))
@@ -767,6 +815,7 @@ async fn no_token_or_pin_leaks() {
         ("outbox", events.as_slice()),
     ] {
         assert_no_pin(what, values, TEST_ATM_PIN);
+        assert_no_pin(what, values, common::WRONG_ATM_PIN);
         for value in values {
             let text = value.to_string();
             assert!(!text.contains(&token), "{what} contains session token");
@@ -1188,7 +1237,7 @@ async fn locked_account_ends_other_sessions() {
         StatusCode::OK
     );
     for _ in 0..3 {
-        let (s, b) = start_session(&api, &t2, &c.account, "0000", &new_id()).await;
+        let (s, b) = start_session(&api, &t2, &c.account, common::WRONG_ATM_PIN, &new_id()).await;
         assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(b["bank_rsp_code"], "410");
     }
@@ -1301,5 +1350,125 @@ async fn expired_session_cash_is_recorded() {
         .await
         .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn ended_session_releases_locks() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let other = format!("T{}", common::unique_digits(15));
+    assert_eq!(
+        seed_terminal(&api, vec![self::terminal(&other)]).await.0,
+        StatusCode::OK
+    );
+    let other_token = open_for(&api, &other, &customer.account).await;
+    let token = open_for(&api, &terminal, &customer.account).await;
+    let limit = std::time::Duration::from_secs(10);
+    assert_eq!(
+        tokio::time::timeout(limit, finish_session(&api, &token, &new_id()))
+            .await
+            .unwrap()
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        tokio::time::timeout(limit, finish_session(&api, &token, &new_id()))
+            .await
+            .unwrap()
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            limit,
+            start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id())
+        )
+        .await
+        .unwrap()
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            limit,
+            cash(
+                &api,
+                &other_token,
+                "withdraw",
+                "released-lock",
+                1000,
+                &new_id()
+            )
+        )
+        .await
+        .unwrap()
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn open_session_lookup_serializes_end() {
+    let _guard = TEST_LOCK.lock().await;
+    let api = live().await;
+    let (terminal, customer) = fixture(&api).await;
+    let token = open_for(&api, &terminal, &customer.account).await;
+    const OPEN: SqlStmt = sql_stmt!(
+        "test.atm_open_session",
+        "../src/features/atm/sql/open_session.sql"
+    );
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let db = api.state.db.clone();
+    let key = terminal.clone();
+    let lookup = tokio::spawn(async move {
+        db.run(move |s| {
+            let row: (
+                String,
+                String,
+                chrono::DateTime<chrono::FixedOffset>,
+                Option<chrono::DateTime<chrono::FixedOffset>>,
+                String,
+                String,
+            ) = s.query_row(&OPEN, &[&key])?;
+            assert!(row.3.is_none());
+            locked_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            s.commit()
+        })
+        .await
+        .unwrap();
+    });
+    locked_rx.await.unwrap();
+    let end_api = Api {
+        generator: api.generator.clone(),
+        public: api.public.clone(),
+        state: api.state.clone(),
+    };
+    let mut ending = tokio::spawn(async move { finish_session(&end_api, &token, &new_id()).await });
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(250), &mut ending).await;
+    release_tx.send(()).unwrap();
+    lookup.await.unwrap();
+    assert!(
+        waited.is_err(),
+        "end must wait for the open-session lookup lock"
+    );
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), ending)
+            .await
+            .unwrap()
+            .unwrap()
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id())
+            .await
+            .0,
+        StatusCode::OK
     );
 }

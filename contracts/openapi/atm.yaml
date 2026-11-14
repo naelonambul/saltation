@@ -7,7 +7,7 @@ info:
     of the opaque session token is stored. Every response carries the common
     envelope and an X-Request-Id header. Numeric amounts are JSON strings.
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:8081
 components:
   securitySchemes:
     bearer:
@@ -66,7 +66,7 @@ components:
       type: object
       required: [terminal_id, account_no, pin]
       properties:
-        terminal_id: { type: string, minLength: 1, maxLength: 20 }
+        terminal_id: { type: string, pattern: '^[\x21-\x7E]{1,20}$' }
         account_no: { type: string, pattern: "^[0-9]{1,16}$" }
         pin: { type: string, pattern: "^[0-9]{4}$" }
     SessionResponse:

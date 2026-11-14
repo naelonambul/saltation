@@ -150,7 +150,7 @@ components:
             type: object
             required: [terminal_id, region, location, latitude, longitude]
             properties:
-              terminal_id: { type: string, minLength: 1, maxLength: 20 }
+              terminal_id: { type: string, pattern: '^[\x21-\x7E]{1,20}$' }
               region: { type: string, pattern: "^KR-(1[1-9]|[2-4][0-9]|50)$" }
               location: { type: string, maxLength: 60 }
               latitude: { type: string, pattern: '^(3[3-7](\.[0-9]{1,6})?|38(\.([0-6][0-9]{0,5}|70{0,5}))?)$', description: Decimal degrees from 33.0 through 38.7 inclusive. }

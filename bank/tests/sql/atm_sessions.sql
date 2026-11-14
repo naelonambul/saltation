@@ -1,5 +1,5 @@
 -- test.atm_sessions: inspect sessions at a terminal.
--- Access path: ATM_SESSION terminal index.
+-- Access path: ATM_SESSION full scan (test helper).
 SELECT JSON_OBJECT('session_id' VALUE session_id, 'account_no' VALUE account_no,
  'token_hash' VALUE token_hash, 'started_at' VALUE TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'),
  'expires_at' VALUE TO_CHAR(expires_at, 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'),

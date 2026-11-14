@@ -107,6 +107,17 @@ fn end_row(
     if s.execute(&END_SESSION, &[&ended, &reason, &row.0])? != 1 {
         return Err(DbError::Busy);
     }
+    record_end(s, ctx, now, terminal, row, reason, ended)
+}
+fn record_end(
+    s: &mut Session,
+    ctx: &RequestContext,
+    now: At,
+    terminal: &Terminal,
+    row: &SessionRow,
+    reason: &'static str,
+    ended: At,
+) -> Result<(), DbError> {
     let mut e = event(ctx, now, terminal, &row.1, "atm.session_ended").session(&row.0);
     e.payload["reason"] = reason.into();
     e.payload["session_id"] = row.0.clone().into();
@@ -161,7 +172,8 @@ async fn start(
     api::Json(req): api::Json<Start>,
 ) -> Result<Response, ApiError> {
     if req.terminal_id.is_empty()
-        || req.terminal_id.chars().count() > 20
+        || req.terminal_id.len() > 20
+        || !req.terminal_id.bytes().all(|b| (0x21..=0x7e).contains(&b))
         || req.account_no.is_empty()
         || req.account_no.len() > 16
         || !req.account_no.bytes().all(|b| b.is_ascii_digit())
@@ -301,7 +313,9 @@ async fn start(
                 } else {
                     ("replaced", now)
                 };
-                end_row(s, &context, now, &terminal, &row, reason, at)?;
+                if s.execute(&END_SESSION, &[&at, &reason, &row.0])? == 1 {
+                    record_end(s, &context, now, &terminal, &row, reason, at)?;
+                }
             }
             s.execute(
                 &INSERT_SESSION,
@@ -439,7 +453,7 @@ impl crate::shared::rollover::RolloverJob for AtmSessionExpiryJob {
                 db.run(move |s| {
                     if s.execute(&EXPIRE, &[&id])? == 1 {
                         let terminal: Terminal = s.query_row(&TERMINAL, &[&terminal_id])?;
-                        let mut e = Event::system("atm.session_ended", at, "completed")
+                        let e = Event::system("atm.session_ended", at, "completed")
                             .account(&account)
                             .session(&id)
                             .payload(json!({
@@ -450,7 +464,6 @@ impl crate::shared::rollover::RolloverJob for AtmSessionExpiryJob {
                                 "start_request_id": start_request,
                                 "ended_at": expires.to_rfc3339()
                             }));
-                        e.channel = "ATM";
                         outbox::record(s, &e)?;
                     }
                     s.commit()
