@@ -1,9 +1,21 @@
 //! The bank's supported bind and owned row types. Driver conversions stay here.
+use chrono::Datelike;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
-use oracledb::{DbType, Error, OracleTimestamp, Row, ToDbValue};
+use oracledb::{DbType, Error, OracleNumber, OracleTimestamp, Row, ToDbValue};
 
 fn kst() -> FixedOffset {
     FixedOffset::east_opt(9 * 3600).expect("valid offset")
+}
+
+/// The driver narrows the year to `i16` unchecked; refuse what Oracle cannot
+/// store instead of letting it wrap into another valid date.
+fn oracle_timestamp(value: NaiveDateTime) -> OracleTimestamp {
+    assert!(
+        (-4712..=9999).contains(&value.year()),
+        "year {} is outside Oracle's date range",
+        value.year()
+    );
+    OracleTimestamp::from(value)
 }
 
 /// A value supported by the bank's SQL adapter. SQL BOOLEAN is deliberately absent.
@@ -29,14 +41,31 @@ binds! {
     i64 => oracledb::DB_TYPE_NUMBER,
     u32 => oracledb::DB_TYPE_NUMBER,
     u64 => oracledb::DB_TYPE_NUMBER,
-    f64 => oracledb::DB_TYPE_BINARY_DOUBLE,
     String => oracledb::DB_TYPE_VARCHAR,
     &str => oracledb::DB_TYPE_VARCHAR,
 }
 
+/// Binds as NUMBER, as the old driver did; BINARY_DOUBLE would change the
+/// precision of SQL arithmetic. Non-finite values have no NUMBER form and are
+/// sent as BINARY_DOUBLE, which Oracle rejects for a NUMBER target.
+impl ToSql for f64 {
+    fn bind_value(&self) -> Box<dyn ToDbValue + '_> {
+        match self
+            .is_finite()
+            .then(|| self.to_string().parse::<OracleNumber>())
+        {
+            Some(Ok(number)) => Box::new(number),
+            _ => Box::new(*self),
+        }
+    }
+    fn null_type() -> &'static DbType {
+        oracledb::DB_TYPE_NUMBER
+    }
+}
+
 impl ToSql for NaiveDate {
     fn bind_value(&self) -> Box<dyn ToDbValue + '_> {
-        Box::new(OracleTimestamp::from(
+        Box::new(oracle_timestamp(
             self.and_hms_opt(0, 0, 0).expect("midnight"),
         ))
     }
@@ -47,7 +76,7 @@ impl ToSql for NaiveDate {
 
 impl ToSql for NaiveDateTime {
     fn bind_value(&self) -> Box<dyn ToDbValue + '_> {
-        Box::new(OracleTimestamp::from(*self))
+        Box::new(oracle_timestamp(*self))
     }
     fn null_type() -> &'static DbType {
         oracledb::DB_TYPE_TIMESTAMP
@@ -58,9 +87,7 @@ impl ToSql for DateTime<FixedOffset> {
     fn bind_value(&self) -> Box<dyn ToDbValue + '_> {
         // A non-UTC OracleTimestamp binds TIMESTAMP, letting the checked KST
         // session supply the stored offset when Oracle converts it to TSTZ.
-        Box::new(OracleTimestamp::from(
-            self.with_timezone(&kst()).naive_local(),
-        ))
+        Box::new(oracle_timestamp(self.with_timezone(&kst()).naive_local()))
     }
     fn null_type() -> &'static DbType {
         oracledb::DB_TYPE_TIMESTAMP
@@ -111,27 +138,37 @@ macro_rules! columns {
 }
 columns!(i32, i64, u32, u64, f64, String);
 
+/// Wall time of a column: TSTZ values arrive normalized to UTC and are shown in
+/// KST, the offset the bank writes; plain DATE and TIMESTAMP keep their wall time.
+fn wall(ts: OracleTimestamp) -> Result<NaiveDateTime, Error> {
+    let value = NaiveDateTime::try_from(ts)?;
+    Ok(if ts.is_utc() {
+        value.and_utc().with_timezone(&kst()).naive_local()
+    } else {
+        value
+    })
+}
 impl ColumnValue for NaiveDate {
     fn read(row: &Row, index: usize) -> Result<Self, Error> {
-        Ok(NaiveDateTime::try_from(row.get::<OracleTimestamp>(index)?)?.date())
+        Ok(wall(row.get::<OracleTimestamp>(index)?)?.date())
     }
 }
 impl ColumnValue for Option<NaiveDate> {
     fn read(row: &Row, index: usize) -> Result<Self, Error> {
         row.get::<Option<OracleTimestamp>>(index)?
-            .map(|ts| Ok(NaiveDateTime::try_from(ts)?.date()))
+            .map(|ts| Ok(wall(ts)?.date()))
             .transpose()
     }
 }
 impl ColumnValue for NaiveDateTime {
     fn read(row: &Row, index: usize) -> Result<Self, Error> {
-        NaiveDateTime::try_from(row.get::<OracleTimestamp>(index)?)
+        wall(row.get::<OracleTimestamp>(index)?)
     }
 }
 impl ColumnValue for Option<NaiveDateTime> {
     fn read(row: &Row, index: usize) -> Result<Self, Error> {
         row.get::<Option<OracleTimestamp>>(index)?
-            .map(NaiveDateTime::try_from)
+            .map(wall)
             .transpose()
     }
 }
