@@ -94,8 +94,11 @@ The driver's `Pool` is not used: its `acquire` cannot time out, its single manag
    Proof: `scripts/dev/ci-rust.sh clippy` and `ci-rust.sh test` exit 0 (including the `pool.rs` unit tests); `it-oracle.sh driver-parity` and `it-oracle.sh db-pool` pass on the new driver.
 4. **Image without Instant Client.** Remove `oracle-instantclient-*` and `libaio` from `bank/Dockerfile`, keep `gcc` only if the build still needs it. Record both images' sizes.
    Proof: `scripts/dev/it-oracle.sh all` passes, then `it-oracle.sh outbox-outage` passes (it is not part of `all`); `ldd` on the bank binary in the runtime image lists no Oracle library.
-5. **Benchmark on the new driver.** Run `driver-bench` exactly as in step 2.
+5. **Benchmark on the new driver.** Run `driver-bench` exactly as in step 2. Then run the paced comparison below on both drivers.
    Proof: JSON saved under `.evidence/`; the PR shows both runs side by side.
+   **Paced comparison (added 2026-11-16).** The step 2 windows are closed-loop: each worker sends its next request as soon as the last one answers, so a faster driver offers more load and its tail latency is measured at a higher throughput than the baseline's. On the OCI host the new driver's closed-loop p95 was 30–78% higher at concurrency ≥ 8 while its TPS was higher, but at an equal fixed rate (one run each) it was lower: lookup:8 at 400/s p95 10.0 → 8.0 ms, at 550/s 616 → 11.5 ms; transfer:32 at 200/s 12.2 → 10.6 ms, at 280/s 153 → 51.6 ms. Oracle counters over the measured window were identical per request on both drivers (lookup: 2 commits, 4 rollbacks, 13 round trips, 7 executions; transfer: 2 commits, 3 rollbacks, 22 round trips), and `log file sync` averaged lower on the new driver. So latency is compared at a fixed rate:
+   - `driver-bench` gains two opt-in settings that change nothing when unset: `BENCH_RATE=<requests/s>` (open-loop arrivals at that rate with at most the entry's concurrency in flight; latency measured from each request's scheduled time; extra JSON fields `rate` and `late`, requests started more than 10 ms late) and `BENCH_ORA_SNAP=1` (Oracle `v$sysstat`, `v$session_event`, `v$sesstat` and `log file sync` histogram snapshots taken by the host, as SYSDBA, right before and after the measured window and saved beside `bench.jsonl`).
+   - For lookup:8, balance:8, history:8, transfer:8, transfer:32 and transfer:64, the rate is 70% of the baseline's median closed-loop TPS for that entry, rounded down to a multiple of 10. Three paced runs per entry on each driver, with `BENCH_ORA_SNAP=1`.
 6. **Full verification.** `python3 scripts/repo.py verify --change oracledb-driver --full` on the OCI host; then `it-oracle.sh migrations` and `it-oracle.sh e2e` pass.
 
 ## Tests and proof
@@ -107,8 +110,10 @@ The driver's `Pool` is not used: its `acquire` cannot time out, its single manag
 
 **Stop rule.** For each workload and concurrency, compare the median of the three new runs with the median of the three baseline runs. Stop and report to the owner, with the numbers, instead of opening the PR if any of:
 - a parity or integration test fails on the new driver and the fix needs anything beyond the adapter, the Dockerfile or the scripts in scope;
-- median p95 or p99 is more than 20% higher, or median TPS more than 20% lower;
-- any non-business error (`Busy` counted separately), or a median `Busy` rate above 0.1% of requests or more than 0.1 percentage points above the baseline's.
+- median TPS of the closed-loop runs more than 20% lower;
+- median p95 or p99 more than 20% higher: in the paced runs for the six entries that have them (step 5), in the closed-loop runs for transfer:1 and outbox:1. Closed-loop p95/p99 for the six paced entries are reported in the PR but do not decide;
+- any non-business error (`Busy` counted separately), or a median `Busy` rate above 0.1% of requests or more than 0.1 percentage points above the baseline's. For duplicate:200, where 200 requests contend for one row by design and the baseline itself returns `Busy` for about 15% of them, the decisive checks are that money moves once and there are no non-business errors; its `Busy` rates are reported side by side as inconclusive, not as a pass;
+- a median paced run with more than 5% of requests `late`, on either driver: the rate is too close to that driver's capacity, so that comparison is inconclusive and is rerun once at a rate 10 percentage points lower for both drivers.
 If the baseline's own three runs differ by more than 20% in p95 or TPS for a workload, that comparison is inconclusive: rerun both drivers for it once; if still inconclusive, report it as such in the PR rather than as a pass.
 
 ## Risks and mitigations

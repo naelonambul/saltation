@@ -30,10 +30,11 @@
     },
     {
       "artifact": "plan.md",
-      "sha256": "sha256:a7c7ef5d9387ad34f3409ccda94ab932ddb0691ec662dd5dd97dcca578936c04",
+      "sha256": "sha256:a6b0dcc47c5fa0607ecd38e11b878b327bc36ac8023bd673d91cbfea9b242ff8",
       "by": "naelonambul",
-      "at": "2026-11-15T10:04:44Z",
-      "write_scope_sha256": "sha256:0354e617f569bd255b8b0a131a5623149ff298b156aee59f2061ffcb6225db8c"
+      "at": "2026-11-15T21:17:55Z",
+      "write_scope_sha256": "sha256:0354e617f569bd255b8b0a131a5623149ff298b156aee59f2061ffcb6225db8c",
+      "note": "Owner approved the revised stop rule (paced comparison) in chat: \uc2b9\uc778"
     }
   ]
 }
