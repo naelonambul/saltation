@@ -60,6 +60,19 @@ pub async fn call(
     bearer: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    let (status, body, _) = call_with_capture(router, method, path, request_id, bearer, body).await;
+    (status, body)
+}
+
+/// Retains non-JSON response text for secrecy scanning alongside the usual JSON result.
+pub async fn call_with_capture(
+    router: &Router,
+    method: &str,
+    path: &str,
+    request_id: &str,
+    bearer: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value, Value) {
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -77,10 +90,15 @@ pub async fn call(
     let res = router.clone().oneshot(req).await.expect("response");
     let status = res.status();
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    let parsed = serde_json::from_slice(&bytes);
+    let scanned = parsed.as_ref().cloned().unwrap_or_else(|_| {
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    });
+    (status, parsed.unwrap_or(Value::Null), scanned)
 }
 
 /// Validates a JSON value against a schema in `contracts/openapi/public.yaml`.

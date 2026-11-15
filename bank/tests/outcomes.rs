@@ -133,9 +133,10 @@ async fn call(
     if let Some(body) = &body {
         collect_secrets(body);
     }
-    let answer = common::call(router, method, path, id, token, body).await;
-    capture_response(method, path, answer.0, &answer.1);
-    answer
+    let (status, body, scanned) =
+        common::call_with_capture(router, method, path, id, token, body).await;
+    capture_response(method, path, status, &scanned);
+    (status, body)
 }
 fn capture_response(method: &str, path: &str, status: StatusCode, body: &Value) {
     let mut scanned = body.clone();
@@ -899,6 +900,25 @@ impl Coverage<'_> {
         response
     }
 }
+async fn seed_counterparty(api: &Api, account: &str) {
+    let request = serde_json::json!({"counterparties": [{"counterparty_type": "INDIVIDUAL", "institution_code": "901",
+        "account_no": account, "name": "외부수취인"}]});
+    for expected in [1, 0] {
+        let (status, body) = call(
+            &api.generator,
+            "POST",
+            "/internal/v1/seed/counterparties",
+            &new_id(),
+            None,
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_contract("CreatedResponse", &body);
+        assert_eq!(body["created"], expected);
+    }
+}
+
 async fn raw(
     router: &axum::Router,
     method: &str,
@@ -937,8 +957,16 @@ async fn raw(
         .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    capture_response(method, path, status, &body);
+    let parsed = serde_json::from_slice(&bytes);
+    let scanned = parsed.as_ref().cloned().unwrap_or_else(|_| {
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    });
+    capture_response(method, path, status, &scanned);
+    let body = parsed.unwrap_or(Value::Null);
     (status, body)
 }
 
