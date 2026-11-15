@@ -202,7 +202,18 @@ fn check_log_line(line: &str, pin: Option<&str>) -> Result<(), String> {
     if line.contains("Bearer ") {
         return Err("Bearer token in application log".into());
     }
-    if pin.is_some_and(|pin| common::find_pin(&value, pin).is_some()) {
+    // The logger's own timestamp holds the year and date: a PIN such as 2026
+    // would match it on every line, so it is left out of the PIN search.
+    let mut scanned = value.clone();
+    if let Some(fields) = scanned.as_object_mut()
+        && fields
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| chrono::DateTime::parse_from_rfc3339(t).is_ok())
+    {
+        fields.remove("timestamp");
+    }
+    if pin.is_some_and(|pin| common::find_pin(&scanned, pin).is_some()) {
         return Err("PIN in application log".into());
     }
     Ok(())
@@ -216,6 +227,12 @@ fn log_line_rejects_pin_and_bearer_but_allows_ulid() {
     assert!(check_log_line(r#"{"message":"Bearer x"}"#, None).is_err());
     assert!(check_log_line(r#"{"atm_pin":"x"}"#, None).is_err());
     assert!(check_log_line(r#"{"request_id":"01ARZ3NDEKTSV4RRFFQ69G7391"}"#, pin).is_ok());
+    let year = Some("2026");
+    let line = r#"{"timestamp":"2026-11-15T04:11:36.699874Z","target":"request","status":200}"#;
+    assert!(check_log_line(line, year).is_ok());
+    let leak = r#"{"timestamp":"2026-11-15T04:11:36.699874Z","fields":{"message":"pin 2026"}}"#;
+    assert!(check_log_line(leak, year).is_err());
+    assert!(check_log_line(r#"{"timestamp":"pin 2026"}"#, year).is_err());
 }
 
 #[tokio::test]
@@ -354,7 +371,7 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
     let pin = roster.get_str("atm_pin").expect("smoke roster atm_pin");
 
     let mut lines = 0;
-    let mut found_request = false;
+    let mut seen = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir("/var/log/saltation").expect("bank log directory") {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy();
@@ -364,13 +381,21 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
         let contents = std::fs::read_to_string(path).expect("read bank log");
         for line in contents.lines() {
             lines += 1;
-            let smoke_line = requests
+            let found: Vec<&str> = requests
                 .values()
-                .any(|id| line.contains(id.as_str().unwrap()));
-            check_log_line(line, smoke_line.then_some(pin)).expect("secret-free JSON log line");
-            found_request |= smoke_line;
+                .map(|id| id.as_str().unwrap())
+                .filter(|id| line.contains(id))
+                .collect();
+            check_log_line(line, (!found.is_empty()).then_some(pin))
+                .expect("secret-free JSON log line");
+            seen.extend(found);
         }
     }
     assert!(lines > 0, "bank app*.log files missing or empty");
-    assert!(found_request, "no smoke request in bank logs");
+    // Every request writes one `request` line with its ID (shared::telemetry).
+    assert_eq!(
+        seen.len(),
+        requests.len(),
+        "every smoke request in bank logs"
+    );
 }
