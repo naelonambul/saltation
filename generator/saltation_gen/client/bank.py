@@ -417,7 +417,7 @@ class BankClient:
             request_id,
             ctx=ctx,
             json={"terminal_id": terminal_id, "account_no": account_no, "pin": pin},
-            accept=(200, 400, 404, 422),
+            accept=(200, 400, 404, 422, 503),
         )
 
     async def atm_end_session(self, request_id: str, token: str, ctx: Context) -> tuple[int, dict[str, Any]]:

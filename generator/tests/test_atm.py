@@ -31,7 +31,7 @@ CASES = [
         "POST",
         "/atm/v1/session",
         {"terminal_id": "ATM-11-001", "account_no": "998123", "pin": PIN},
-        (200, 400, 404, 422),
+        (200, 400, 404, 422, 503),
         False,
     ),
     ("atm_end_session", (RID, TOKEN, CTX), "POST", "/atm/v1/session/end", None, (200, 400, 401, 503), True),
