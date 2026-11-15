@@ -24,6 +24,7 @@ const IDENTITY: SqlStmt = sql_stmt!("test.outcome_identity", "sql/outcome_identi
 const ACCOUNT: SqlStmt = sql_stmt!("test.outcome_account", "sql/outcome_account.sql");
 const ROLLBACK: SqlStmt = sql_stmt!("test.outcome_rollback", "sql/outcome_rollback.sql");
 
+static RESPONSES: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 static SECRETS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 fn secret(value: &str) {
     let mut secrets = SECRETS.lock().unwrap();
@@ -65,7 +66,10 @@ fn assert_no_secret_keys(value: &Value) {
     match value {
         Value::Object(fields) => {
             for (key, child) in fields {
-                assert!(!matches!(key.as_str(), "pin" | "atm_pin"), "secret key");
+                assert!(
+                    !matches!(key.as_str(), "pin" | "atm_pin" | "pin_hash"),
+                    "secret key"
+                );
                 assert_no_secret_keys(child);
             }
         }
@@ -130,13 +134,32 @@ async fn call(
         collect_secrets(body);
     }
     let answer = common::call(router, method, path, id, token, body).await;
-    if let Some(token) = answer.1["access_token"].as_str() {
-        secret(token);
-    }
-    if let Some(token) = answer.1["atm_session_token"].as_str() {
-        secret(token);
-    }
+    capture_response(method, path, answer.0, &answer.1);
     answer
+}
+fn capture_response(method: &str, path: &str, status: StatusCode, body: &Value) {
+    let mut scanned = body.clone();
+    for field in ["access_token", "atm_session_token"] {
+        if let Some(token) = body[field].as_str() {
+            secret(token);
+            let issued = status == StatusCode::OK
+                && method == "POST"
+                && match field {
+                    "atm_session_token" => path == "/atm/v1/session",
+                    _ => matches!(path, "/oauth/2.0/token" | "/v2.0/ext/auth/login"),
+                };
+            if issued {
+                scanned.as_object_mut().unwrap().remove(field);
+            }
+        }
+    }
+    let sms_inbox = method == "GET"
+        && path
+            .strip_prefix("/internal/v1/sms/")
+            .is_some_and(|phone| !phone.is_empty() && !phone.contains('/'));
+    if !sms_inbox {
+        RESPONSES.lock().unwrap().push(scanned);
+    }
 }
 async fn customer(api: &Api, opening: i64) -> Customer {
     let n = unique_digits(10);
@@ -318,7 +341,15 @@ async fn scope(api: &Api, token: &str, value: &str) -> String {
         .await
         .unwrap()
 }
-fn assert_attempt(row: &Value, kind: &str, channel: &str, code: &Value, key: Value) {
+fn assert_attempt(
+    row: &Value,
+    kind: &str,
+    channel: &str,
+    code: &Value,
+    key: Value,
+    terminal_id: Option<&str>,
+) {
+    assert_eq!(row["TERMINAL_ID"], json!(terminal_id));
     assert_eq!(row["STATUS"], "REJECTED");
     assert_eq!(row["RSP_CODE"], *code);
     assert_eq!(row["REQUEST_TYPE"], kind);
@@ -725,6 +756,11 @@ impl Coverage<'_> {
                 },
                 &json!("A0007"),
                 key.clone(),
+                if atm {
+                    Some(original[0]["TERMINAL_ID"].as_str().expect("ATM terminal"))
+                } else {
+                    None
+                },
             );
             assert_eq!(counts(self.api).await, (before_count.0 + 1, before_count.1));
             assert_eq!(attempts(self.api, &id).await, original);
@@ -802,6 +838,7 @@ impl Coverage<'_> {
                     },
                     &answer.1["rsp_code"],
                     Value::Null,
+                    None,
                 );
                 let event = assert_completion(self.api, &auth_id, method, template, answer.0).await;
                 assert_eq!(event["payload"]["request_type"], kind);
@@ -900,10 +937,9 @@ async fn raw(
         .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    capture_response(method, path, status, &body);
+    (status, body)
 }
 
 fn contract_operations() -> BTreeSet<(String, String)> {
@@ -2048,9 +2084,18 @@ async fn outcomes() {
     assert_eq!(other.0, StatusCode::OK);
     assert_eq!(other_events.len(), 1);
 
-    for value in common::logs().iter().chain(&coverage.refused_bodies) {
+    for customer in [&a, &b, &atm_customer, &rollback_payee] {
+        crate::secret(&atm_credential(&api, &customer.account).await.0);
+    }
+    let responses = RESPONSES.lock().unwrap().clone();
+    for value in common::logs()
+        .iter()
+        .chain(&coverage.refused_bodies)
+        .chain(responses.iter())
+    {
         assert_no_secret_keys(value);
         let text = value.to_string();
+        assert!(!text.contains("$argon2id$"));
         for secret in SECRETS.lock().unwrap().iter() {
             assert!(
                 !leaks(&text, secret),
@@ -2061,6 +2106,7 @@ async fn outcomes() {
     // T6: inspect the complete OUTBOX, including handler-owned events.
     let rows: Vec<String> = api.state.db.run(|s| s.query_all(&ALL, &[])).await.unwrap();
     for text in rows {
+        assert!(!text.contains("$argon2id$"));
         for secret in SECRETS.lock().unwrap().iter() {
             assert!(!leaks(&text, secret), "secret leaked into OUTBOX");
         }

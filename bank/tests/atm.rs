@@ -968,6 +968,7 @@ async fn rejected_operation(api: &Api, id: &str, terminal: &str, account: &str) 
         .collect();
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0]["payload"]["outcome"], "rejected");
+    assert_eq!(operations[0]["outcome"], "rejected");
     check_location(operations[0], terminal, account, id);
     let completed: Vec<_> = events
         .iter()
@@ -1055,6 +1056,7 @@ async fn withdraw_and_deposit_post_one_row() {
         check_location(&events[0], &t, &c.account, &id);
         assert_eq!(events[0]["payload"]["operation"], op);
         assert_eq!(events[0]["payload"]["outcome"], "approved");
+        assert_eq!(events[0]["outcome"], "approved");
         assert_eq!(events[0]["payload"]["amount"], amt);
         assert_eq!(events[1]["event_type"], "request.completed");
     }
@@ -1730,6 +1732,7 @@ async fn replay_after_lock_is_refused() {
     assert_eq!(events[0]["event_type"], "atm.session_ended");
     assert_eq!(events[1]["event_type"], "atm.operation");
     assert_eq!(events[1]["payload"]["outcome"], "rejected");
+    assert_eq!(events[1]["outcome"], "rejected");
     assert_eq!(events[1]["payload"]["amount"], 100);
     assert_eq!(events[2]["event_type"], "request.completed");
     assert_eq!(events[2]["payload"]["http_status"], 422);
@@ -1775,6 +1778,7 @@ async fn closed_account_is_refused() {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["event_type"], "atm.operation");
         assert_eq!(events[0]["payload"]["outcome"], "rejected");
+        assert_eq!(events[0]["outcome"], "rejected");
         assert_eq!(events[1]["event_type"], "request.completed");
         assert_eq!(events[1]["payload"]["http_status"], 422);
         rejected_operation(&api, &id, &t, &c.account).await;

@@ -443,7 +443,7 @@ pub async fn sequence(
     assert_clean(api, bad_date, logs, metrics).await;
 
     // Each corruption starts from, and returns to, an entirely clean close.
-    for witness in 0..9 {
+    for witness in 0..10 {
         let idle_no = idle.account.clone();
         let sender_no = sender.account.clone();
         let empty_no = empty.account.clone();
@@ -452,16 +452,16 @@ pub async fn sequence(
         let touched_id = match witness {
             1 | 6 => altered_id,
             4 => receiver_id,
-            7 | 8 => atm_id,
+            7..=9 => atm_id,
             _ => empty_id,
         };
         let request_id = withdrawal_request_id.clone();
-        let (saved, inserted_id): (String, Option<i64>) = api
+        let (saved, inserted_ids): (String, Vec<i64>) = api
             .state
             .db
             .run(move |s| {
                 let saved = s.query_row(&BACKUP, &[&touched_id])?;
-                let mut inserted_id = None;
+                let mut inserted_ids = Vec::new();
                 match witness {
                     0 => {
                         assert_eq!(s.execute(&BALANCE, &[&1i64, &idle_no])?, 1);
@@ -476,7 +476,19 @@ pub async fn sequence(
                         assert_eq!(s.execute(&COPY_LEG, &[&atm_id])?, 1);
                         let ids: Vec<i64> = s.query_all(&ATM_LEG, &[&request_id])?;
                         assert_eq!(ids.len(), 2, "withdrawal plus duplicate ledger row");
-                        inserted_id = Some(*ids.iter().find(|&&id| id != atm_id).unwrap());
+                        inserted_ids.push(*ids.iter().find(|&&id| id != atm_id).unwrap());
+                    }
+                    9 => {
+                        let copy = sql_stmt!(
+                            "test.close_copy_leg_signed",
+                            "../sql/close_copy_leg_signed.sql"
+                        );
+                        for sign in [-1i64, 1] {
+                            assert_eq!(s.execute(&copy, &[&sign, &atm_id])?, 1);
+                        }
+                        let ids: Vec<i64> = s.query_all(&ATM_LEG, &[&request_id])?;
+                        assert_eq!(ids.len(), 3);
+                        inserted_ids.extend(ids.into_iter().filter(|&id| id != atm_id));
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&1i64, &leg_id])?, 1);
@@ -497,7 +509,7 @@ pub async fn sequence(
                     _ => unreachable!(),
                 }
                 s.commit()?;
-                Ok((saved, inserted_id))
+                Ok((saved, inserted_ids))
             })
             .await
             .unwrap();
@@ -523,7 +535,7 @@ pub async fn sequence(
             ),
             5 => (1, 0, vec![(&idle.account, "no previous close")]),
             6 => (1, 1, vec![(&altered.account, "row without transfer")]),
-            7 | 8 => (1, 1, vec![(&atm.account, "balance:")]),
+            7..=9 => (1, 1, vec![(&atm.account, "balance:")]),
             _ => unreachable!(),
         };
         let report = rerun(api, bad_date, logs, metrics).await;
@@ -538,7 +550,7 @@ pub async fn sequence(
         );
         let actual = rows(api, bad_date).await;
         assert_bad_rows(&actual, &expected);
-        if witness == 1 || witness == 7 || witness == 8 {
+        if witness == 1 || witness == 7 || witness == 8 || witness == 9 {
             let account = if witness == 1 {
                 &altered.account
             } else {
@@ -555,7 +567,7 @@ pub async fn sequence(
                     .contains("violate F-21")
             );
         }
-        if witness == 7 || witness == 8 {
+        if witness == 7 || witness == 8 || witness == 9 {
             let detail = actual
                 .iter()
                 .find(|r| r.0 == atm.account)
@@ -564,6 +576,14 @@ pub async fn sequence(
                 .as_ref()
                 .unwrap();
             assert!(detail.contains("atm_cash rows violate F-21"), "{detail}");
+            if witness == 9 {
+                // The cancelling pair leaves the total unchanged, but the final
+                // copied withdrawal retains its earlier balance_after of 9900.
+                assert!(
+                    detail.contains("balance: expected 10100 last_row 9900 stored 10100"),
+                    "{detail}"
+                );
+            }
             if witness == 8 {
                 // Opening 0 + seed 10000 - withdrawal 100 + deposit 200 - copy 100.
                 // The copied withdrawal is last by sequence and keeps balance_after 9900.
@@ -589,8 +609,10 @@ pub async fn sequence(
                         assert_eq!(s.execute(&DELETE, &[&touched_id])?, 1);
                         assert_eq!(s.execute(&RESTORE, &[&saved])?, 1);
                     }
-                    8 => {
-                        assert_eq!(s.execute(&DELETE, &[&inserted_id.unwrap()])?, 1);
+                    8 | 9 => {
+                        for id in inserted_ids {
+                            assert_eq!(s.execute(&DELETE, &[&id])?, 1);
+                        }
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&-1i64, &leg_id])?, 1);
