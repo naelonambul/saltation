@@ -10,6 +10,21 @@ const toAccount = process.env.E2E_TO_ACCOUNT ?? "";
 test("login, balance, history, transfer", async ({ page }) => {
   test.skip(!phone || !password || !toAccount, "E2E_PHONE, E2E_PASSWORD and E2E_TO_ACCOUNT are required");
 
+  let historyUrl: URL | undefined;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.searchParams.has("from_date")) historyUrl = url;
+  });
+  const koreaDate = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10).replaceAll("-", "");
+  function assertHistoryWindow() {
+    expect(historyUrl).toBeDefined();
+    const from = historyUrl!.searchParams.get("from_date");
+    const to = historyUrl!.searchParams.get("to_date");
+    const kst = koreaDate();
+    console.log(`history window ${from}..${to} (browser zone ${process.env.E2E_TIMEZONE || "default"}, Korea date ${kst})`);
+    expect(to).toBe(kst);
+  }
+
   await page.goto("/");
   await page.getByLabel("전화번호").fill(phone);
   await page.getByLabel("비밀번호").fill(password);
@@ -22,6 +37,8 @@ test("login, balance, history, transfer", async ({ page }) => {
 
   await card.click();
   await expect(page.getByTestId("history")).toBeVisible();
+  await expect.poll(() => historyUrl?.searchParams.get("to_date")).toBeTruthy();
+  assertHistoryWindow();
   await page.getByRole("button", { name: "뒤로" }).click();
 
   await page.getByRole("button", { name: "이체하기" }).click();
@@ -34,4 +51,12 @@ test("login, balance, history, transfer", async ({ page }) => {
   await page.getByRole("button", { name: "확인" }).click();
 
   await expect(page.getByTestId("balance").first()).not.toHaveText(before);
+  historyUrl = undefined;
+  await page.getByTestId("account-card").first().click();
+  await expect(page.getByTestId("history")).toBeVisible();
+  await expect.poll(() => historyUrl?.searchParams.get("to_date")).toBeTruthy();
+  assertHistoryWindow();
+  const today = koreaDate().replace(/^(\d{4})(\d{2})(\d{2})$/, "$1.$2.$3");
+  await expect(page.getByTestId("history").getByRole("listitem")
+    .filter({ hasText: today }).filter({ hasText: "−1,000원" }).first()).toBeVisible();
 });

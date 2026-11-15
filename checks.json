@@ -233,6 +233,25 @@
         "bash",
         "docker"
       ]
+    },
+    {
+      "id": "mobile-browser-dates",
+      "group": "oracle",
+      "argv": [
+        "scripts/dev/it-oracle.sh",
+        "browser-dates"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 3600,
+      "paths": [
+        "web/apps/mobile/**",
+        "bank/src/features/accounts/**",
+        "scripts/dev/it-oracle.sh"
+      ],
+      "requires": [
+        "bash",
+        "docker"
+      ]
     }
   ]
 }

@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e
+#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -231,10 +231,48 @@ e2e() {
   # The browser runs in Korean time, like the customers it stands for: the client sends
   # local dates, and a UTC browser between 00:00 and 09:00 KST asks for yesterday.
   echo "e2e: browser flow as $phone"
+  BROWSER_CONTAINER_TZ=Asia/Seoul browser_flow "$phone" "$password" "$to_account" "${E2E_TIMEZONE:-}"
+}
+
+
+# browser_flow <phone> <password> <to_account> [<timezone>]
+# BROWSER_CONTAINER_TZ optionally preserves the caller's container time zone.
+browser_flow() {
+  local phone="$1" password="$2" to_account="$3" timezone="${4:-}"
+  local browser_env=()
+  [ -z "$timezone" ] || browser_env+=(-e "E2E_TIMEZONE=$timezone")
+  [ -z "${BROWSER_CONTAINER_TZ:-}" ] || browser_env+=(-e "TZ=$BROWSER_CONTAINER_TZ")
   docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
-    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true -e TZ=Asia/Seoul \
+    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true ${browser_env[@]+"${browser_env[@]}"} \
     -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
     mcr.microsoft.com/playwright:v1.55.0-noble sh -c "corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test"
+}
+
+browser_dates() {
+  local start gen roster phone password to_account zone
+  local failed=()
+  start=$(( ($(date +%s) % 90000) * 1000 ))
+  gen=("${compose[@]}" --profile tools run --rm generator)
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800
+  "${compose[@]}" --profile tools build generator >/dev/null
+  "${gen[@]}" seed-parties --counterparties 50
+  "${gen[@]}" clock live
+  "${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
+    --eval 'db.getSiblingDB("truth").roster.deleteMany({})' >/dev/null
+  "${gen[@]}" seed --customers 2 --start "$start"
+  roster=$("${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
+    --eval "const r = db.getSiblingDB('truth').roster.find({customer_no: {\$gte: 'C' + String($start).padStart(8, '0')}}).sort({customer_no: 1}).limit(2).toArray(); print(r[0].phone + ' ' + r[0].password + ' ' + r[1].account_no)")
+  read -r phone password to_account <<<"$roster"
+  for zone in Etc/GMT+12 Pacific/Kiritimati; do
+    echo "browser-dates: browser zone $zone"
+    if ! BROWSER_CONTAINER_TZ= browser_flow "$phone" "$password" "$to_account" "$zone"; then
+      failed+=("$zone")
+    fi
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    echo "browser-dates: failed zones: ${failed[*]}" >&2
+    return 1
+  fi
 }
 
 run_target() {
@@ -256,6 +294,7 @@ run_target() {
     outbox-outage) outbox_outage ;;
     observability) observability ;;
     e2e)         e2e ;;
+    browser-dates) browser_dates ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
