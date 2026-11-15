@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "oracledb-driver",
+  "kind": "architecture",
+  "title": "Replace the oracle crate and Instant Client with Oracle's pure-Rust oracledb driver",
+  "base": {
+    "ref": "main",
+    "commit": "83c463224875354c3b7f064049f5849f04a89fbd"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/Cargo.toml",
+    "bank/Cargo.lock",
+    "bank/Dockerfile",
+    "bank/src/**",
+    "bank/tests/**",
+    "checks.json",
+    "scripts/dev/**",
+    "spec.md"
+  ],
+  "approvals": []
+}
