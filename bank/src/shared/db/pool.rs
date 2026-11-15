@@ -1,6 +1,9 @@
 //! Adapter-owned slots include opening and closing connections. Failed opens are
 //! reported to their initiating waiter through a oneshot; after cancellation the
 //! error is discarded, but the slot is still freed. Warm-up polls every 2 ms.
+//! FIFO waiters reserve idle sessions in arrival order without taking ownership
+//! until polled; cancellation passes the reservation to the next waiter.
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
@@ -29,16 +32,60 @@ pub(crate) enum PoolError<E> {
 
 struct State<T> {
     idle: Vec<T>,
+    waiters: VecDeque<Waiter>,
+    next_waiter_id: u64,
     pending_close: Vec<T>,
     slots: usize,
     closed: bool,
     draining: bool,
 }
 
+struct Waiter {
+    id: u64,
+    wake: Arc<Notify>,
+}
+
+impl<T> State<T> {
+    fn wake_reserved(&self) {
+        for waiter in self.waiters.iter().take(self.idle.len()) {
+            waiter.wake.notify_one();
+        }
+    }
+
+    fn wake_all(&self) {
+        for waiter in &self.waiters {
+            waiter.wake.notify_one();
+        }
+    }
+
+    fn remove_waiter(&mut self, id: u64) {
+        if let Some(index) = self.waiters.iter().position(|waiter| waiter.id == id) {
+            self.waiters.remove(index);
+            self.wake_reserved();
+        }
+    }
+}
+
+struct WaiterGuard<C: Connector> {
+    inner: Arc<Inner<C>>,
+    id: Option<u64>,
+}
+
+impl<C: Connector> Drop for WaiterGuard<C> {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            self.inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove_waiter(id);
+        }
+    }
+}
+
 struct Inner<C: Connector> {
     connector: Arc<C>,
     state: Mutex<State<C::Conn>>,
-    notify: Notify,
     max: usize,
     spawn: Spawner,
 }
@@ -67,12 +114,13 @@ impl<C: Connector> Pool<C> {
                 connector: Arc::new(connector),
                 state: Mutex::new(State {
                     idle: Vec::new(),
+                    waiters: VecDeque::new(),
+                    next_waiter_id: 0,
                     pending_close: Vec::new(),
                     slots: 0,
                     closed: false,
                     draining: false,
                 }),
-                notify: Notify::new(),
                 max,
                 spawn,
             }),
@@ -82,8 +130,13 @@ impl<C: Connector> Pool<C> {
     pub(crate) async fn acquire(&self, budget: Duration) -> Result<Lease<C>, PoolError<C::Error>> {
         let deadline = tokio::time::Instant::now() + budget;
         let mut opening = None;
+        let wake = Arc::new(Notify::new());
+        let mut waiter = WaiterGuard {
+            inner: self.inner.clone(),
+            id: None,
+        };
         loop {
-            let notified = self.inner.notify.notified();
+            let notified = wake.notified();
             tokio::pin!(notified);
             let mut tried_drainer = false;
             loop {
@@ -93,15 +146,21 @@ impl<C: Connector> Pool<C> {
                 }
                 // A zero budget remains an immediate idle-only attempt.
                 if !budget.is_zero() && tokio::time::Instant::now() >= deadline {
-                    let has_idle = !state.idle.is_empty();
-                    drop(state);
-                    // This waiter may have consumed the release notification.
-                    if has_idle {
-                        self.inner.notify.notify_one();
-                    }
                     return Err(PoolError::Busy);
                 }
-                if let Some(conn) = state.idle.pop() {
+                let can_take = match waiter.id {
+                    Some(id) => state
+                        .waiters
+                        .iter()
+                        .position(|entry| entry.id == id)
+                        .is_some_and(|index| index < state.idle.len()),
+                    None => state.idle.len() > state.waiters.len(),
+                };
+                if can_take {
+                    let conn = state.idle.pop().expect("reserved idle session");
+                    if let Some(id) = waiter.id.take() {
+                        state.remove_waiter(id);
+                    }
                     return Ok(Lease {
                         inner: self.inner.clone(),
                         conn: Some(conn),
@@ -110,6 +169,15 @@ impl<C: Connector> Pool<C> {
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(PoolError::Busy);
+                }
+                if waiter.id.is_none() {
+                    let id = state.next_waiter_id;
+                    state.next_waiter_id += 1;
+                    state.waiters.push_back(Waiter {
+                        id,
+                        wake: wake.clone(),
+                    });
+                    waiter.id = Some(id);
                 }
                 notified.as_mut().enable();
                 if state.slots == self.inner.max
@@ -189,9 +257,9 @@ impl<C: Connector> Pool<C> {
         let idle = {
             let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
+            state.wake_all();
             std::mem::take(&mut state.idle)
         };
-        self.inner.notify.notify_waiters();
         for conn in idle {
             self.inner.retire(conn, false);
         }
@@ -208,8 +276,7 @@ impl<C: Connector> Inner<C> {
     fn free_slot(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.slots -= 1;
-        drop(state);
-        self.notify.notify_waiters();
+        state.wake_all();
     }
 
     fn start_open(self: &Arc<Self>) -> Result<OpenResult<C::Error>, PoolError<C::Error>> {
@@ -224,8 +291,7 @@ impl<C: Connector> Inner<C> {
                         inner.close_blocking(conn);
                     } else {
                         state.idle.push(conn);
-                        drop(state);
-                        inner.notify.notify_waiters();
+                        state.wake_reserved();
                     }
                     let _ = tx.send(Ok(()));
                 }
@@ -301,14 +367,12 @@ impl<C: Connector> Inner<C> {
             if blocking {
                 self.close_blocking(conn);
             } else {
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pending_close
-                    .push(conn);
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.pending_close.push(conn);
+                state.wake_all();
+                drop(state);
                 tracing::warn!(%error, "retirement thread unavailable; close deferred");
                 // Waiters re-check and may start a drainer for the queued close.
-                self.notify.notify_waiters();
             }
         }
     }
@@ -410,8 +474,7 @@ impl<C: Connector> Lease<C> {
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if healthy && !state.closed {
             state.idle.push(conn);
-            drop(state);
-            self.inner.notify.notify_one();
+            state.wake_reserved();
         } else {
             drop(state);
             self.inner.retire(
@@ -596,6 +659,149 @@ mod tests {
             panic!("live waiter must acquire immediately without another release");
         };
         lease.release(true);
+    }
+
+    #[tokio::test]
+    async fn waiters_are_served_in_arrival_order() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let pool = Pool::new(Fake::default(), 1);
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(pool.acquire(BUDGET));
+        let mut b = Box::pin(pool.acquire(BUDGET));
+        let mut c = Box::pin(pool.acquire(BUDGET));
+        assert!(matches!(a.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(b.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(c.as_mut().poll(&mut context), Poll::Pending));
+        lease.release(true);
+        assert!(matches!(b.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(c.as_mut().poll(&mut context), Poll::Pending));
+        let Poll::Ready(Ok(lease)) = a.as_mut().poll(&mut context) else {
+            panic!("front waiter must acquire");
+        };
+        lease.release(true);
+        assert!(matches!(c.as_mut().poll(&mut context), Poll::Pending));
+        let Poll::Ready(Ok(lease)) = b.as_mut().poll(&mut context) else {
+            panic!("second waiter must acquire");
+        };
+        lease.release(true);
+        let Poll::Ready(Ok(lease)) = c.as_mut().poll(&mut context) else {
+            panic!("third waiter must acquire");
+        };
+        lease.release(true);
+    }
+
+    #[tokio::test]
+    async fn newcomer_does_not_barge_past_a_waiter() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let pool = Pool::new(Fake::default(), 1);
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(pool.acquire(BUDGET));
+        assert!(matches!(a.as_mut().poll(&mut context), Poll::Pending));
+        lease.release(true);
+        assert!(matches!(
+            pool.acquire(Duration::ZERO).await,
+            Err(PoolError::Busy)
+        ));
+        let mut newcomer = Box::pin(pool.acquire(SHORT));
+        assert!(matches!(
+            newcomer.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            pool.inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .idle
+                .len(),
+            1
+        );
+        let Poll::Ready(Ok(lease)) = a.as_mut().poll(&mut context) else {
+            panic!("reserved session must go to the earlier waiter");
+        };
+        lease.release(true);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_lose_a_session() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let pool = Pool::new(Fake::default(), 1);
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let mut a = Box::pin(pool.acquire(BUDGET));
+        let mut b = Box::pin(pool.acquire(BUDGET));
+        assert!(matches!(a.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(b.as_mut().poll(&mut context), Poll::Pending));
+        lease.release(true);
+        drop(a);
+        let Poll::Ready(Ok(lease)) = b.as_mut().poll(&mut context) else {
+            panic!("cancellation must pass the reservation on");
+        };
+        lease.release(true);
+        let state = pool.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.idle.len(), 1);
+        assert_eq!(state.slots, 1);
+        assert!(state.waiters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aborted_front_waiter_wakes_its_successor() {
+        let pool = Arc::new(Pool::new(Fake::default(), 1));
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let waiting = |pool: &Arc<Pool<Fake>>| {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.acquire(BUDGET).await })
+        };
+        let queued = |pool: &Pool<Fake>| {
+            pool.inner
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .waiters
+                .len()
+        };
+        let a = waiting(&pool);
+        until(|| queued(&pool) == 1).await;
+        let b = waiting(&pool);
+        until(|| queued(&pool) == 2).await;
+        // The release reserves the session for A; aborting A must wake B.
+        lease.release(true);
+        a.abort();
+        let lease = tokio::time::timeout(SHORT, b)
+            .await
+            .expect("successor woken before its own deadline")
+            .unwrap()
+            .unwrap();
+        lease.release(true);
+        assert_eq!(queued(&pool), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_tasks_all_acquire_within_budget() {
+        let pool = Arc::new(Pool::new(Fake::default(), 2));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let pool = pool.clone();
+            tasks.push(tokio::spawn(async move {
+                let lease = pool.acquire(BUDGET).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                lease.release(true);
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let state = pool.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(state.waiters.is_empty());
+        assert!(state.slots <= 2);
     }
 
     #[tokio::test]
