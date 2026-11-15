@@ -167,23 +167,55 @@ async fn atm_rows(db: &bank::shared::db::Db, stmt: SqlStmt, id: &str) -> Vec<ser
         .collect()
 }
 
-fn check_log_keys(value: &serde_json::Value) {
+fn check_log_keys(value: &serde_json::Value) -> Result<(), String> {
     match value {
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
-                assert!(
-                    !matches!(
-                        key.as_str(),
-                        "pin" | "atm_pin" | "pin_hash" | "atm_session_token"
-                    ),
-                    "secret key in application log"
-                );
-                check_log_keys(value);
+                if matches!(
+                    key.as_str(),
+                    "pin" | "atm_pin" | "pin_hash" | "atm_session_token"
+                ) {
+                    return Err("secret key in application log".into());
+                }
+                check_log_keys(value)?;
             }
         }
-        serde_json::Value::Array(items) => items.iter().for_each(check_log_keys),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                check_log_keys(item)?;
+            }
+        }
         _ => {}
     }
+    Ok(())
+}
+
+/// `pin` is checked only on lines of the smoke requests: a random 4-digit PIN
+/// would sooner or later equal an unrelated number among a long run's lines.
+fn check_log_line(line: &str, pin: Option<&str>) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|_| "invalid JSON log line".to_owned())?;
+    check_log_keys(&value)?;
+    if line.contains("$argon2id$") {
+        return Err("PIN hash in application log".into());
+    }
+    if line.contains("Bearer ") {
+        return Err("Bearer token in application log".into());
+    }
+    if pin.is_some_and(|pin| common::find_pin(&value, pin).is_some()) {
+        return Err("PIN in application log".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn log_line_rejects_pin_and_bearer_but_allows_ulid() {
+    let pin = Some("7391");
+    assert!(check_log_line(r#"{"message":"entered PIN 7391 here"}"#, pin).is_err());
+    assert!(check_log_line(r#"{"message":"Bearer x"}"#, pin).is_err());
+    assert!(check_log_line(r#"{"message":"Bearer x"}"#, None).is_err());
+    assert!(check_log_line(r#"{"atm_pin":"x"}"#, None).is_err());
+    assert!(check_log_line(r#"{"request_id":"01ARZ3NDEKTSV4RRFFQ69G7391"}"#, pin).is_ok());
 }
 
 #[tokio::test]
@@ -197,7 +229,7 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
     assert_eq!(requests.len(), 6);
     let state = common::state().await;
     let db = state.db.clone();
-    for (step, amount) in [("withdraw", -10000), ("deposit", 20000)] {
+    for (step, amount) in [("withdraw", -10000_i64), ("deposit", 20000_i64)] {
         let id = requests[step].as_str().expect("request ID");
         let rows = atm_rows(&db, ATM_CASH, id).await;
         assert_eq!(rows.len(), 1, "one cash posting");
@@ -215,6 +247,7 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
         assert_eq!(transfers.len(), 1);
         let transfer: serde_json::Value = serde_json::from_str(&transfers[0]).unwrap();
         assert_eq!(transfer["kind"], "atm_cash");
+        assert_eq!(transfer["amount"], amount.abs());
         assert_eq!(transfer["rows"], 1);
         assert_eq!(transfer["account_rows"], 1);
     }
@@ -307,6 +340,19 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
         1
     );
 
+    let truth_client =
+        mongodb::Client::with_uri_str(std::env::var("MONGO_TRUTH_URI").expect("MONGO_TRUTH_URI"))
+            .await
+            .expect("truth");
+    let roster = truth_client
+        .database("truth")
+        .collection::<Document>("roster")
+        .find_one(doc! { "account_no": smoke["account_no"].as_str().expect("account") })
+        .await
+        .expect("find smoke roster entry")
+        .expect("smoke roster entry");
+    let pin = roster.get_str("atm_pin").expect("smoke roster atm_pin");
+
     let mut lines = 0;
     let mut found_request = false;
     for entry in std::fs::read_dir("/var/log/saltation").expect("bank log directory") {
@@ -318,12 +364,11 @@ async fn atm_smoke_is_posted_located_and_secret_free() {
         let contents = std::fs::read_to_string(path).expect("read bank log");
         for line in contents.lines() {
             lines += 1;
-            assert!(!line.contains("$argon2id$"), "PIN hash in application log");
-            let value: serde_json::Value = serde_json::from_str(line).expect("JSON log line");
-            check_log_keys(&value);
-            found_request |= requests
+            let smoke_line = requests
                 .values()
                 .any(|id| line.contains(id.as_str().unwrap()));
+            check_log_line(line, smoke_line.then_some(pin)).expect("secret-free JSON log line");
+            found_request |= smoke_line;
         }
     }
     assert!(lines > 0, "bank app*.log files missing or empty");
