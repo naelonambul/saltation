@@ -169,15 +169,33 @@ struct Results {
     busy: u64,
     other_errors: u64,
     latencies: Vec<f64>,
+    // The first few unexpected responses, so a failed run says what failed.
+    samples: Vec<String>,
 }
 impl Results {
     fn record(&mut self, result: Result<(u16, Value), String>, elapsed: Duration) {
         self.latencies.push(elapsed.as_secs_f64() * 1000.0);
+        let sample = match &result {
+            Ok((status, body)) => format!("{status} {} {}", body["rsp_code"], body["rsp_message"]),
+            Err(error) => format!("transport {error}"),
+        };
         match result {
             Ok((503, _)) => self.busy += 1,
-            Ok((500..=599, _)) | Err(_) => self.other_errors += 1,
+            Ok((500..=599, _)) | Err(_) => {
+                self.other_errors += 1;
+                self.sample(sample);
+            }
             Ok((200..=299, body)) if body["rsp_code"] == "A0000" => self.successes += 1,
-            _ => self.business_rejections += 1,
+            _ => {
+                self.business_rejections += 1;
+                self.sample(sample);
+            }
+        }
+    }
+    fn sample(&mut self, sample: String) {
+        if self.samples.len() < 5 {
+            eprintln!("driver-bench unexpected response: {sample}");
+            self.samples.push(sample);
         }
     }
     fn merge(&mut self, other: Self) {
@@ -186,6 +204,9 @@ impl Results {
         self.busy += other.busy;
         self.other_errors += other.other_errors;
         self.latencies.extend(other.latencies);
+        for sample in other.samples {
+            self.sample(sample);
+        }
     }
     fn percentile(&self, p: f64) -> f64 {
         if self.latencies.is_empty() {

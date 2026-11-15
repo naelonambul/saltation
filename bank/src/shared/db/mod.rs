@@ -182,7 +182,13 @@ impl Db {
     {
         let lease = match self.pool.acquire(self.acquire_timeout).await {
             Ok(lease) => lease,
-            Err(error) => return (Err(map_pool_error(error)), StatementStats::default()),
+            Err(error) => {
+                let error = map_pool_error(error);
+                if !matches!(error, DbError::Busy) {
+                    tracing::warn!(%error, "database session unavailable");
+                }
+                return (Err(error), StatementStats::default());
+            }
         };
         let joined = tokio::task::spawn_blocking(move || {
             let mut session = Session::new(SessionConnection::Pooled(lease));
