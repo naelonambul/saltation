@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "test-speed",
+  "kind": "implementation",
+  "title": "Cut Oracle integration test time without weakening any test",
+  "base": {
+    "ref": "main",
+    "commit": "83c463224875354c3b7f064049f5849f04a89fbd"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/Cargo.toml",
+    "bank/tests/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/**"
+  ],
+  "approvals": []
+}
