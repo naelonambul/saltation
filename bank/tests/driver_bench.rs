@@ -164,6 +164,7 @@ fn transfer(
 
 #[derive(Default)]
 struct Results {
+    late: u64,
     successes: u64,
     business_rejections: u64,
     busy: u64,
@@ -199,6 +200,7 @@ impl Results {
         }
     }
     fn merge(&mut self, other: Self) {
+        self.late += other.late;
         self.successes += other.successes;
         self.business_rejections += other.business_rejections;
         self.busy += other.busy;
@@ -216,6 +218,48 @@ impl Results {
     }
 }
 
+fn bench_rate(workload: &str) -> Option<f64> {
+    let raw = std::env::var("BENCH_RATE").ok()?;
+    assert!(
+        matches!(workload, "lookup" | "balance" | "history" | "transfer"),
+        "BENCH_RATE only supports lookup, balance, history, transfer"
+    );
+    let rate: f64 = raw.parse().expect("BENCH_RATE must be positive");
+    assert!(
+        rate.is_finite() && rate > 0.0,
+        "BENCH_RATE must be positive and finite"
+    );
+    Some(rate)
+}
+
+async fn oracle_snapshot(workload: &str, concurrency: usize, phase: &str) {
+    if std::env::var("BENCH_ORA_SNAP").as_deref() != Ok("1") {
+        return;
+    }
+    let output = std::path::PathBuf::from(env("BENCH_OUT"));
+    let directory = output.parent().expect("BENCH_OUT directory");
+    let stem = directory.join(format!(
+        "snap-{workload}-{concurrency}-run{}-{phase}",
+        env("BENCH_RUN")
+    ));
+    let ack = stem.with_extension("ack");
+    assert!(
+        !ack.exists(),
+        "stale Oracle snapshot acknowledgement: {}",
+        ack.display()
+    );
+    std::fs::write(stem.with_extension("req"), b"").expect("write Oracle snapshot request");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ack.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out after 30 s waiting for Oracle snapshot acknowledgement: {}",
+            ack.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 // A single atomic cursor assigns the deterministic request sequence to workers.
 // Scheduling can change completion order; the cursor fixes accounts and pairs.
 async fn window(
@@ -228,9 +272,20 @@ async fn window(
     config: (usize, Duration),
 ) -> Results {
     let (concurrency, duration) = config;
-    let deadline = Instant::now() + duration;
+    let rate = bench_rate(workload);
+    let origin = Instant::now();
+    let deadline = origin + duration;
+    let permits = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let mut tasks = JoinSet::new();
-    for _ in 0..concurrency {
+    let count = rate.map_or(concurrency, |r| {
+        (duration.as_secs_f64() * r).ceil() as usize
+    });
+    for k in 0..count {
+        let scheduled = rate.map(|r| origin + Duration::from_secs_f64(k as f64 / r));
+        if let Some(at) = scheduled {
+            tokio::time::sleep_until(at.into()).await;
+        }
+        let permits = permits.clone();
         let router = router.clone();
         let customers = customers.clone();
         let pairs = pairs.clone();
@@ -238,7 +293,12 @@ async fn window(
         let cursor = cursor.clone();
         tasks.spawn(async move {
             let mut result = Results::default();
-            while Instant::now() < deadline {
+            let _permit = if scheduled.is_some() {
+                Some(permits.acquire_owned().await.expect("benchmark semaphore"))
+            } else {
+                None
+            };
+            while scheduled.is_some() || Instant::now() < deadline {
                 let n = cursor.fetch_add(1, Ordering::Relaxed);
                 let from = n % customers.len(); let c = &customers[from];
                 let (method, path, body) = match workload.as_str() {
@@ -249,9 +309,15 @@ async fn window(
                     _ => unreachable!(),
                 };
                 let request = id();
-                let started = Instant::now();
+                if let Some(at) = scheduled {
+                    result.late = u64::from(at.elapsed() > Duration::from_millis(10));
+                }
+                let started = scheduled.unwrap_or_else(Instant::now);
                 let response = call(&router, method, &path, &request, Some(&c.token), body).await;
                 result.record(response, started.elapsed());
+                if scheduled.is_some() {
+                    break;
+                }
             }
             result
         });
@@ -344,6 +410,7 @@ fn env(name: &str) -> String {
 #[ignore]
 async fn driver_bench() {
     let workload = env("BENCH_WORKLOAD");
+    let _ = bench_rate(&workload);
     let concurrency: usize = env("BENCH_CONCURRENCY").parse().expect("concurrency");
     assert!(matches!(
         (workload.as_str(), concurrency),
@@ -490,6 +557,7 @@ async fn driver_bench() {
     } else {
         None
     };
+    oracle_snapshot(&workload, concurrency, "start").await;
     let snapshot = buckets(&metrics.render());
     let started = Instant::now();
     let mut result = if let Some(events) = &collection {
@@ -555,6 +623,7 @@ async fn driver_bench() {
         .await
     };
     let measured_secs = started.elapsed().as_secs_f64();
+    oracle_snapshot(&workload, concurrency, "end").await;
     let (slowest_statement, slowest_statement_p95_ms) =
         slowest(snapshot, buckets(&metrics.render()));
     let proc = std::fs::read_to_string("/proc/self/status").expect("Linux process status");
@@ -569,11 +638,15 @@ async fn driver_bench() {
             .expect("number")
     };
     result.latencies.sort_by(f64::total_cmp);
-    let line = json!({"driver": env("BENCH_DRIVER"), "workload": workload, "concurrency": concurrency, "run": env("BENCH_RUN"),
+    let mut line = json!({"driver": env("BENCH_DRIVER"), "workload": workload, "concurrency": concurrency, "run": env("BENCH_RUN"),
         "successes": result.successes, "business_rejections": result.business_rejections, "busy": result.busy, "other_errors": result.other_errors,
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
         "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+    if let Some(rate) = bench_rate(&workload) {
+        line["rate"] = json!(rate);
+        line["late"] = json!(result.late);
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
