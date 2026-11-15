@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: driver-parity, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: driver-bench, driver-parity, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -146,6 +146,44 @@ cargo_test() {
     saltation/bank-dev:local cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
 }
 
+# Each workload/run has a fresh schema and its own resource-limited process.
+driver_bench() {
+  : "${BENCH_DRIVER:?BENCH_DRIVER is required}"
+  local runs="${BENCH_RUNS:-3}" entries entry workload concurrency run failed=0 output
+  case "$BENCH_DRIVER" in *[!a-zA-Z0-9._-]*|'') echo "invalid BENCH_DRIVER" >&2; return 2 ;; esac
+  case "$runs" in *[!0-9]*|''|0) echo "BENCH_RUNS must be positive" >&2; return 2 ;; esac
+  entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64 duplicate:200 outbox:1)
+  if [ -n "${BENCH_ONLY:-}" ]; then
+    local found=no
+    for entry in "${entries[@]}"; do [ "$entry" != "$BENCH_ONLY" ] || found=yes; done
+    [ "$found" = yes ] || { echo "invalid BENCH_ONLY" >&2; return 2; }
+    entries=("$BENCH_ONLY")
+  fi
+  output="$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER"
+  mkdir -p "$output"
+  dev_image
+  for entry in "${entries[@]}"; do
+    workload="${entry%:*}"; concurrency="${entry#*:}"
+    for ((run=1; run<=runs; run++)); do
+      echo "driver-bench: $entry run $run"
+      if ! reset_schema; then failed=1; continue; fi
+      if ! docker run --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
+        -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
+        -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
+        -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
+        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT=/out/bench.jsonl \
+        -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
+        -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
+        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
+        saltation/bank-dev:local sh -c 'cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
+        failed=1
+      fi
+    done
+  done
+  echo "driver-bench output: $output/bench.jsonl"
+  return "$failed"
+}
+
 mongo_users() {
   local denied
   "${compose[@]}" exec -T mongo mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs \
@@ -283,6 +321,7 @@ browser_dates() {
 
 run_target() {
   case "$1" in
+    driver-bench) driver_bench ;;
     driver-parity) reset_schema; cargo_test driver_parity ;;
     migrations)  reset_schema; cargo_test migrations ;;
     backfill)    reset_schema; cargo_test backfill ;;
