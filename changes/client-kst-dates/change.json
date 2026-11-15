@@ -18,5 +18,13 @@
     "scripts/dev/it-oracle.sh",
     "checks.json"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8b376f8c6d3b382292be08292eb3aafdaff1f0eea4888a50d1cf4f0e93d9974a",
+      "by": "naelonambul",
+      "at": "2026-11-15T06:58:55Z",
+      "write_scope_sha256": "sha256:452c607cab5ee3ff3dabb45cc4c16b16a54f4ecbe0fa824e254c5bd142bef2a0"
+    }
+  ]
 }
