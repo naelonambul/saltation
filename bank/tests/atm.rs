@@ -308,6 +308,10 @@ async fn seeding_leaks_no_pin() {
         .await
         .unwrap();
     let events: Vec<Value> = rows.iter().map(|s| checked_event(s)).collect();
+    assert!(
+        rows.iter().any(|row| row.contains(account.as_str())),
+        "the seeded account's opening balance must emit an event inside the secrecy scan"
+    );
     for (id, event_type) in [
         (&start_id, "atm.session_started"),
         (&end_id, "atm.session_ended"),
