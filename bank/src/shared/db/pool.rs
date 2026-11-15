@@ -85,10 +85,21 @@ impl<C: Connector> Pool<C> {
         loop {
             let notified = self.inner.notify.notified();
             tokio::pin!(notified);
-            {
+            let mut tried_drainer = false;
+            loop {
                 let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
                 if state.closed {
                     return Err(PoolError::Closed);
+                }
+                // A zero budget remains an immediate idle-only attempt.
+                if !budget.is_zero() && tokio::time::Instant::now() >= deadline {
+                    let has_idle = !state.idle.is_empty();
+                    drop(state);
+                    // This waiter may have consumed the release notification.
+                    if has_idle {
+                        self.inner.notify.notify_one();
+                    }
+                    return Err(PoolError::Busy);
                 }
                 if let Some(conn) = state.idle.pop() {
                     return Ok(Lease {
@@ -104,17 +115,23 @@ impl<C: Connector> Pool<C> {
                 if state.slots == self.inner.max
                     && !state.pending_close.is_empty()
                     && !state.draining
+                    && !tried_drainer
                 {
                     state.draining = true;
                     drop(state);
                     self.inner.start_drainer();
-                    state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+                    // Recheck idle, closure and deadline after releasing the lock.
+                    // Keep the registered notification, and wait before retrying
+                    // a failed drainer spawn so it cannot spin on pending closes.
+                    tried_drainer = true;
+                    continue;
                 }
                 if state.slots < self.inner.max && opening.is_none() {
                     state.slots += 1;
                     drop(state);
                     opening = Some(self.inner.start_open()?);
                 }
+                break;
             }
             if let Some(rx) = opening.as_mut() {
                 tokio::select! {
@@ -530,6 +547,183 @@ mod tests {
                 }
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn expired_waiter_leaves_returned_connection_idle() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let pool = Pool::new(Fake::default(), 1);
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let mut acquire = Box::pin(pool.acquire(SHORT));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(acquire.as_mut().poll(&mut context), Poll::Pending));
+        // Do not poll the waiter again until both its deadline and notify are ready.
+        std::thread::sleep(SHORT);
+        lease.release(true);
+        assert!(matches!(
+            acquire.as_mut().poll(&mut context),
+            Poll::Ready(Err(PoolError::Busy))
+        ));
+        assert_eq!(pool.inner.state.lock().unwrap().idle.len(), 1);
+        pool.acquire(BUDGET).await.unwrap().release(true);
+    }
+
+    #[tokio::test]
+    async fn expired_waiter_forwards_notification_to_live_waiter() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let pool = Pool::new(Fake::default(), 1);
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        let mut expired = Box::pin(pool.acquire(SHORT));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(expired.as_mut().poll(&mut context), Poll::Pending));
+        // Expire the first waiter without polling it, then register a live one.
+        std::thread::sleep(SHORT);
+        let mut live = Box::pin(pool.acquire(BUDGET));
+        assert!(matches!(live.as_mut().poll(&mut context), Poll::Pending));
+        lease.release(true);
+        // The single release selected the first waiter, not the live one.
+        assert!(matches!(live.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            expired.as_mut().poll(&mut context),
+            Poll::Ready(Err(PoolError::Busy))
+        ));
+        assert_eq!(pool.inner.state.lock().unwrap().idle.len(), 1);
+        let Poll::Ready(Ok(lease)) = live.as_mut().poll(&mut context) else {
+            panic!("live waiter must acquire immediately without another release");
+        };
+        lease.release(true);
+    }
+
+    #[tokio::test]
+    async fn zero_budget_only_takes_an_existing_idle_connection() {
+        let fake = Fake::default();
+        let pool = Pool::new(fake.clone(), 1);
+        assert!(matches!(
+            pool.acquire(Duration::ZERO).await,
+            Err(PoolError::Busy)
+        ));
+        assert_eq!(fake.opened.load(Ordering::SeqCst), 0);
+        pool.acquire(BUDGET).await.unwrap().release(true);
+        pool.acquire(Duration::ZERO).await.unwrap().release(true);
+    }
+
+    // Run the drainer synchronously, then force the event while acquire has
+    // released the state lock but has not reacquired it to reserve an opener.
+    fn deferred_pool(after_drain: impl Fn() + Send + Sync + 'static) -> (Pool<Fake>, Fake) {
+        let fake = Fake::default();
+        let pool = Pool::with_spawner(
+            fake.clone(),
+            1,
+            Box::new(move |job| {
+                job();
+                after_drain();
+                Ok(())
+            }),
+        );
+        let conn = fake.open().unwrap();
+        {
+            let mut state = pool.inner.state.lock().unwrap();
+            state.slots = 1;
+            state.pending_close.push(conn);
+        }
+        (pool, fake)
+    }
+
+    #[tokio::test]
+    async fn idle_returned_during_drainer_start_prevents_open() {
+        let returned = Arc::new(Mutex::new(None::<Lease<Fake>>));
+        let during_start = returned.clone();
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let attempts = spawns.clone();
+        let fake = Fake::default();
+        let pool = Pool::with_spawner(
+            fake.clone(),
+            2,
+            Box::new(move |job| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                job();
+                if let Some(lease) = during_start.lock().unwrap().take() {
+                    lease.release(true);
+                }
+                Ok(())
+            }),
+        );
+        let retired = fake.open().unwrap();
+        let healthy = fake.open().unwrap();
+        {
+            let mut state = pool.inner.state.lock().unwrap();
+            state.slots = 2;
+            state.pending_close.push(retired);
+        }
+        *returned.lock().unwrap() = Some(Lease {
+            inner: pool.inner.clone(),
+            conn: Some(healthy),
+            blocking: false,
+        });
+        let lease = pool.acquire(BUDGET).await.unwrap();
+        assert_eq!(*lease.conn(), healthy);
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.opened.load(Ordering::SeqCst), 2);
+        lease.release(true);
+    }
+
+    #[tokio::test]
+    async fn failed_drainer_spawn_waits_without_spinning() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let attempts = spawns.clone();
+        let fake = Fake::default();
+        let pool = Pool::with_spawner(
+            fake.clone(),
+            1,
+            Box::new(move |_| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::other("spawn failed"))
+            }),
+        );
+        {
+            let mut state = pool.inner.state.lock().unwrap();
+            state.slots = 1;
+            state.pending_close.push(fake.open().unwrap());
+        }
+        let mut acquire = Box::pin(pool.acquire(SHORT));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(acquire.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(acquire.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert!(matches!(acquire.await, Err(PoolError::Busy)));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(slots(&pool), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_drainer_start_does_not_reserve_opener() {
+        let owner = Arc::new(Mutex::new(std::sync::Weak::<Pool<Fake>>::new()));
+        let closer = owner.clone();
+        let (pool, fake) = deferred_pool(move || {
+            closer.lock().unwrap().upgrade().unwrap().close();
+        });
+        let pool = Arc::new(pool);
+        *owner.lock().unwrap() = Arc::downgrade(&pool);
+        assert!(matches!(pool.acquire(BUDGET).await, Err(PoolError::Closed)));
+        assert_eq!(fake.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(slots(&pool), 0);
+    }
+
+    #[tokio::test]
+    async fn deadline_during_drainer_start_does_not_reserve_opener() {
+        let (pool, fake) = deferred_pool(|| std::thread::sleep(SHORT));
+        assert!(matches!(pool.acquire(SHORT).await, Err(PoolError::Busy)));
+        assert_eq!(fake.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(slots(&pool), 0);
     }
 
     #[tokio::test]
