@@ -193,3 +193,96 @@ async def test_seed_retains_pin_in_account_payload_and_roster():
         assert account["atm_pin"] == entry["atm_pin"] == customer["atm_pin"]
         assert account["account_no"] == entry["account_no"] == customer["account_no"]
         assert re.fullmatch(r"[0-9]{4}", entry["atm_pin"])
+
+
+@pytest.mark.parametrize("failure", [None, "wrong_pin", "start", "withdraw", "deposit", "balance", "restart"])
+async def test_atm_smoke_cli(monkeypatch, capsys, caplog, failure):
+    from saltation_gen import cli
+    from saltation_gen.personas.normal import home_context
+
+    calls = []
+    steps = ["wrong_pin", "start", "withdraw", "deposit", "balance", "restart"]
+    customer = {"customer_no": "C2", "account_no": "998222", "atm_pin": PIN}
+
+    class FakeTruth:
+        def __init__(self, uri):
+            pass
+
+        async def load_roster(self):
+            return [
+                {**customer, "customer_no": "C3"},
+                customer,
+                {**customer, "customer_no": "C0", "account_type": "TERM"},
+                {"customer_no": "C1"},
+            ]
+
+        async def close(self):
+            pass
+
+    class FakeBank:
+        def __init__(self, url):
+            pass
+
+        async def close(self):
+            pass
+
+        async def record(self, method, args):
+            step = steps[len(calls)]
+            calls.append((method, args))
+            ctx = args[-1]
+            home = home_context(customer)
+            assert (ctx.ip, ctx.device, ctx.region) == (home.ip, home.device, ATM_TERMINALS[0]["region"])
+            if step == failure:
+                # Even an unaccepted client status must never expose the response message.
+                raise BankError(500, {"rsp_code": "A9999", "rsp_message": PIN + TOKEN})
+            return (422 if step == "wrong_pin" else 200), {"atm_session_token": TOKEN}
+
+        async def atm_start_session(self, *args):
+            return await self.record("start", args)
+
+        async def atm_withdraw(self, *args):
+            return await self.record("withdraw", args)
+
+        async def atm_deposit(self, *args):
+            return await self.record("deposit", args)
+
+        async def atm_balance(self, *args):
+            return await self.record("balance", args)
+
+    monkeypatch.setattr(cli, "TruthStore", FakeTruth)
+    monkeypatch.setattr(cli, "BankClient", FakeBank)
+    monkeypatch.setenv("MONGO_TRUTH_URI", "mongodb://unused/truth")
+    caplog.set_level(logging.DEBUG)
+    if failure:
+        with pytest.raises(RuntimeError, match="^500 A9999$") as error:
+            await cli._main(cli.build_parser().parse_args(["atm-smoke"]))
+        assert PIN not in str(error.value) and TOKEN not in str(error.value)
+    else:
+        await cli._main(cli.build_parser().parse_args(["atm-smoke"]))
+    captured = capsys.readouterr()
+    assert all(secret not in captured.out + captured.err + caplog.text for secret in (PIN, TOKEN))
+    if failure:
+        assert not captured.out
+        return
+    output = json.loads(captured.out)
+    assert len(captured.out.splitlines()) == 1
+    assert set(output) == {"terminal_id", "region", "latitude", "longitude", "account_no", "requests"}
+    assert output["account_no"] == customer["account_no"]
+    for key in ("terminal_id", "region", "latitude", "longitude"):
+        assert output[key] == ATM_TERMINALS[0][key]
+    assert list(output["requests"]) == steps
+    assert len(set(output["requests"].values())) == 6
+    assert [method for method, _ in calls] == ["start", "start", "withdraw", "deposit", "balance", "start"]
+    assert [args[0] for _, args in calls] == list(output["requests"].values())
+    assert all(re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", args[0]) for _, args in calls)
+    for index in (0, 1, 5):
+        args = calls[index][1]
+        assert args[1:3] == (ATM_TERMINALS[0]["terminal_id"], customer["account_no"])
+        assert re.fullmatch(r"\d{4}", args[3])
+        assert (args[3] == PIN) == (index != 0)
+    for index, amount in ((2, 10000), (3, 20000)):
+        assert calls[index][1][1] == TOKEN
+        assert calls[index][1][3] == amount
+        assert re.fullmatch(r"[ -~]{20}", calls[index][1][2])
+    assert calls[2][1][2] != calls[3][1][2]
+    assert calls[4][1][1] == TOKEN

@@ -151,3 +151,181 @@ async fn generator_run_is_labelled_logged_and_consistent() {
         assert_eq!(bad, 0, "inconsistent {name}");
     }
 }
+
+const ATM_SESSION: SqlStmt = sql_stmt!("test.e2e_atm_session", "sql/e2e_atm_session.sql");
+const ATM_TRANSFER: SqlStmt = sql_stmt!("test.e2e_atm_transfer", "sql/e2e_atm_transfer.sql");
+const ATM_CASH: SqlStmt = sql_stmt!("test.atm_cash_rows", "sql/atm_cash_rows.sql");
+
+async fn atm_rows(db: &bank::shared::db::Db, stmt: SqlStmt, id: &str) -> Vec<serde_json::Value> {
+    let id = id.to_owned();
+    let rows: Vec<String> = db
+        .run(move |s| s.query_all(&stmt, &[&id]))
+        .await
+        .expect("ATM rows");
+    rows.iter()
+        .map(|row| serde_json::from_str(row).expect("ATM row JSON"))
+        .collect()
+}
+
+fn check_log_keys(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                assert!(
+                    !matches!(
+                        key.as_str(),
+                        "pin" | "atm_pin" | "pin_hash" | "atm_session_token"
+                    ),
+                    "secret key in application log"
+                );
+                check_log_keys(value);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(check_log_keys),
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn atm_smoke_is_posted_located_and_secret_free() {
+    let Ok(smoke) = std::env::var("E2E_ATM") else {
+        eprintln!("skipped: run through scripts/dev/it-oracle.sh e2e");
+        return;
+    };
+    let smoke: serde_json::Value = serde_json::from_str(&smoke).expect("E2E_ATM JSON");
+    let requests = smoke["requests"].as_object().expect("requests");
+    assert_eq!(requests.len(), 6);
+    let state = common::state().await;
+    let db = state.db.clone();
+    for (step, amount) in [("withdraw", -10000), ("deposit", 20000)] {
+        let id = requests[step].as_str().expect("request ID");
+        let rows = atm_rows(&db, ATM_CASH, id).await;
+        assert_eq!(rows.len(), 1, "one cash posting");
+        assert_eq!(rows[0]["kind"], "atm_cash");
+        assert_eq!(rows[0]["amount"], amount);
+        assert_eq!(rows[0]["request_id"], id);
+        assert_eq!(rows[0]["channel"], "ATM");
+        assert_eq!(rows[0]["terminal_id"], smoke["terminal_id"]);
+        let account = smoke["account_no"].as_str().expect("account").to_owned();
+        let id = id.to_owned();
+        let transfers: Vec<String> = db
+            .run(move |s| s.query_all(&ATM_TRANSFER, &[&account, &id]))
+            .await
+            .expect("ATM transfer");
+        assert_eq!(transfers.len(), 1);
+        let transfer: serde_json::Value = serde_json::from_str(&transfers[0]).unwrap();
+        assert_eq!(transfer["kind"], "atm_cash");
+        assert_eq!(transfer["rows"], 1);
+        assert_eq!(transfer["account_rows"], 1);
+    }
+    let mut session_ids = Vec::new();
+    for (step, ended) in [("start", true), ("restart", false)] {
+        let rows = atm_rows(&db, ATM_SESSION, requests[step].as_str().unwrap()).await;
+        assert_eq!(rows.len(), 1);
+        let session = &rows[0];
+        assert_eq!(session["account_no"], smoke["account_no"]);
+        assert_eq!(session["terminal_id"], smoke["terminal_id"]);
+        assert_eq!(session["ended"], i32::from(ended));
+        if ended {
+            assert_eq!(session["end_reason"], "replaced");
+        } else {
+            assert!(session["end_reason"].is_null());
+        }
+        session_ids.push(session["session_id"].as_str().unwrap().to_owned());
+    }
+    assert_ne!(session_ids[0], session_ids[1]);
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let n: i64 = db.run(|s| s.query_row(&COUNT_OUTBOX, &[])).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "outbox still has {n} events");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let events = outbox_relay::events_collection(&std::env::var("MONGO_URI").expect("MONGO_URI"))
+        .await
+        .expect("events");
+    for (step, expected) in [
+        ("wrong_pin", vec!["atm.session_rejected"]),
+        ("start", vec!["atm.session_started"]),
+        ("withdraw", vec!["atm.operation"]),
+        ("deposit", vec!["atm.operation"]),
+        ("balance", vec!["atm.operation"]),
+        ("restart", vec!["atm.session_ended", "atm.session_started"]),
+    ] {
+        let id = requests[step].as_str().unwrap();
+        let mut cursor = events.find(doc! {"request_id": id}).await.unwrap();
+        let mut completed = 0;
+        let mut actual = Vec::new();
+        while cursor.advance().await.unwrap() {
+            let document = cursor.deserialize_current().unwrap();
+            let event = serde_json::to_value(document).unwrap();
+            assert_eq!(event["request_id"], id);
+            assert!(common::envelope_errors(&event).is_empty());
+            let kind = event["event_type"].as_str().unwrap();
+            if kind == "request.completed" {
+                completed += 1;
+            }
+            if kind.starts_with("atm.") {
+                actual.push(kind.to_owned());
+                assert_eq!(event["channel"], "ATM");
+                assert_eq!(event["account_no"], smoke["account_no"]);
+                for key in [
+                    "terminal_id",
+                    "region",
+                    "latitude",
+                    "longitude",
+                    "account_no",
+                ] {
+                    assert_eq!(event["payload"][key], smoke[key], "{step}: {key}");
+                }
+                assert_eq!(event["payload"]["request_id"], id);
+                if kind == "atm.operation" {
+                    assert_eq!(event["payload"]["operation"], step);
+                }
+                if kind == "atm.session_ended" {
+                    assert_eq!(event["payload"]["session_id"], session_ids[0]);
+                    assert_eq!(event["payload"]["reason"], "replaced");
+                }
+            }
+        }
+        actual.sort();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(actual, expected, "ATM events for {step}");
+        assert_eq!(completed, 1, "one completion for {step}");
+    }
+    assert_eq!(
+        events
+            .count_documents(doc! {
+                "event_type": "atm.session_ended", "payload.session_id": &session_ids[0]
+            })
+            .await
+            .unwrap(),
+        1
+    );
+
+    let mut lines = 0;
+    let mut found_request = false;
+    for entry in std::fs::read_dir("/var/log/saltation").expect("bank log directory") {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if !name.starts_with("app") || !name.ends_with(".log") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(path).expect("read bank log");
+        for line in contents.lines() {
+            lines += 1;
+            assert!(!line.contains("$argon2id$"), "PIN hash in application log");
+            let value: serde_json::Value = serde_json::from_str(line).expect("JSON log line");
+            check_log_keys(&value);
+            found_request |= requests
+                .values()
+                .any(|id| line.contains(id.as_str().unwrap()));
+        }
+    }
+    assert!(lines > 0, "bank app*.log files missing or empty");
+    assert!(found_request, "no smoke request in bank logs");
+}
