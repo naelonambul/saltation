@@ -4,17 +4,21 @@ use super::{Connector, DbConfig, DbError};
 pub(super) struct OracleConnector(pub(super) DbConfig);
 
 impl Connector for OracleConnector {
-    type Conn = oracle::Connection;
+    type Conn = oracledb::Connection;
     type Error = DbError;
 
     fn open(&self) -> Result<Self::Conn, Self::Error> {
         let config = &self.0;
-        let mut connector =
-            oracle::Connector::new(&config.user, &config.password, &config.connect_string);
-        connector.stmt_cache_size(config.stmt_cache_size);
-        let conn = connector.connect()?;
+        let connector = oracledb::Config::default()
+            .set_credentials(&config.user, &config.password)
+            .set_stmtcachesize(config.stmt_cache_size as usize)
+            .set_transport_connect_timeout(Some(std::time::Duration::from_secs(2)))
+            .set_connect_string(&config.connect_string)?;
+        let mut conn = oracledb::connect(connector)?;
         conn.set_call_timeout(Some(config.call_timeout))?;
-        let zone: String = conn.query_row_as("SELECT SESSIONTIMEZONE FROM DUAL", &[])?;
+        let zone: String = conn
+            .query_row("SELECT SESSIONTIMEZONE FROM DUAL", &[])?
+            .get(0)?;
         if zone != "+09:00" {
             let _ = conn.close();
             return Err(DbError::TimeZone(zone));
@@ -22,7 +26,7 @@ impl Connector for OracleConnector {
         Ok(conn)
     }
 
-    fn close(&self, conn: Self::Conn) {
+    fn close(&self, mut conn: Self::Conn) {
         let _ = conn.close();
     }
 }

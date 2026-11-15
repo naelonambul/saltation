@@ -5,15 +5,16 @@
 mod migrations;
 mod oracle_conn;
 mod pool;
+mod values;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use oracle::Connection;
-use oracle::SqlValue;
-use oracle::sql_type::{OracleType, ToSql};
 use oracle_conn::OracleConnector;
+use oracledb::Connection;
 use pool::{Connector, Lease, Pool, PoolError};
+use values::with_statement_binds;
+pub use values::{RowValue, ToSql};
 
 use crate::shared::telemetry::RequestStats;
 
@@ -99,10 +100,10 @@ pub enum DbError {
     #[error("oracle error in {statement}: {source}")]
     Oracle {
         statement: &'static str,
-        source: oracle::Error,
+        source: oracledb::Error,
     },
     #[error("oracle error: {0}")]
-    Pool(#[from] oracle::Error),
+    Pool(#[from] oracledb::Error),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -114,7 +115,9 @@ impl DbError {
             DbError::Oracle { source, .. } | DbError::Pool(source) => source,
             _ => return None,
         };
-        source.db_error().map(|e| e.code())
+        source
+            .db_error_code()
+            .and_then(|code| i32::try_from(code).ok())
     }
 }
 
@@ -257,36 +260,6 @@ impl StatementStats {
     }
 }
 
-/// Binds Rust strings as VARCHAR2. The driver's default is NVARCHAR2, which makes Oracle
-/// convert the VARCHAR2 column instead (`SYS_OP_C2C(col) = :bind`), so no index on a
-/// character column is used and every keyed lookup scans its table.
-struct Bind<'a>(&'a dyn ToSql);
-
-/// Longest string still bound as VARCHAR2 (4 bytes per character, 32767-byte limit).
-const VARCHAR_BIND_CHARS: u32 = 8000;
-
-impl ToSql for Bind<'_> {
-    fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
-        Ok(match self.0.oratype(conn)? {
-            OracleType::NVarchar2(chars) if chars <= VARCHAR_BIND_CHARS => {
-                OracleType::Varchar2(chars.max(1) * 4)
-            }
-            other => other,
-        })
-    }
-
-    fn to_sql(&self, val: &mut SqlValue) -> oracle::Result<()> {
-        self.0.to_sql(val)
-    }
-}
-
-/// Runs `f` with the binds wrapped in [`Bind`].
-fn with_binds<T>(params: &[&dyn ToSql], f: impl FnOnce(&[&dyn ToSql]) -> T) -> T {
-    let wrapped: Vec<Bind<'_>> = params.iter().map(|p| Bind(*p)).collect();
-    let refs: Vec<&dyn ToSql> = wrapped.iter().map(|b| b as &dyn ToSql).collect();
-    f(&refs)
-}
-
 /// One connection checked out for one unit of work.
 pub struct Session {
     conn: SessionConnection,
@@ -335,7 +308,7 @@ impl Session {
     fn timed<T>(
         &mut self,
         stmt: &SqlStmt,
-        f: impl FnOnce(&Connection) -> oracle::Result<T>,
+        f: impl FnOnce(&Connection) -> Result<T, oracledb::Error>,
     ) -> Result<T, DbError> {
         let started = Instant::now();
         let result = f(self.conn.as_ref());
@@ -361,7 +334,14 @@ impl Session {
     /// Executes a statement that returns no rows; returns the affected row count.
     pub fn execute(&mut self, stmt: &SqlStmt, params: &[&dyn ToSql]) -> Result<u64, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.execute(stmt.sql, p)).and_then(|s| s.row_count())
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |mut s, p| s.execute(p),
+                |mut s, p| s.execute_named(p),
+            )
+            .map(|s| s.rows_affected())
         })
     }
 
@@ -372,10 +352,20 @@ impl Session {
         params: &[&dyn ToSql],
     ) -> Result<i64, DbError> {
         let ids = self.timed(stmt, |c| {
-            let mut statement = c.statement(stmt.sql).build()?;
-            statement.bind("id", &None::<i64>)?;
-            with_binds(params, |p| statement.execute(p))?;
-            statement.returned_values::<_, i64>("id")
+            let null_id = None::<i64>;
+            let mut binds = params.to_vec();
+            binds.push(&null_id);
+            with_statement_binds(
+                c,
+                stmt.sql,
+                &binds,
+                |mut s, p| s.execute(p),
+                |mut s, p| s.execute_named(p),
+            )?
+            .returned_data()
+            .iter()
+            .map(|row| row.get::<i64>(0))
+            .collect::<Result<Vec<_>, _>>()
         })?;
         match ids.as_slice() {
             [id] => Ok(*id),
@@ -388,18 +378,25 @@ impl Session {
     }
 
     /// Executes a query expected to return exactly one row.
-    pub fn query_row<T: oracle::RowValue>(
+    pub fn query_row<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<T, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.query_row_as::<T>(stmt.sql, p))
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |s, p| s.query_row(p),
+                |s, p| s.query_row_named(p),
+            )
+            .and_then(|row| T::from_row(&row))
         })
     }
 
     /// Executes a query expected to return at most one row.
-    pub fn query_opt<T: oracle::RowValue>(
+    pub fn query_opt<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
@@ -407,7 +404,7 @@ impl Session {
         match self.query_row(stmt, params) {
             Ok(row) => Ok(Some(row)),
             Err(DbError::Oracle { source, .. })
-                if source.kind() == oracle::ErrorKind::NoDataFound =>
+                if *source.kind() == oracledb::ErrorKind::NoDataFound =>
             {
                 Ok(None)
             }
@@ -416,13 +413,21 @@ impl Session {
     }
 
     /// Executes a query returning any number of rows.
-    pub fn query_all<T: oracle::RowValue>(
+    pub fn query_all<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<Vec<T>, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.query_as::<T>(stmt.sql, p)?.collect())
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |s, p| s.query(p),
+                |s, p| s.query_named(p),
+            )?
+            .map(|row| T::from_row(&row?))
+            .collect()
         })
     }
 
@@ -435,13 +440,17 @@ impl Session {
         if rows.is_empty() {
             return Ok(());
         }
-        let size = rows.len();
         self.timed(stmt, |c| {
-            let mut batch = c.batch(stmt.sql, size).build()?;
-            for row in rows {
-                with_binds(row, |p| batch.append_row(p))?;
-            }
-            batch.execute()
+            let values: Vec<_> = rows
+                .iter()
+                .map(|row| row.iter().map(|v| v.bind_value()).collect::<Vec<_>>())
+                .collect();
+            let refs: Vec<Vec<&dyn oracledb::ToDbValue>> = values
+                .iter()
+                .map(|row| row.iter().map(|v| v.as_ref()).collect())
+                .collect();
+            let slices: Vec<&[&dyn oracledb::ToDbValue]> = refs.iter().map(Vec::as_slice).collect();
+            c.execute_batch(stmt.sql, slices.as_slice()).map(|_| ())
         })
     }
 

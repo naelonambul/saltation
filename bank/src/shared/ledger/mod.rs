@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
 
-use oracle::sql_type::ToSql;
+use crate::shared::db::ToSql;
 
 use crate::shared::clock::business_date;
 use crate::shared::context::RequestContext;
