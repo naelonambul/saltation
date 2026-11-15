@@ -17,5 +17,14 @@
     "scripts/dev/it-oracle.sh",
     "docs/**"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:49c008f2878e1946ca3031b8d397814cd54caa34ed8b4a6a9df80ff0997899b5",
+      "by": "naelonambul",
+      "at": "2026-11-15T13:52:12Z",
+      "write_scope_sha256": "sha256:39c74d0461d7885755f41672f35b3acc270d4c06f3711df8e4d0904bb3e078f6",
+      "note": "Owner in session: approved both (test-speed and oracle-tuning) via question dialog, 2026-11-15"
+    }
+  ]
 }
