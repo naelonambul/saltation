@@ -36,9 +36,10 @@ test("login, balance, history, transfer", async ({ page }) => {
   const before = await page.getByTestId("balance").first().innerText();
 
   await card.click();
-  await expect(page.getByTestId("history")).toBeVisible();
+  // The window is checked first so that a wrong date is printed even when the list is empty.
   await expect.poll(() => historyUrl?.searchParams.get("to_date")).toBeTruthy();
   assertHistoryWindow();
+  await expect(page.getByTestId("history")).toBeVisible();
   await page.getByRole("button", { name: "뒤로" }).click();
 
   await page.getByRole("button", { name: "이체하기" }).click();
@@ -53,9 +54,9 @@ test("login, balance, history, transfer", async ({ page }) => {
   await expect(page.getByTestId("balance").first()).not.toHaveText(before);
   historyUrl = undefined;
   await page.getByTestId("account-card").first().click();
-  await expect(page.getByTestId("history")).toBeVisible();
   await expect.poll(() => historyUrl?.searchParams.get("to_date")).toBeTruthy();
   assertHistoryWindow();
+  await expect(page.getByTestId("history")).toBeVisible();
   const today = koreaDate().replace(/^(\d{4})(\d{2})(\d{2})$/, "$1.$2.$3");
   await expect(page.getByTestId("history").getByRole("listitem")
     .filter({ hasText: today }).filter({ hasText: "−1,000원" }).first()).toBeVisible();
