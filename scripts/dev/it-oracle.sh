@@ -241,7 +241,8 @@ browser_flow() {
   docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
     -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true ${browser_env[@]+"${browser_env[@]}"} \
     -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
-    mcr.microsoft.com/playwright:v1.55.0-noble sh -c "corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test"
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    mcr.microsoft.com/playwright:v1.55.0-noble sh -c 'corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test; status=$?; chown -R "$HOST_UID:$HOST_GID" /web; exit "$status"'
 }
 
 browser_dates() {
