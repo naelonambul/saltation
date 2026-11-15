@@ -278,10 +278,7 @@ async fn seeding_leaks_no_pin() {
         .await
         .unwrap();
     assert!(!rows.is_empty(), "opening balance emits an event");
-    let events: Vec<Value> = rows
-        .iter()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect();
+    let events: Vec<Value> = rows.iter().map(|s| checked_event(s)).collect();
     let responses = vec![customer_response, account_response, terminal_response];
     let lines = common::logs();
     let lines = &lines[start..];
@@ -359,6 +356,19 @@ async fn fixture(api: &Api) -> (String, common::Customer) {
     );
     (terminal, common::customer(api, 10000).await)
 }
+fn checked_event(text: &str) -> Value {
+    let event: Value = serde_json::from_str(text).unwrap();
+    if matches!(
+        event["event_type"].as_str(),
+        Some("request.completed" | "atm.session_ended")
+    ) {
+        assert!(
+            common::envelope_errors(&event).is_empty(),
+            "invalid event envelope"
+        );
+    }
+    event
+}
 async fn rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
     let key = key.to_owned();
     let result: Vec<String> = api
@@ -367,10 +377,7 @@ async fn rows(api: &Api, stmt: SqlStmt, key: &str) -> Vec<Value> {
         .run(move |s| s.query_all(&stmt, &[&key]))
         .await
         .unwrap();
-    result
-        .iter()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect()
+    result.iter().map(|s| checked_event(s)).collect()
 }
 async fn cash_rows(api: &Api, id: &str) -> Vec<Value> {
     let result = rows(api, CASH_ROWS, id).await;
@@ -819,10 +826,7 @@ async fn no_token_or_pin_leaks() {
         .run(|s| s.query_all(&EVENTS, &[]))
         .await
         .unwrap();
-    let events: Vec<Value> = raw
-        .iter()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect();
+    let events: Vec<Value> = raw.iter().map(|s| checked_event(s)).collect();
     let hash = credential(&api, &customer.account).await.0;
     for (what, values) in [
         ("responses", responses.as_slice()),
@@ -956,7 +960,30 @@ fn custom_limits(api: &Api, per: i64, daily: i64) -> Api {
         state,
     }
 }
-async fn cash_rejected(api: &Api, token: &str, amount: i64, bank: &str) -> String {
+async fn rejected_operation(api: &Api, id: &str, terminal: &str, account: &str) {
+    let events = rows(api, REQUEST_EVENTS, id).await;
+    let operations: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"] == "atm.operation")
+        .collect();
+    assert_eq!(operations.len(), 1);
+    assert_eq!(operations[0]["payload"]["outcome"], "rejected");
+    check_location(operations[0], terminal, account, id);
+    let completed: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"] == "request.completed")
+        .collect();
+    assert_eq!(completed.len(), 1);
+    assert!(common::envelope_errors(completed[0]).is_empty());
+}
+async fn cash_rejected(
+    api: &Api,
+    token: &str,
+    terminal: &str,
+    account: &str,
+    amount: i64,
+    bank: &str,
+) -> String {
     let id = new_id();
     let key = format!("k{}", common::unique_digits(15));
     let (s, b) = cash(api, token, "withdraw", &key, amount, &id).await;
@@ -983,6 +1010,7 @@ async fn cash_rejected(api: &Api, token: &str, amount: i64, bank: &str) -> Strin
         assert_eq!(req[0]["idem_key"], key);
     }
     assert!(cash_rows(api, &id).await.is_empty());
+    rejected_operation(api, &id, terminal, account).await;
     id
 }
 #[tokio::test]
@@ -1045,8 +1073,8 @@ async fn withdraw_and_deposit_post_one_row() {
 async fn withdraw_limits() {
     let _guard = TEST_LOCK.lock().await;
     let api = live().await;
-    let (_, _, token) = open_cash(&api, 20_000_000).await;
-    cash_rejected(&api, &token, 1_000_001, "406").await;
+    let (t, c, token) = open_cash(&api, 20_000_000).await;
+    cash_rejected(&api, &token, &t, &c.account, 1_000_001, "406").await;
     for _ in 0..6 {
         assert_eq!(
             cash(
@@ -1062,10 +1090,10 @@ async fn withdraw_limits() {
             StatusCode::OK
         );
     }
-    cash_rejected(&api, &token, 1, "406").await;
+    cash_rejected(&api, &token, &t, &c.account, 1, "406").await;
     let api = custom_limits(&api, 2_000, 3_000);
-    let (_, _, token) = open_cash(&api, 20_000).await;
-    cash_rejected(&api, &token, 2_001, "406").await;
+    let (t, c, token) = open_cash(&api, 20_000).await;
+    cash_rejected(&api, &token, &t, &c.account, 2_001, "406").await;
     for amt in [2_000, 1_000] {
         assert_eq!(
             cash(
@@ -1081,14 +1109,14 @@ async fn withdraw_limits() {
             StatusCode::OK
         );
     }
-    cash_rejected(&api, &token, 1, "406").await;
+    cash_rejected(&api, &token, &t, &c.account, 1, "406").await;
 }
 #[tokio::test]
 async fn withdraw_insufficient_balance() {
     let _guard = TEST_LOCK.lock().await;
     let api = live().await;
-    let (_, _, token) = open_cash(&api, 100).await;
-    cash_rejected(&api, &token, 101, "405").await;
+    let (t, c, token) = open_cash(&api, 100).await;
+    cash_rejected(&api, &token, &t, &c.account, 101, "405").await;
 }
 async fn parallel_cash(
     api: &Api,
@@ -1137,6 +1165,7 @@ async fn cash_idempotency() {
     assert_eq!(body["bank_rsp_code"], "405");
     assert_eq!(body["rsp_message"], "참가기관 거부");
     assert_eq!(body["bank_rsp_message"], "잔액 부족");
+    rejected_operation(&api, &rejected_id, &t, &c.account).await;
     let replay_id = new_id();
     let (status, body) = cash(
         &api,
@@ -1232,7 +1261,7 @@ async fn races_for_last_balance_and_limit() {
             "406",
         ),
     ] {
-        let (_, c, token) = open_cash(&api, opening).await;
+        let (first_terminal, c, token) = open_cash(&api, opening).await;
         let t = format!("T{}", common::unique_digits(15));
         assert_eq!(
             seed_terminal(&api, vec![terminal(&t)]).await.0,
@@ -1254,6 +1283,15 @@ async fn races_for_last_balance_and_limit() {
                 .count(),
             1
         );
+        for (id, status, _) in &r {
+            if *status == StatusCode::UNPROCESSABLE_ENTITY {
+                let request = rows(&api, CASH_REQUEST, id).await;
+                assert_eq!(request.len(), 1);
+                let terminal = request[0]["terminal_id"].as_str().unwrap();
+                assert!(terminal == first_terminal || terminal == t);
+                rejected_operation(&api, id, terminal, &c.account).await;
+            }
+        }
     }
 }
 #[tokio::test]
@@ -1309,7 +1347,7 @@ async fn locked_withdrawal_does_not_record_invalid_amount() {
             StatusCode::UNPROCESSABLE_ENTITY
         );
     }
-    let id = cash_rejected(&api, &token, -5, "409").await;
+    let id = cash_rejected(&api, &token, &t, &c.account, -5, "409").await;
     let events = rows(&api, REQUEST_EVENTS, &id).await;
     let operation = events
         .iter()
@@ -1339,7 +1377,7 @@ async fn locked_account_ends_other_sessions() {
         assert_eq!(b["bank_rsp_code"], "410");
     }
     assert!(rows(&api, SESSIONS, &t).await[0]["ended_at"].is_null());
-    let id = cash_rejected(&api, &token, 1, "409").await;
+    let id = cash_rejected(&api, &token, &t, &c.account, 1, "409").await;
     let session = rows(&api, SESSIONS, &t).await;
     assert_eq!(session[0]["end_reason"], "locked");
     assert_eq!(
@@ -1695,6 +1733,7 @@ async fn replay_after_lock_is_refused() {
     assert_eq!(events[1]["payload"]["amount"], 100);
     assert_eq!(events[2]["event_type"], "request.completed");
     assert_eq!(events[2]["payload"]["http_status"], 422);
+    rejected_operation(&api, &id, &t, &c.account).await;
     assert_eq!(
         cash(&api, &token, "withdraw", &key, 100, &new_id()).await.0,
         StatusCode::UNAUTHORIZED
@@ -1738,6 +1777,7 @@ async fn closed_account_is_refused() {
         assert_eq!(events[0]["payload"]["outcome"], "rejected");
         assert_eq!(events[1]["event_type"], "request.completed");
         assert_eq!(events[1]["payload"]["http_status"], 422);
+        rejected_operation(&api, &id, &t, &c.account).await;
         assert!(rows(&api, SESSIONS, &t).await[0]["ended_at"].is_null());
     }
 }

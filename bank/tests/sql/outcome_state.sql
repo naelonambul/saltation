@@ -11,6 +11,10 @@ SELECT 'loan_detail:' || json_object(t.*) AS value FROM loan_detail t
 UNION ALL
 SELECT 'transaction_request:' || json_object(t.*) AS value FROM transaction_request t
 UNION ALL
+SELECT 'account_transaction:' || json_object(t.*) AS value FROM account_transaction t
+UNION ALL
+SELECT 'account_status_history:' || json_object(t.*) AS value FROM account_status_history t
+UNION ALL
 SELECT 'transfer:' || json_object(t.*) AS value FROM transfer t
 UNION ALL
 SELECT 'customer_credential:' || json_object(t.*) AS value FROM customer_credential t

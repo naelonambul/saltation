@@ -31,26 +31,64 @@ fn secret(value: &str) {
         secrets.push(value.to_owned());
     }
 }
-/// A digit-only secret (PIN, reset code) leaks only as a standalone value: the
-/// same digits inside a longer number or token, such as a timestamp's
-/// fraction, are not the secret. Other secrets match as substrings.
+/// Decode numeric secrets so token identifiers can be excluded by whole value.
 fn leaks(text: &str, secret: &str) -> bool {
     if secret.is_empty() || !secret.bytes().all(|b| b.is_ascii_digit()) {
         return text.contains(secret);
     }
-    let bytes = text.as_bytes();
-    let joined = |b: u8| b.is_ascii_alphanumeric() || b == b'.';
-    text.match_indices(secret).any(|(i, _)| {
-        (i == 0 || !joined(bytes[i - 1]))
-            && (i + secret.len() == text.len() || !joined(bytes[i + secret.len()]))
-    })
+    let value: Value = serde_json::from_str(text).expect("captured JSON");
+    numeric_leak(&value, secret)
+}
+fn numeric_leak(value: &Value, secret: &str) -> bool {
+    match value {
+        Value::String(s) => {
+            let ulid = s.len() == 26
+                && s.bytes()
+                    .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b));
+            let hex = s.len() == 64
+                && (s
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)));
+            !ulid && !hex && common::find_pin(value, secret).is_some()
+        }
+        Value::Number(_) => common::find_pin(value, secret).is_some(),
+        Value::Array(values) => values.iter().any(|v| numeric_leak(v, secret)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, v)| matches!(key.as_str(), "pin" | "atm_pin") || numeric_leak(v, secret)),
+        _ => false,
+    }
+}
+fn assert_no_secret_keys(value: &Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                assert!(!matches!(key.as_str(), "pin" | "atm_pin"), "secret key");
+                assert_no_secret_keys(child);
+            }
+        }
+        Value::Array(values) => values.iter().for_each(assert_no_secret_keys),
+        _ => {}
+    }
 }
 #[test]
 fn leak_check_ignores_embedded_digits() {
     assert!(leaks(r#"{"pin":"7391"}"#, "7391"));
-    assert!(leaks("pin 7391,", "7391"));
-    assert!(!leaks(r#""2026-11-15T08:29:26.077391525+09:00""#, "7391"));
-    assert!(!leaks(r#""01M7E69W7391AHQ""#, "7391"));
+    for value in ["pin 7391,", "PIN7391", "7391a"] {
+        assert!(leaks(&json!(value).to_string(), "7391"));
+    }
+    for value in [
+        "2026-11-15T08:29:26.077391525+09:00".to_owned(),
+        "01M7E69W7391AHQ00000000000".to_owned(),
+        format!("{}7391{}", "a".repeat(30), "f".repeat(30)),
+        format!("{}7391{}", "A".repeat(30), "F".repeat(30)),
+    ] {
+        assert!(!leaks(&json!({"nested": [value]}).to_string(), "7391"));
+    }
+    assert!(leaks(r#"{"value":7391}"#, "7391"));
+    assert!(leaks(r#"{"atm_pin":"other"}"#, "7391"));
     assert!(leaks("token-abc", "abc"));
 }
 fn collect_secrets(body: &Value) {
@@ -93,6 +131,9 @@ async fn call(
     }
     let answer = common::call(router, method, path, id, token, body).await;
     if let Some(token) = answer.1["access_token"].as_str() {
+        secret(token);
+    }
+    if let Some(token) = answer.1["atm_session_token"].as_str() {
         secret(token);
     }
     answer
@@ -345,6 +386,7 @@ async fn events(api: &Api, id: &str) -> Vec<Value> {
 struct Coverage<'a> {
     api: &'a Api,
     covered: BTreeSet<(String, String)>,
+    refused_bodies: Vec<Value>,
 }
 impl Coverage<'_> {
     async fn success(
@@ -433,6 +475,7 @@ impl Coverage<'_> {
                 "{template}: {}",
                 answer.1
             );
+            self.refused_bodies.push(answer.1.clone());
             assert!(related(self.api, &refused).await.is_empty());
             assert_eq!(
                 state_snapshot(self.api).await,
@@ -448,6 +491,7 @@ impl Coverage<'_> {
                 let answer = call(router, method, path, &refused, token, body.clone()).await;
                 restore(self.api).await;
                 assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
+                self.refused_bodies.push(answer.1.clone());
                 assert!(related(self.api, &refused).await.is_empty());
                 assert_eq!(state_snapshot(self.api).await, before_state);
             }
@@ -621,6 +665,8 @@ impl Coverage<'_> {
             ("POST", "/v2.0/ext/deposits/{id}/close") => Some("TERM_CLOSE"),
             ("POST", "/v2.0/ext/loans") => Some("LOAN_TAKE"),
             ("POST", "/v2.0/ext/loans/{id}/repay") => Some("LOAN_REPAY"),
+            ("POST", "/atm/v1/cash/withdraw") => Some("ATM_WITHDRAW"),
+            ("POST", "/atm/v1/cash/deposit") => Some("ATM_DEPOSIT"),
             _ => None,
         };
         if let Some(kind) = request_type {
@@ -631,7 +677,9 @@ impl Coverage<'_> {
             let before_count = counts(self.api).await;
             let mut changed = request_body.clone();
             let mut conflict_path = path.to_owned();
-            if kind == "INBOUND" {
+            if atm {
+                changed["amount"] = json!("101");
+            } else if kind == "INBOUND" {
                 changed["req_list"][0]["tran_amt"] = json!("124");
             } else if kind == "TERM_CLOSE" {
                 let target = path.split('/').nth(4).unwrap().parse::<i64>().unwrap() + 1;
@@ -658,7 +706,9 @@ impl Coverage<'_> {
             assert_eq!(conflict_body["rsp_code"], "A0007");
             let rows = attempts(self.api, &conflict_id).await;
             assert_eq!(rows.len(), 1);
-            let key = if inbound {
+            let key = if atm {
+                &request_body["idempotency_key"]
+            } else if inbound {
                 &request_body["req_list"][0]["bank_tran_id"]
             } else {
                 &request_body["bank_tran_id"]
@@ -684,10 +734,16 @@ impl Coverage<'_> {
             assert_eq!(conflict_event["payload"]["request_type"], kind);
             // T4: both authorization failure paths persist exactly one unclaimed attempt.
             for forbidden in [false, true] {
+                if atm && forbidden {
+                    // ATM sessions do not have mobile OAuth scopes.
+                    continue;
+                }
                 let before_balances = balances(self.api).await;
                 let before_counts = counts(self.api).await;
                 let mut auth_body = request_body.clone();
-                if inbound {
+                if atm {
+                    auth_body["idempotency_key"] = json!(&new_id()[..20]);
+                } else if inbound {
                     auth_body["req_list"][0]["bank_tran_id"] = json!(bank_tran_id());
                 } else {
                     auth_body["bank_tran_id"] = json!(bank_tran_id());
@@ -703,7 +759,13 @@ impl Coverage<'_> {
                     method,
                     path,
                     &auth_id,
-                    if forbidden { token } else { None },
+                    if forbidden {
+                        token
+                    } else if atm {
+                        Some("outcome-unknown-atm-token")
+                    } else {
+                        None
+                    },
                     auth_body.to_string(),
                     "application/json",
                 )
@@ -725,6 +787,9 @@ impl Coverage<'_> {
                 assert_eq!(counts(self.api).await.1, before_counts.1);
                 let rows = attempts(self.api, &auth_id).await;
                 assert_eq!(rows.len(), 1);
+                if atm {
+                    assert_eq!(answer.1["rsp_code"], "O0001");
+                }
                 assert_attempt(
                     &rows[0],
                     kind,
@@ -876,6 +941,7 @@ async fn outcomes() {
     let mut coverage = Coverage {
         api: &api,
         covered: BTreeSet::new(),
+        refused_bodies: Vec::new(),
     };
     let n = unique_digits(10);
     let phone = format!("010{n}");
@@ -1509,6 +1575,67 @@ async fn outcomes() {
             )
             .await;
     }
+    // Refused persistence must roll back dormancy reactivation and ledger writes.
+    let account = atm_customer.account.clone();
+    api.state
+        .db
+        .run(move |s| {
+            s.execute(
+                &sql_stmt!("test.atm_dormant", "sql/atm_dormant.sql"),
+                &[&account],
+            )?;
+            s.commit()
+        })
+        .await
+        .unwrap();
+    let account_state = sql_stmt!("test.atm_account_state", "sql/atm_account_state.sql");
+    assert_eq!(
+        atm_rows(&api, account_state, &atm_customer.account).await[0]["status"],
+        "DORMANT"
+    );
+    let before = state_snapshot(&api).await;
+    let body = json!({"idempotency_key": &new_id()[..20], "amount": "1"});
+    let id = new_id();
+    refuse(&api, &id, false).await;
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/withdraw",
+        &id,
+        Some(atm_token),
+        Some(body.clone()),
+    )
+    .await;
+    restore(&api).await;
+    coverage.refused_bodies.push(answer.1.clone());
+    assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_atm_response(
+        "POST",
+        "/atm/v1/cash/withdraw",
+        answer.0.as_u16(),
+        &answer.1,
+    );
+    assert_eq!(state_snapshot(&api).await, before);
+    assert_eq!(
+        atm_rows(&api, account_state, &atm_customer.account).await[0]["status"],
+        "DORMANT"
+    );
+    assert!(related(&api, &id).await.is_empty());
+    assert!(attempts(&api, &id).await.is_empty());
+    let answer = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/withdraw",
+        &new_id(),
+        Some(atm_token),
+        Some(body),
+    )
+    .await;
+    assert_eq!(answer.0, StatusCode::OK);
+    assert_eq!(
+        atm_rows(&api, account_state, &atm_customer.account).await[0]["status"],
+        "ACTIVE"
+    );
     coverage
         .success(
             "GET",
@@ -1553,6 +1680,7 @@ async fn outcomes() {
     )
     .await;
     restore(&api).await;
+    coverage.refused_bodies.push(answer.1.clone());
     assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
     assert_atm_response("POST", "/atm/v1/session", answer.0.as_u16(), &answer.1);
     assert!(related(&api, &id).await.is_empty());
@@ -1615,6 +1743,7 @@ async fn outcomes() {
     )
     .await;
     restore(&api).await;
+    coverage.refused_bodies.push(answer.1.clone());
     assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE);
     assert_atm_response(
         "POST",
@@ -1859,6 +1988,7 @@ async fn outcomes() {
             })
             .await
             .unwrap();
+        coverage.refused_bodies.push(answer.1.clone());
         assert_eq!(answer.0, StatusCode::SERVICE_UNAVAILABLE, "{path}");
         assert!(related(&api, &refused).await.is_empty());
         let account = rollback_payee.account.clone();
@@ -1911,12 +2041,23 @@ async fn outcomes() {
         .await
         .unwrap();
     assert_eq!(counter_after, counter_before + 1);
+    coverage.refused_bodies.push(blocked.1.clone());
     assert_eq!(blocked.0, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(blocked.1["rsp_code"], "A0013");
     assert!(blocked_events.is_empty());
     assert_eq!(other.0, StatusCode::OK);
     assert_eq!(other_events.len(), 1);
 
+    for value in common::logs().iter().chain(&coverage.refused_bodies) {
+        assert_no_secret_keys(value);
+        let text = value.to_string();
+        for secret in SECRETS.lock().unwrap().iter() {
+            assert!(
+                !leaks(&text, secret),
+                "secret leaked into log or refusal response"
+            );
+        }
+    }
     // T6: inspect the complete OUTBOX, including handler-owned events.
     let rows: Vec<String> = api.state.db.run(|s| s.query_all(&ALL, &[])).await.unwrap();
     for text in rows {
@@ -1924,6 +2065,7 @@ async fn outcomes() {
             assert!(!leaks(&text, secret), "secret leaked into OUTBOX");
         }
         let event: Value = serde_json::from_str(&text).unwrap();
+        assert_no_secret_keys(&event);
         if event["event_type"] == "request.completed" {
             for key in event["payload"].as_object().unwrap().keys() {
                 assert!(
