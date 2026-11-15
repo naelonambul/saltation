@@ -91,10 +91,11 @@ components:
           type: array
           items:
             type: object
-            required: [customer_no, account_no]
+            required: [customer_no, account_no, atm_pin]
             properties:
               customer_no: { type: string, maxLength: 12 }
               account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+              atm_pin: { type: string, pattern: "^[0-9]{4}$" }
               opening_balance: { type: integer, minimum: 0 }
     SeedAccountsResponse:
       allOf:
@@ -139,6 +140,34 @@ components:
               institution_code: { type: string, pattern: "^[0-9]{3}$" }
               account_no: { type: string, pattern: "^[0-9]{1,16}$" }
               name: { type: string, maxLength: 50 }
+    SeedAtmTerminalsRequest:
+      type: object
+      required: [atm_terminals]
+      properties:
+        atm_terminals:
+          type: array
+          items:
+            type: object
+            required: [terminal_id, region, location, latitude, longitude]
+            properties:
+              terminal_id: { type: string, pattern: '^[\x21-\x7E]{1,20}$' }
+              region: { type: string, pattern: "^KR-(1[1-9]|[2-4][0-9]|50)$" }
+              location: { type: string, maxLength: 60 }
+              latitude: { type: string, pattern: '^(3[3-7](\.[0-9]{1,6})?|38(\.([0-6][0-9]{0,5}|70{0,5}))?)$', description: Decimal degrees from 33.0 through 38.7 inclusive. }
+              longitude: { type: string, pattern: '^(124\.[5-9][0-9]{0,5}|12[5-9](\.[0-9]{1,6})?|13[01](\.[0-9]{1,6})?|132(\.0{1,6})?)$', description: Decimal degrees from 124.5 through 132.0 inclusive. }
+    SeedAtmTerminalsResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [atm_terminals]
+          properties:
+            atm_terminals:
+              type: array
+              items:
+                type: object
+                required: [terminal_id]
+                properties:
+                  terminal_id: { type: string, maxLength: 20 }
     CreatedResponse:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -222,3 +251,11 @@ paths:
         content: { application/json: { schema: { $ref: "#/components/schemas/SeedCounterpartiesRequest" } } }
       responses:
         "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/CreatedResponse" } } } }
+  /internal/v1/seed/atm_terminals:
+    post:
+      summary: Seed ATM terminals
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedAtmTerminalsRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/SeedAtmTerminalsResponse" } } } }

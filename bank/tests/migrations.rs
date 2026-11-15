@@ -24,7 +24,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=15).collect::<Vec<_>>()
+        (1..=16).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -112,13 +112,43 @@ async fn migrations_apply_once_and_are_recorded() {
     .await
     .expect("request attempt constraints");
 
+    db.run(|s| {
+        let tables: Vec<String> =
+            s.query_all(&sql_stmt!("test.atm_tables", "sql/atm_tables.sql"), &[])?;
+        assert_eq!(tables, ["ATM_CREDENTIAL", "ATM_SESSION", "ATM_TERMINAL"]);
+        s.execute(&sql_stmt!("test.atm_fixture", "sql/atm_fixture.sql"), &[])?;
+        let insert = sql_stmt!("test.atm_insert_session", "sql/atm_insert_session.sql");
+        s.execute(
+            &insert,
+            &[
+                &"00000000000000000000000001",
+                &"hash-1",
+                &"00000000000000000000000001",
+            ],
+        )?;
+        let duplicate = s
+            .execute(
+                &insert,
+                &[
+                    &"00000000000000000000000002",
+                    &"hash-2",
+                    &"00000000000000000000000002",
+                ],
+            )
+            .expect_err("one open ATM session per terminal");
+        assert_eq!(duplicate.ora_code(), Some(1));
+        s.rollback()
+    })
+    .await
+    .expect("ATM tables and open-session uniqueness");
+
     assert_eq!(recorded, MIGRATIONS.len() as i64);
     assert_eq!(
         outbox_ts, "OUTBOX_TS/OUTBOX_TS",
         "outbox and its index live in the capped tablespace"
     );
     assert!(
-        tables >= 29,
+        tables >= 32,
         "expected the stage-1 and stage-2 tables, found {tables}"
     );
 }

@@ -128,7 +128,7 @@ cargo_test() {
   [ "${1:-}" = -- ] && { shift; args=("$@"); }
   local extra_env=()
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
-  [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI)
+  [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   dev_image
   docker run --rm --name saltation-it-cargo --network "${project}_data" \
     -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
@@ -197,7 +197,7 @@ observability() {
 # transfers from the generator, the Rust end-to-end checks, Prometheus data,
 # then a person's flow in the mobile web app with Playwright.
 e2e() {
-  local since start gen roster phone password to_account
+  local since start gen roster phone password to_account atm
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start=$(( ($(date +%s) % 90000) * 1000 ))
   gen=("${compose[@]}" --profile tools run --rm generator)
@@ -206,6 +206,7 @@ e2e() {
   # A new database starts in backfill mode; the run and the browser flow need live time.
   echo "e2e: seeding counterparties and switching to live"
   "${gen[@]}" seed-parties --counterparties 50
+  "${gen[@]}" seed-terminals
   "${gen[@]}" clock live
   # Other targets reset the Oracle schema; a roster kept from an earlier run
   # would name customers the bank no longer has.
@@ -215,8 +216,9 @@ e2e() {
   "${gen[@]}" seed --customers 1000 --start "$start"
   echo "e2e: 10 minutes of normal transfers at 5 per second"
   "${gen[@]}" run-normal --minutes "${E2E_MINUTES:-10}" --rate 5
-  MONGO_TRUTH_URI="mongodb://generator:${MONGO_GENERATOR_PASSWORD}@mongo:27017/truth" E2E_SINCE="$since" \
-    cargo_test e2e -- generator_run_is_labelled_logged_and_consistent --nocapture
+  atm=$("${gen[@]}" atm-smoke)
+  E2E_ATM="$atm" MONGO_TRUTH_URI="mongodb://generator:${MONGO_GENERATOR_PASSWORD}@mongo:27017/truth" E2E_SINCE="$since" \
+    cargo_test e2e -- --nocapture
   local count
   count=$(docker run --rm --network "${project}_obs" curlimages/curl:8.15.0 -fsS -G http://prometheus:9090/api/v1/query \
     --data-urlencode 'query=sum(bank_http_request_duration_seconds_count{endpoint="/v2.0/transfer/withdraw/fin_num"})' \
@@ -245,6 +247,7 @@ run_target() {
     transfers)   cargo_test transfers ;;
     payees)      cargo_test payees ;;
     outcomes)    cargo_test outcomes ;;
+    atm)         cargo_test atm ;;
     inbound)     cargo_test inbound ;;
     password_reset) cargo_test password_reset ;;
     deposits) cargo_test deposits ;;
@@ -261,9 +264,9 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
   run_target observability
 else
   run_target "$target"

@@ -302,6 +302,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
                     "MOBILE",
                     &req.bank_tran_id,
                     (Some(&plan.customer_no), Some(&plan.session_id)),
+                    None,
                 )?;
             }
             return match stored {
@@ -459,6 +460,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
         ],
     )?;
     let mut movement = Movement {
+        terminal_id: None,
         kind: Kind::Transfer,
         payee_registered: Some(registered > 0),
         request_id: Some(&ctx.request_id),

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "atm-channel",
+  "kind": "implementation",
+  "title": "ATM channel: terminals, PIN credentials, sessions, cash (stage 3)",
+  "base": {
+    "ref": "main",
+    "commit": "001c3d227172499581395ecc9a61955eba9eac8c"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "bank/**",
+    "contracts/**",
+    "generator/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/dev-host.md",
+    "infra/compose/compose.yml",
+    "infra/compose/.env.example"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8b51b2dff367eac760559fa1c040cb2675fddce6f089abea5dc4d102d2d7e402",
+      "by": "naelonambul",
+      "at": "2026-11-14T21:46:40Z",
+      "write_scope_sha256": "sha256:2720c182401feeec3b07057de7c1fdd19fc2d360287c0d6828a5b15b2d708714",
+      "note": "\uc2b9\uc778 (ATM\ub9cc, open question (a) \ub864\uc624\ubc84 \uc791\uc5c5); \uc2b9\uc778 \uae30\ub85d"
+    }
+  ]
+}

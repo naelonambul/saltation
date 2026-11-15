@@ -204,9 +204,7 @@ impl Db {
                 outcome_arrival: None,
             };
             let result = work(&mut session);
-            if result.is_err() {
-                let _ = session.rollback();
-            }
+            let _ = session.rollback();
             (result, session.stats)
         })
         .await;

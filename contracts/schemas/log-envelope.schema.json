@@ -130,7 +130,7 @@
     },
     "payload": {
       "type": "object",
-      "description": "For request.completed: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; money-moving completions also retain tran_amt, transfer_id, reason, counterparty_bank_code, counterparty_account_no; never a request or response body, header value or secret."
+      "description": "For request.completed: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; money-moving completions also retain tran_amt, transfer_id, reason, counterparty_bank_code, counterparty_account_no; never a request or response body, header value or secret. For atm.*: terminal_id, region, latitude, longitude, account_no, request_id; session_started adds session_id; session_rejected adds bank_rsp_code and locked (whether this attempt locked the account); session_ended adds reason, session_id, start_request_id and ended_at; operation adds operation (withdraw, deposit, balance), outcome (approved, rejected), amount, rsp_code and bank_rsp_code."
     }
   }
 }

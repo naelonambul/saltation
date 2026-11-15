@@ -13,7 +13,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 pub async fn state() -> AppState {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    init_logs();
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrate");
     let clock = Clock::init(db.clone(), Registry::default())
@@ -60,6 +60,19 @@ pub async fn call(
     bearer: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    let (status, body, _) = call_with_capture(router, method, path, request_id, bearer, body).await;
+    (status, body)
+}
+
+/// Retains non-JSON response text for secrecy scanning alongside the usual JSON result.
+pub async fn call_with_capture(
+    router: &Router,
+    method: &str,
+    path: &str,
+    request_id: &str,
+    bearer: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Value, Value) {
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -77,10 +90,15 @@ pub async fn call(
     let res = router.clone().oneshot(req).await.expect("response");
     let status = res.status();
     let bytes = res.into_body().collect().await.expect("body").to_bytes();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-    )
+    let parsed = serde_json::from_slice(&bytes);
+    let scanned = parsed.as_ref().cloned().unwrap_or_else(|_| {
+        if bytes.is_empty() {
+            Value::Null
+        } else {
+            Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    });
+    (status, parsed.unwrap_or(Value::Null), scanned)
 }
 
 /// Validates a JSON value against a schema in `contracts/openapi/public.yaml`.
@@ -161,7 +179,7 @@ pub async fn customer(api: &Api, opening: i64) -> Customer {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_contract("CreatedResponse", &body);
     let (status, body) = call(&api.generator, "POST", "/internal/v1/seed/accounts", &new_id(), None,
-        Some(serde_json::json!({"accounts": [{"customer_no": no, "account_no": account, "opening_balance": opening}]}))).await;
+        Some(serde_json::json!({"accounts": [{"customer_no": no, "atm_pin": TEST_ATM_PIN, "account_no": account, "opening_balance": opening}]}))).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_contract("SeedAccountsResponse", &body);
     let fin = body["accounts"][0]["fintech_use_num"]
@@ -255,3 +273,178 @@ pub async fn form_call(router: &Router, path: &str, body: String) -> (StatusCode
 }
 
 pub mod deposits;
+
+pub const TEST_ATM_PIN: &str = "7391";
+pub const WRONG_ATM_PIN: &str = "8462";
+pub type Logs = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+static DAILY_LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+struct Capture;
+struct Fields(serde_json::Map<String, Value>);
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+        self.0
+            .insert(f.name().into(), serde_json::json!(format!("{v:?}")));
+    }
+    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_bool(&mut self, f: &tracing::field::Field, v: bool) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+    fn record_f64(&mut self, f: &tracing::field::Field, v: f64) {
+        self.0.insert(f.name().into(), serde_json::json!(v));
+    }
+}
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = Fields(Default::default());
+        event.record(&mut fields);
+        fields.0.insert(
+            "level".into(),
+            serde_json::json!(event.metadata().level().as_str()),
+        );
+        fields.0.insert(
+            "target".into(),
+            serde_json::json!(event.metadata().target()),
+        );
+        let line = Value::Object(fields.0);
+        if line["message"].as_str() == Some("daily close") {
+            DAILY_LOGS
+                .get_or_init(Logs::default)
+                .lock()
+                .unwrap()
+                .push(line.clone());
+        }
+        LOGS.get_or_init(Logs::default).lock().unwrap().push(line);
+    }
+}
+pub fn init_logs() {
+    use tracing_subscriber::prelude::*;
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .with(Capture)
+            .try_init()
+            .expect("shared test log subscriber");
+    });
+}
+pub fn logs() -> Vec<Value> {
+    LOGS.get_or_init(Logs::default).lock().unwrap().clone()
+}
+pub fn daily_logs() -> Logs {
+    init_logs();
+    DAILY_LOGS.get_or_init(Logs::default).clone()
+}
+/// A whole ULID or 64-character hex digest: an identifier whose digits may
+/// contain a PIN by chance, so it is not scanned for one.
+pub fn opaque_id(s: &str) -> bool {
+    let ulid = s.len() == 26
+        && s.bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b));
+    let hex = s.len() == 64
+        && (s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)));
+    ulid || hex
+}
+pub fn find_pin(haystack: &Value, pin: &str) -> Option<String> {
+    match haystack {
+        Value::String(s) if opaque_id(s) => None,
+        Value::String(s) => {
+            let boundary = |b: u8| !b.is_ascii_digit() && b != b'.';
+            s.match_indices(pin)
+                .find(|(i, _)| {
+                    (*i == 0 || boundary(s.as_bytes()[i - 1]))
+                        && (*i + pin.len() == s.len() || boundary(s.as_bytes()[i + pin.len()]))
+                })
+                .map(|_| s.clone())
+        }
+        Value::Number(n) => find_pin(&Value::String(n.to_string()), pin),
+        Value::Array(a) => a.iter().find_map(|v| find_pin(v, pin)),
+        Value::Object(o) => o.iter().find_map(|(key, value)| {
+            if key == "pin" || key == "atm_pin" {
+                Some(key.clone())
+            } else {
+                find_pin(value, pin)
+            }
+        }),
+        _ => None,
+    }
+}
+pub fn assert_no_pin(what: &str, values: &[Value], pin: &str) {
+    for value in values {
+        if let Some(found) = find_pin(value, pin) {
+            panic!("{what} contains PIN in value {found}");
+        }
+    }
+}
+
+/// Validate the generator ATM contract independently of public schemas.
+pub fn assert_atm_contract(schema_name: &str, value: &Value) {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
+    let text = std::fs::read_to_string(format!("{dir}/openapi/atm.yaml")).expect("ATM contract");
+    let doc: Value = serde_yaml::from_str(&text).expect("ATM YAML");
+    let defs = doc["components"]["schemas"]
+        .to_string()
+        .replace("#/components/schemas/", "#/$defs/");
+    let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": serde_json::from_str::<Value>(&defs).unwrap(), "$ref": format!("#/$defs/{schema_name}")});
+    let validator = jsonschema::draft202012::new(&schema).expect("ATM schema");
+    let errors: Vec<_> = validator
+        .iter_errors(value)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{schema_name}: {errors:?}");
+}
+
+/// Validate every documented ATM response, including rejection and retry paths.
+pub fn assert_atm_response(method: &str, path: &str, status: u16, body: &Value) {
+    let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
+    let text = std::fs::read_to_string(format!("{dir}/openapi/atm.yaml")).expect("ATM contract");
+    let doc: Value = serde_yaml::from_str(&text).expect("ATM YAML");
+    let method = method.to_lowercase();
+    let mut response = doc["paths"][path][&method]["responses"]
+        .get(status.to_string())
+        .unwrap_or_else(|| panic!("undocumented ATM response: {method} {path} {status}"));
+    while let Some(reference) = response.get("$ref") {
+        response = doc
+            .pointer(
+                reference
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix('#')
+                    .expect("local response reference"),
+            )
+            .expect("response reference resolves");
+    }
+    let content = response["content"]["application/json"]["schema"].clone();
+    assert!(
+        content.is_object(),
+        "response schema: {method} {path} {status}"
+    );
+    let components: Value = serde_json::from_str(
+        &doc["components"]
+            .to_string()
+            .replace("#/components/", "#/$defs/"),
+    )
+    .unwrap();
+    let content: Value =
+        serde_json::from_str(&content.to_string().replace("#/components/", "#/$defs/")).unwrap();
+    let schema = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": components,
+        "allOf": [content]
+    });
+    let validator = jsonschema::draft202012::new(&schema).expect("ATM response schema");
+    let errors: Vec<_> = validator.iter_errors(body).map(|e| e.to_string()).collect();
+    assert!(errors.is_empty(), "{method} {path} {status}: {errors:?}");
+}

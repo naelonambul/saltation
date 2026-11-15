@@ -117,7 +117,8 @@ pub fn generator_router(state: AppState) -> Router {
         public_routes()
             .merge(features::internal::router())
             .merge(features::password_reset::sms_router())
-            .merge(features::inbound::router()),
+            .merge(features::inbound::router())
+            .merge(features::atm::router()),
         Listener::Generator,
         state,
     )
