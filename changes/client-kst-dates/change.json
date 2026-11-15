@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "client-kst-dates",
+  "kind": "incident",
+  "title": "Mobile client sends dates in the browser's time zone",
+  "base": {
+    "ref": "main",
+    "commit": "001c3d227172499581395ecc9a61955eba9eac8c"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:09bcb070f940fabd6adf323dd4a6b40fc3463139d77fc32e84e0fd44ab7eecdd"
+  },
+  "write_scope": [
+    "web/apps/mobile/src/shared/**",
+    "web/apps/mobile/e2e/**",
+    "web/apps/mobile/playwright.config.ts",
+    "scripts/dev/it-oracle.sh",
+    "checks.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8b376f8c6d3b382292be08292eb3aafdaff1f0eea4888a50d1cf4f0e93d9974a",
+      "by": "naelonambul",
+      "at": "2026-11-15T06:58:55Z",
+      "write_scope_sha256": "sha256:452c607cab5ee3ff3dabb45cc4c16b16a54f4ecbe0fa824e254c5bd142bef2a0"
+    }
+  ]
+}

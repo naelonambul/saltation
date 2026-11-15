@@ -12,13 +12,14 @@ export function newBankTranId(clientCode = "M2026SALTW"): string {
   return `${clientCode.slice(0, 10).padEnd(10, "0")}U${randomChars(9)}`;
 }
 
-/** KFTC tran_dtime, N(14): YYYYMMDDHHMMSS in local time. */
+/** KFTC tran_dtime, N(14): YYYYMMDDHHMMSS in KST (UTC+9), whatever the device's time zone. */
 export function tranDtime(now = new Date()): string {
+  const kst = new Date(now.getTime() + 9 * 3600_000);
   const p = (n: number, w = 2) => String(n).padStart(w, "0");
-  return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  return `${kst.getUTCFullYear()}${p(kst.getUTCMonth() + 1)}${p(kst.getUTCDate())}${p(kst.getUTCHours())}${p(kst.getUTCMinutes())}${p(kst.getUTCSeconds())}`;
 }
 
-/** YYYYMMDD for a date. */
+/** YYYYMMDD for Korea's date. */
 export function ymd(d: Date): string {
   return tranDtime(d).slice(0, 8);
 }
