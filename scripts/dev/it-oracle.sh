@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: driver-bench, driver-parity, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -138,8 +138,11 @@ cargo_test() {
   local extra_env=()
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
+  [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
+  local deadline_command=()
+  [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
   dev_image
-  docker run --rm --name saltation-it-cargo --network "${project}_data" \
+  ${deadline_command[@]+"${deadline_command[@]}"} docker run --rm --name saltation-it-cargo --network "${project}_data" \
     -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
     -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
     -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
@@ -319,10 +322,25 @@ browser_dates() {
   fi
 }
 
+# The db-pool cases that need their own process: another session time zone, and a
+# timed exit after closing a warmed pool.
+db_pool_isolated() {
+  ORA_SDTZ=+00:00 cargo_test db_pool -- --ignored --exact db_pool_rejects_other_time_zones
+  # Compile and run once before timing the already-built test process.
+  cargo_test db_pool -- --ignored --exact db_pool_close_exits
+  local started=$SECONDS
+  CARGO_TEST_TIMEOUT=60 cargo_test db_pool -- --ignored --exact db_pool_close_exits
+  [ "$((SECONDS - started))" -le 5 ] || { echo "db-pool close process exceeded 5 s" >&2; return 1; }
+}
+
 run_target() {
   case "$1" in
     driver-bench) driver_bench ;;
     driver-parity) reset_schema; cargo_test driver_parity ;;
+    db-pool)
+      cargo_test db_pool
+      db_pool_isolated
+      ;;
     migrations)  reset_schema; cargo_test migrations ;;
     backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
@@ -349,9 +367,10 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  db_pool_isolated
   run_target observability
 else
   run_target "$target"

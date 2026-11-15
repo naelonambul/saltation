@@ -3,6 +3,7 @@
 # The `oracle` crate compiles ODPI-C and loads the Instant Client at runtime.
 
 FROM oraclelinux:9 AS dev
+ENV ORA_SDTZ=+09:00
 ARG RUST_VERSION=1.99.1
 RUN dnf -y install gcc git && dnf -y install oracle-instantclient-release-23ai-el9 \
  && dnf -y install oracle-instantclient-basiclite libaio && dnf clean all
@@ -17,6 +18,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/t
     cargo build --release --locked && cp /target/release/bank /bank
 
 FROM oraclelinux:9-slim AS runtime
+ENV ORA_SDTZ=+09:00
 RUN microdnf -y install oracle-instantclient-release-23ai-el9 \
  && microdnf -y install oracle-instantclient-basiclite libaio ca-certificates \
  && microdnf clean all && rm -rf /var/cache/yum /var/cache/dnf
