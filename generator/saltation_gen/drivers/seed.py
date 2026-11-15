@@ -6,6 +6,7 @@ import random
 from typing import Any
 
 from saltation_gen.client import BankClient
+from saltation_gen.config import ATM_TERMINALS
 from saltation_gen.truth import TruthStore
 
 FAMILY = ["김", "이", "박", "최", "정", "강", "조", "윤", "장", "임"]
@@ -15,6 +16,7 @@ BATCH = 200
 
 def make_customers(seed: int, count: int, start: int = 0) -> list[dict[str, Any]]:
     rng = random.Random(seed)
+    pin_rng = random.Random(f"{seed}:atm_pin")
     out = []
     for i in range(start, start + count):
         n = f"{i:08d}"
@@ -26,6 +28,7 @@ def make_customers(seed: int, count: int, start: int = 0) -> list[dict[str, Any]
                 "address": "서울",
                 "customer_type": "INDIVIDUAL",
                 "password": f"pw-{rng.getrandbits(48):012x}",
+                "atm_pin": f"{pin_rng.randrange(10000):04d}",
                 "account_no": f"998{n}",
                 "opening_balance": rng.choice([300_000, 1_000_000, 3_000_000, 10_000_000]),
             }
@@ -48,6 +51,7 @@ async def seed(bank: BankClient, truth: TruthStore, seed: int, count: int, start
                 {
                     "customer_no": c["customer_no"],
                     "account_no": c["account_no"],
+                    "atm_pin": c["atm_pin"],
                     "opening_balance": c["opening_balance"],
                 }
                 for c in batch
@@ -92,3 +96,7 @@ async def seed_parties(bank: BankClient, seed: int, count: int) -> dict[str, int
         for i in range(0, len(items), BATCH):
             counts[key] += await send(items[i : i + BATCH])
     return counts
+
+
+async def seed_terminals(bank: BankClient) -> int:
+    return await bank.seed_atm_terminals(ATM_TERMINALS)

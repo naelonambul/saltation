@@ -105,6 +105,7 @@ pub fn lock_daily(s: &mut Session, account_id: i64, date: NaiveDate) -> Result<D
 pub enum Kind {
     Transfer,
     Inbound,
+    AtmCash,
     TermOpen,
     TermClose,
     LoanDisburse,
@@ -116,6 +117,7 @@ impl Kind {
         match self {
             Kind::Transfer => "transfer",
             Kind::Inbound => "inbound",
+            Kind::AtmCash => "atm_cash",
             Kind::TermOpen => "term_open",
             Kind::TermClose => "term_close",
             Kind::LoanDisburse => "loan_disburse",
@@ -145,6 +147,7 @@ pub struct Leg {
 #[derive(Debug, Clone)]
 pub struct Movement<'a> {
     pub kind: Kind,
+    pub terminal_id: Option<&'a str>,
     pub payee_registered: Option<bool>,
     pub request_id: Option<&'a str>,
     pub ctx: Option<&'a RequestContext>,
@@ -204,8 +207,6 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
     )?;
     let date = business_date(m.occurred_at);
     let mut balances_after = Vec::with_capacity(m.legs.len());
-    let no_terminal = None::<String>;
-    let no_cash = 0i64;
     let mut sequences = Vec::with_capacity(m.legs.len());
     let mut flags = Vec::with_capacity(m.legs.len());
     for leg in &m.legs {
@@ -235,7 +236,7 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
             &leg.counterparty_account_no,
             &leg.counterparty_name,
             &m.channel,
-            &no_terminal,
+            &m.terminal_id,
             &m.request_id,
             &transfer_id,
             &date,
@@ -252,15 +253,25 @@ pub fn post(s: &mut Session, locks: &mut LockSet, m: &Movement<'_>) -> Result<Po
     s.execute_batch(&INSERT_ROW, &rows)?;
     s.execute_batch(&UPDATE_ACCOUNT, &updates)?;
     for leg in &m.legs {
-        if leg.transfer_out != 0 {
+        let cash_in = if m.kind == Kind::AtmCash {
+            leg.amount.max(0)
+        } else {
+            0
+        };
+        let cash_out = if m.kind == Kind::AtmCash {
+            (-leg.amount).max(0)
+        } else {
+            0
+        };
+        if leg.transfer_out != 0 || cash_in != 0 || cash_out != 0 {
             s.execute(
                 &ADD_DAILY,
                 &[
                     &leg.account_id,
                     &date,
                     &leg.transfer_out,
-                    &no_cash,
-                    &no_cash,
+                    &cash_in,
+                    &cash_out,
                 ],
             )?;
         }
@@ -295,6 +306,7 @@ fn check_shape(kind: Kind, amount: i64, amounts: &[i64]) -> Result<(), LedgerErr
     let valid = match kind {
         Kind::Transfer => (amounts.len() == 1 && amounts[0] < 0) || offsets,
         Kind::Inbound => amounts.len() == 1 && amounts[0] > 0,
+        Kind::AtmCash => amounts.len() == 1,
         Kind::TermOpen | Kind::TermClose => offsets,
         Kind::LoanDisburse => amounts.len() == 2 && amounts[0] > 0 && amounts[0] == amounts[1],
         Kind::LoanRepay => amounts.len() == 2 && amounts[0] < 0 && amounts[0] == amounts[1],
@@ -356,6 +368,7 @@ mod tests {
         for (kind, accepted, rejected) in [
             (Kind::Transfer, vec![-10, 10], vec![-10, 9]),
             (Kind::Inbound, vec![10], vec![-10]),
+            (Kind::AtmCash, vec![-10], vec![10, -10]),
             (Kind::TermOpen, vec![-10, 10], vec![10]),
             (Kind::TermClose, vec![10, -10], vec![10, 10]),
             (Kind::LoanDisburse, vec![10, 10], vec![-10, -10]),

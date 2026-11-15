@@ -8,7 +8,7 @@ from dataclasses import asdict
 
 from saltation_gen.client import BankClient, new_ulid
 from saltation_gen.config import Settings
-from saltation_gen.drivers import live_normal
+from saltation_gen.drivers import atm, live_normal
 from saltation_gen.drivers import seed as seeding
 from saltation_gen.truth import TruthStore
 
@@ -16,7 +16,7 @@ from saltation_gen.truth import TruthStore
 async def _main(args: argparse.Namespace) -> None:
     settings = (
         Settings.from_env()
-        if args.command in ("seed", "run-normal")
+        if args.command in ("seed", "run-normal", "atm-smoke")
         else Settings(
             bank_url=os.environ.get("SALTATION_BANK_URL", "http://bank:8081"),
             truth_uri="",
@@ -26,11 +26,16 @@ async def _main(args: argparse.Namespace) -> None:
     bank = BankClient(settings.bank_url)
     truth = None
     try:
-        if args.command in ("seed", "run-normal"):
+        if args.command in ("seed", "run-normal", "atm-smoke"):
             truth = TruthStore(settings.truth_uri)
-            await truth.setup()
+            if args.command != "atm-smoke":
+                await truth.setup()
         if args.command == "seed-parties":
             print(json.dumps(await seeding.seed_parties(bank, settings.seed, args.counterparties)))
+        elif args.command == "atm-smoke":
+            print(json.dumps(await atm.smoke(bank, truth)))
+        elif args.command == "seed-terminals":
+            print(json.dumps({"atm_terminals": await seeding.seed_terminals(bank)}))
         elif args.command == "clock":
             if args.clock_command == "show":
                 result = await bank.clock()
@@ -76,6 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rate", type=float, default=5.0, help="requests per second")
     p = sub.add_parser("seed-parties")
     p.add_argument("--counterparties", type=int, required=True)
+    sub.add_parser("seed-terminals")
+    sub.add_parser("atm-smoke")
     p = sub.add_parser("clock")
     clocks = p.add_subparsers(dest="clock_command", required=True)
     clocks.add_parser("show")

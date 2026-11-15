@@ -8,14 +8,14 @@ use bank::shared::rollover::last_instant;
 use bank::sql_stmt;
 use chrono::{NaiveDate, TimeZone};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
-use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::{Layer, Registry};
+use std::sync::Arc;
 const HISTORY: SqlStmt = sql_stmt!("test.close_history", "../sql/close_history.sql");
 const ROWS: SqlStmt = sql_stmt!("test.close_rows", "../sql/close_rows.sql");
 const BALANCE: SqlStmt = sql_stmt!("test.close_balance", "../sql/close_balance.sql");
 const AMOUNT: SqlStmt = sql_stmt!("test.close_amount", "../sql/close_amount.sql");
 const LEG: SqlStmt = sql_stmt!("test.close_leg", "../sql/close_leg.sql");
+const ATM_LEG: SqlStmt = sql_stmt!("test.close_atm_leg", "../sql/close_atm_leg.sql");
+const COPY_LEG: SqlStmt = sql_stmt!("test.close_copy_leg", "../sql/close_copy_leg.sql");
 const BACKUP: SqlStmt = sql_stmt!("test.close_backup", "../sql/close_backup.sql");
 const DELETE: SqlStmt = sql_stmt!("test.close_delete_leg", "../sql/close_delete_leg.sql");
 const RESTORE: SqlStmt = sql_stmt!("test.close_restore", "../sql/close_restore.sql");
@@ -37,35 +37,9 @@ const RESTORE_PREVIOUS: SqlStmt = sql_stmt!(
 const CONSISTENT: SqlStmt = sql_stmt!("test.close_consistent", "../sql/close_consistent.sql");
 const FINAL: SqlStmt = sql_stmt!("test.close_final", "../sql/close_final.sql");
 type Row = (String, i64, i64, String, Option<String>);
-pub type Logs = Arc<Mutex<Vec<Value>>>;
-struct Capture(Logs);
-struct Fields(serde_json::Map<String, Value>);
-impl tracing::field::Visit for Fields {
-    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-        self.0.insert(f.name().into(), json!(format!("{v:?}")));
-    }
-    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
-        self.0.insert(f.name().into(), json!(v));
-    }
-    fn record_i64(&mut self, f: &tracing::field::Field, v: i64) {
-        self.0.insert(f.name().into(), json!(v));
-    }
-}
-impl<S: tracing::Subscriber> Layer<S> for Capture {
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        let mut f = Fields(Default::default());
-        event.record(&mut f);
-        if f.0.get("message").and_then(Value::as_str) == Some("daily close") {
-            f.0.insert("level".into(), json!(event.metadata().level().as_str()));
-            self.0.lock().unwrap().push(Value::Object(f.0));
-        }
-    }
-}
+pub type Logs = common::Logs;
 pub fn capture_logs() -> Logs {
-    let logs = Logs::default();
-    tracing::subscriber::set_global_default(Registry::default().with(Capture(logs.clone())))
-        .expect("daily-close capture subscriber");
-    logs
+    common::daily_logs()
 }
 async fn date(api: &Api) -> NaiveDate {
     business_date(api.state.clock.state().await.unwrap().business_time)
@@ -367,6 +341,70 @@ pub async fn sequence(
     inbound(api, &inbound_token, &altered, &external).await;
     inbound(api, &inbound_token, &empty, &external).await;
     transfer(api, &sender, "998", &receiver.account, 10).await;
+    let atm = common::customer(api, 10000).await;
+    let terminal = format!("T{}", common::unique_digits(15));
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/internal/v1/seed/atm_terminals",
+        &new_id(),
+        None,
+        Some(json!({"atm_terminals": [{"terminal_id": terminal, "region": "KR-11", "location": "서울", "latitude": "37.566500", "longitude": "126.978000"}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session",
+        &new_id(),
+        None,
+        Some(json!({"terminal_id": terminal, "account_no": atm.account, "pin": common::TEST_ATM_PIN})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["atm_session_token"].as_str().unwrap();
+    let withdrawal_request_id = new_id();
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/withdraw",
+        &withdrawal_request_id,
+        Some(token),
+        Some(json!({"idempotency_key": common::unique_digits(20), "amount": "100"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request_id = withdrawal_request_id.clone();
+    let atm_rows: Vec<i64> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&ATM_LEG, &[&request_id]))
+        .await
+        .unwrap();
+    assert_eq!(atm_rows.len(), 1, "one withdrawal ledger row");
+    let atm_id = atm_rows[0];
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/cash/deposit",
+        &new_id(),
+        Some(token),
+        Some(json!({"idempotency_key": common::unique_digits(20), "amount": "200"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/atm/v1/session/end",
+        &new_id(),
+        Some(token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_clean(api, bad_date, logs, metrics).await;
     let altered_id = legs(api, &altered.account, bad_date).await[0];
     let leg_id = legs(api, &sender.account, bad_date).await[0];
     let empty_id = legs(api, &empty.account, bad_date).await[0];
@@ -405,7 +443,7 @@ pub async fn sequence(
     assert_clean(api, bad_date, logs, metrics).await;
 
     // Each corruption starts from, and returns to, an entirely clean close.
-    for witness in 0..7 {
+    for witness in 0..10 {
         let idle_no = idle.account.clone();
         let sender_no = sender.account.clone();
         let empty_no = empty.account.clone();
@@ -414,19 +452,43 @@ pub async fn sequence(
         let touched_id = match witness {
             1 | 6 => altered_id,
             4 => receiver_id,
+            7..=9 => atm_id,
             _ => empty_id,
         };
-        let saved: String = api
+        let request_id = withdrawal_request_id.clone();
+        let (saved, inserted_ids): (String, Vec<i64>) = api
             .state
             .db
             .run(move |s| {
                 let saved = s.query_row(&BACKUP, &[&touched_id])?;
+                let mut inserted_ids = Vec::new();
                 match witness {
                     0 => {
                         assert_eq!(s.execute(&BALANCE, &[&1i64, &idle_no])?, 1);
                     }
                     1 => {
                         assert_eq!(s.execute(&AMOUNT, &[&1i64, &altered_id])?, 1);
+                    }
+                    7 => {
+                        assert_eq!(s.execute(&AMOUNT, &[&1i64, &atm_id])?, 1);
+                    }
+                    8 => {
+                        assert_eq!(s.execute(&COPY_LEG, &[&atm_id])?, 1);
+                        let ids: Vec<i64> = s.query_all(&ATM_LEG, &[&request_id])?;
+                        assert_eq!(ids.len(), 2, "withdrawal plus duplicate ledger row");
+                        inserted_ids.push(*ids.iter().find(|&&id| id != atm_id).unwrap());
+                    }
+                    9 => {
+                        let copy = sql_stmt!(
+                            "test.close_copy_leg_signed",
+                            "../sql/close_copy_leg_signed.sql"
+                        );
+                        for sign in [-1i64, 1] {
+                            assert_eq!(s.execute(&copy, &[&sign, &atm_id])?, 1);
+                        }
+                        let ids: Vec<i64> = s.query_all(&ATM_LEG, &[&request_id])?;
+                        assert_eq!(ids.len(), 3);
+                        inserted_ids.extend(ids.into_iter().filter(|&id| id != atm_id));
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&1i64, &leg_id])?, 1);
@@ -447,7 +509,7 @@ pub async fn sequence(
                     _ => unreachable!(),
                 }
                 s.commit()?;
-                Ok(saved)
+                Ok((saved, inserted_ids))
             })
             .await
             .unwrap();
@@ -473,6 +535,7 @@ pub async fn sequence(
             ),
             5 => (1, 0, vec![(&idle.account, "no previous close")]),
             6 => (1, 1, vec![(&altered.account, "row without transfer")]),
+            7..=9 => (1, 1, vec![(&atm.account, "balance:")]),
             _ => unreachable!(),
         };
         let report = rerun(api, bad_date, logs, metrics).await;
@@ -487,17 +550,48 @@ pub async fn sequence(
         );
         let actual = rows(api, bad_date).await;
         assert_bad_rows(&actual, &expected);
-        if witness == 1 {
+        if witness == 1 || witness == 7 || witness == 8 || witness == 9 {
+            let account = if witness == 1 {
+                &altered.account
+            } else {
+                &atm.account
+            };
             assert!(
                 actual
                     .iter()
-                    .find(|r| r.0 == altered.account)
+                    .find(|r| &r.0 == account)
                     .unwrap()
                     .4
                     .as_ref()
                     .unwrap()
                     .contains("violate F-21")
             );
+        }
+        if witness == 7 || witness == 8 || witness == 9 {
+            let detail = actual
+                .iter()
+                .find(|r| r.0 == atm.account)
+                .unwrap()
+                .4
+                .as_ref()
+                .unwrap();
+            assert!(detail.contains("atm_cash rows violate F-21"), "{detail}");
+            if witness == 9 {
+                // The cancelling pair leaves the total unchanged, but the final
+                // copied withdrawal retains its earlier balance_after of 9900.
+                assert!(
+                    detail.contains("balance: expected 10100 last_row 9900 stored 10100"),
+                    "{detail}"
+                );
+            }
+            if witness == 8 {
+                // Opening 0 + seed 10000 - withdrawal 100 + deposit 200 - copy 100.
+                // The copied withdrawal is last by sequence and keeps balance_after 9900.
+                assert!(
+                    detail.contains("balance: expected 10000 last_row 9900 stored 10100"),
+                    "{detail}"
+                );
+            }
         }
         let idle_no = idle.account.clone();
         let empty_no = empty.account.clone();
@@ -511,9 +605,14 @@ pub async fn sequence(
                     0 => {
                         assert_eq!(s.execute(&BALANCE, &[&-1i64, &idle_no])?, 1);
                     }
-                    1 | 4 | 6 => {
+                    1 | 4 | 6 | 7 => {
                         assert_eq!(s.execute(&DELETE, &[&touched_id])?, 1);
                         assert_eq!(s.execute(&RESTORE, &[&saved])?, 1);
+                    }
+                    8 | 9 => {
+                        for id in inserted_ids {
+                            assert_eq!(s.execute(&DELETE, &[&id])?, 1);
+                        }
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&-1i64, &leg_id])?, 1);

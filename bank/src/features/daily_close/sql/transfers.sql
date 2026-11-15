@@ -14,6 +14,7 @@ WITH shapes AS (
  WHEN kind = 'transfer' AND ((n = 2 AND accounts = 2 AND total = 0 AND external_bank = 0) OR (n = 1 AND total = -amount AND external_bank = 1)) THEN 0
  WHEN kind IN ('term_open', 'term_close') AND n = 2 AND accounts = 2 AND total = 0 THEN 0
  WHEN kind = 'inbound' AND n = 1 AND total = amount THEN 0
+ WHEN kind = 'atm_cash' AND n = 1 AND ABS(total) = amount THEN 0
  WHEN kind = 'loan_disburse' AND n = 2 AND accounts = 2 AND minimum = amount AND maximum = amount THEN 0
  WHEN kind = 'loan_repay' AND n = 2 AND accounts = 2 AND minimum = -amount AND maximum = -amount THEN 0
  ELSE 1 END = 1

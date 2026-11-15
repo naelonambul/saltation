@@ -1,0 +1,316 @@
+openapi: 3.1.0
+info:
+  title: Saltation ATM interface
+  version: 0.1.0
+  description: >
+    ATM sessions last three minutes of business time. Only the SHA-256 hash
+    of the opaque session token is stored. Every response carries the common
+    envelope and an X-Request-Id header. Numeric amounts are JSON strings.
+servers:
+  - url: http://localhost:8081
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+    SimIp:
+      name: X-Sim-Ip
+      in: header
+      required: false
+      schema: { type: string, maxLength: 45 }
+    SimRegion:
+      name: X-Sim-Region
+      in: header
+      required: false
+      schema: { type: string, maxLength: 10 }
+    SimDevice:
+      name: X-Sim-Device
+      in: header
+      required: false
+      schema: { type: string, maxLength: 64 }
+  schemas:
+    Envelope:
+      type: object
+      required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
+      properties:
+        api_tran_id: { type: string, maxLength: 40 }
+        api_tran_dtm: { type: string, pattern: "^[0-9]{17}$" }
+        rsp_code: { type: string, pattern: "^[A-Z][0-9]{4}$" }
+        rsp_message: { type: string, maxLength: 300 }
+        request_id: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+    Error:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            rsp_code: { not: { const: A0000 } }
+            bank_rsp_code: { type: string, pattern: "^[0-9]{3}$" }
+            bank_rsp_message: { type: string, maxLength: 100 }
+    BankRejected:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          required: [bank_rsp_code, bank_rsp_message]
+          properties:
+            rsp_code: { const: A0004 }
+            bank_rsp_code: { enum: ["403", "404", "405", "406", "409", "410"] }
+    AmountString: { type: string, pattern: "^[1-9][0-9]{0,11}$" }
+    BalanceString: { type: string, pattern: "^[0-9]{1,15}$" }
+    SessionRequest:
+      type: object
+      required: [terminal_id, account_no, pin]
+      properties:
+        terminal_id: { type: string, pattern: '^[\x21-\x7E]{1,20}$' }
+        account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+        pin: { type: string, pattern: "^[0-9]{4}$" }
+    SessionResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [atm_session_token, expires_at]
+          properties:
+            atm_session_token: { type: string, minLength: 1, description: Opaque bearer token. }
+            expires_at: { type: string, format: date-time, description: Three minutes of business time after session start. }
+    CashRequest:
+      type: object
+      required: [idempotency_key, amount]
+      properties:
+        idempotency_key: { type: string, pattern: "^[ -~]{1,20}$" }
+        amount: { $ref: "#/components/schemas/AmountString" }
+    CashResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [amount, balance_after, account_sequence]
+          properties:
+            amount: { $ref: "#/components/schemas/AmountString" }
+            balance_after: { $ref: "#/components/schemas/BalanceString" }
+            account_sequence: { type: string, pattern: "^[0-9]{1,12}$" }
+    BalanceResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [balance]
+          properties:
+            balance: { $ref: "#/components/schemas/BalanceString" }
+paths:
+  /atm/v1/session:
+    post:
+      summary: Start a session, replacing any open session at this terminal
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/SimIp"
+        - $ref: "#/components/parameters/SimRegion"
+        - $ref: "#/components/parameters/SimDevice"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SessionRequest" } } }
+      responses:
+        "200":
+          description: "OK; cash requests replay the original result for the same key and payload"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/SessionResponse" } } }
+        "400":
+          description: "Malformed request (rsp_code A0002)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "404":
+          description: "Unknown terminal (rsp_code A0003)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "Rejected (A0004); unknown account or no PIN bank 404, closed account 403, locked 409, wrong PIN 410"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } }
+        "503":
+          description: "Busy; retry (rsp_code A0013)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /atm/v1/session/end:
+    post:
+      summary: End the session with reason ended
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/SimIp"
+        - $ref: "#/components/parameters/SimRegion"
+        - $ref: "#/components/parameters/SimDevice"
+      responses:
+        "200":
+          description: "OK; cash requests replay the original result for the same key and payload"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } }
+        "400":
+          description: "Malformed request (rsp_code A0002)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: "Missing, ended or expired token (rsp_code O0001)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "503":
+          description: "Busy; retry (rsp_code A0013)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /atm/v1/cash/withdraw:
+    post:
+      summary: Withdraw cash
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/SimIp"
+        - $ref: "#/components/parameters/SimRegion"
+        - $ref: "#/components/parameters/SimDevice"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CashRequest" } } }
+      responses:
+        "200":
+          description: "OK; cash requests replay the original result for the same key and payload"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/CashResponse" } } }
+        "400":
+          description: "Malformed request (rsp_code A0002)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: "Missing, ended or expired token (rsp_code O0001)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: "Idempotency key reused with a different payload (rsp_code A0007)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "Rejected (A0004); closed account bank 403, locked PIN 409; cash limits 406, insufficient withdrawal balance 405"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } }
+        "503":
+          description: "Busy; retry (rsp_code A0013)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /atm/v1/cash/deposit:
+    post:
+      summary: Deposit cash
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/SimIp"
+        - $ref: "#/components/parameters/SimRegion"
+        - $ref: "#/components/parameters/SimDevice"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CashRequest" } } }
+      responses:
+        "200":
+          description: "OK; cash requests replay the original result for the same key and payload"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/CashResponse" } } }
+        "400":
+          description: "Malformed request (rsp_code A0002)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: "Missing, ended or expired token (rsp_code O0001)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "409":
+          description: "Idempotency key reused with a different payload (rsp_code A0007)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "Rejected (A0004); closed account bank 403, locked PIN 409; cash limits 406, insufficient withdrawal balance 405"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } }
+        "503":
+          description: "Busy; retry (rsp_code A0013)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /atm/v1/balance:
+    get:
+      summary: Inquire the session account balance
+      security: [{ bearer: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/SimIp"
+        - $ref: "#/components/parameters/SimRegion"
+        - $ref: "#/components/parameters/SimDevice"
+      responses:
+        "200":
+          description: "OK; cash requests replay the original result for the same key and payload"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/BalanceResponse" } } }
+        "400":
+          description: "Malformed request (rsp_code A0002)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "401":
+          description: "Missing, ended or expired token (rsp_code O0001)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "422":
+          description: "Rejected (A0004); closed account bank 403, locked PIN 409; cash limits 406, insufficient withdrawal balance 405"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/BankRejected" } } }
+        "503":
+          description: "Busy; retry (rsp_code A0013)"
+          headers:
+            X-Request-Id:
+              schema: { type: string, pattern: "^[0-9A-HJKMNP-TV-Z]{26}$" }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }

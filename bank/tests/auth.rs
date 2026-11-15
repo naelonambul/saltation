@@ -57,7 +57,7 @@ async fn login_lockout_logout_and_events() {
         &new_id(),
         None,
         Some(json!({
-            "accounts": [{ "customer_no": customer_no, "account_no": account_no }]
+            "accounts": [{ "customer_no": customer_no, "atm_pin": common::TEST_ATM_PIN, "account_no": account_no }]
         })),
     )
     .await;

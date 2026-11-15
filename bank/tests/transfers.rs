@@ -38,7 +38,7 @@ async fn customer(api: &Api, accounts: usize, opening: i64) -> Customer {
     assert_eq!(status, StatusCode::OK, "{body}");
     let prefix = format!("97{n}");
     let list: Vec<Value> = (0..accounts)
-        .map(|i| json!({ "customer_no": customer_no, "account_no": format!("{prefix}{i:02}"), "opening_balance": opening }))
+        .map(|i| json!({ "customer_no": customer_no, "atm_pin": common::TEST_ATM_PIN, "account_no": format!("{prefix}{i:02}"), "opening_balance": opening }))
         .collect();
     let (status, body) = call(
         &api.generator,
