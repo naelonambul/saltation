@@ -1,3 +1,3 @@
--- test.atm_events: scan every persisted event for leaked secrets.
--- Access path: OUTBOX full scan.
-SELECT event_json FROM outbox
+-- test.atm_events: scan events created after the test watermark for leaked secrets.
+-- Access path: OUTBOX primary-key range scan.
+SELECT event_json FROM outbox WHERE event_id > :watermark

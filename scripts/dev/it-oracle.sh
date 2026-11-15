@@ -139,6 +139,7 @@ cargo_test() {
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
+  [ "${SALTATION_TEST_EXPECT_LIVE:-}" = 1 ] && extra_env+=(-e SALTATION_TEST_EXPECT_LIVE=1)
   local deadline_command=()
   [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
   dev_image
@@ -389,6 +390,13 @@ db_pool_isolated() {
   [ "$((SECONDS - started))" -le 5 ] || { echo "db-pool close process exceeded 5 s" >&2; return 1; }
 }
 
+# Plan test-speed step 1: show host load in CI logs.
+host_load() {
+  echo "it-oracle: host load ($1)"
+  uptime || true
+  docker stats --no-stream || true
+}
+
 run_target() {
   case "$1" in
     driver-bench) driver_bench ;;
@@ -421,13 +429,15 @@ run_target() {
 }
 
 if [ "$target" = all ]; then
+  host_load start
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   db_pool_isolated
   run_target observability
+  host_load end
 else
   run_target "$target"
 fi
