@@ -14,6 +14,8 @@ const ROWS: SqlStmt = sql_stmt!("test.close_rows", "../sql/close_rows.sql");
 const BALANCE: SqlStmt = sql_stmt!("test.close_balance", "../sql/close_balance.sql");
 const AMOUNT: SqlStmt = sql_stmt!("test.close_amount", "../sql/close_amount.sql");
 const LEG: SqlStmt = sql_stmt!("test.close_leg", "../sql/close_leg.sql");
+const ATM_LEG: SqlStmt = sql_stmt!("test.close_atm_leg", "../sql/close_atm_leg.sql");
+const COPY_LEG: SqlStmt = sql_stmt!("test.close_copy_leg", "../sql/close_copy_leg.sql");
 const BACKUP: SqlStmt = sql_stmt!("test.close_backup", "../sql/close_backup.sql");
 const DELETE: SqlStmt = sql_stmt!("test.close_delete_leg", "../sql/close_delete_leg.sql");
 const RESTORE: SqlStmt = sql_stmt!("test.close_restore", "../sql/close_restore.sql");
@@ -362,17 +364,26 @@ pub async fn sequence(
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let token = body["atm_session_token"].as_str().unwrap();
+    let withdrawal_request_id = new_id();
     let (status, body) = call(
         &api.generator,
         "POST",
         "/atm/v1/cash/withdraw",
-        &new_id(),
+        &withdrawal_request_id,
         Some(token),
         Some(json!({"idempotency_key": common::unique_digits(20), "amount": "100"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let atm_id = legs(api, &atm.account, bad_date).await[0];
+    let request_id = withdrawal_request_id.clone();
+    let atm_rows: Vec<i64> = api
+        .state
+        .db
+        .run(move |s| s.query_all(&ATM_LEG, &[&request_id]))
+        .await
+        .unwrap();
+    assert_eq!(atm_rows.len(), 1, "one withdrawal ledger row");
+    let atm_id = atm_rows[0];
     let (status, body) = call(
         &api.generator,
         "POST",
@@ -432,7 +443,7 @@ pub async fn sequence(
     assert_clean(api, bad_date, logs, metrics).await;
 
     // Each corruption starts from, and returns to, an entirely clean close.
-    for witness in 0..8 {
+    for witness in 0..9 {
         let idle_no = idle.account.clone();
         let sender_no = sender.account.clone();
         let empty_no = empty.account.clone();
@@ -441,14 +452,16 @@ pub async fn sequence(
         let touched_id = match witness {
             1 | 6 => altered_id,
             4 => receiver_id,
-            7 => atm_id,
+            7 | 8 => atm_id,
             _ => empty_id,
         };
-        let saved: String = api
+        let request_id = withdrawal_request_id.clone();
+        let (saved, inserted_id): (String, Option<i64>) = api
             .state
             .db
             .run(move |s| {
                 let saved = s.query_row(&BACKUP, &[&touched_id])?;
+                let mut inserted_id = None;
                 match witness {
                     0 => {
                         assert_eq!(s.execute(&BALANCE, &[&1i64, &idle_no])?, 1);
@@ -458,6 +471,12 @@ pub async fn sequence(
                     }
                     7 => {
                         assert_eq!(s.execute(&AMOUNT, &[&1i64, &atm_id])?, 1);
+                    }
+                    8 => {
+                        assert_eq!(s.execute(&COPY_LEG, &[&atm_id])?, 1);
+                        let ids: Vec<i64> = s.query_all(&ATM_LEG, &[&request_id])?;
+                        assert_eq!(ids.len(), 2, "withdrawal plus duplicate ledger row");
+                        inserted_id = Some(*ids.iter().find(|&&id| id != atm_id).unwrap());
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&1i64, &leg_id])?, 1);
@@ -478,7 +497,7 @@ pub async fn sequence(
                     _ => unreachable!(),
                 }
                 s.commit()?;
-                Ok(saved)
+                Ok((saved, inserted_id))
             })
             .await
             .unwrap();
@@ -504,7 +523,7 @@ pub async fn sequence(
             ),
             5 => (1, 0, vec![(&idle.account, "no previous close")]),
             6 => (1, 1, vec![(&altered.account, "row without transfer")]),
-            7 => (1, 1, vec![(&atm.account, "balance:")]),
+            7 | 8 => (1, 1, vec![(&atm.account, "balance:")]),
             _ => unreachable!(),
         };
         let report = rerun(api, bad_date, logs, metrics).await;
@@ -519,7 +538,7 @@ pub async fn sequence(
         );
         let actual = rows(api, bad_date).await;
         assert_bad_rows(&actual, &expected);
-        if witness == 1 || witness == 7 {
+        if witness == 1 || witness == 7 || witness == 8 {
             let account = if witness == 1 {
                 &altered.account
             } else {
@@ -536,6 +555,24 @@ pub async fn sequence(
                     .contains("violate F-21")
             );
         }
+        if witness == 7 || witness == 8 {
+            let detail = actual
+                .iter()
+                .find(|r| r.0 == atm.account)
+                .unwrap()
+                .4
+                .as_ref()
+                .unwrap();
+            assert!(detail.contains("atm_cash rows violate F-21"), "{detail}");
+            if witness == 8 {
+                // Opening 0 + seed 10000 - withdrawal 100 + deposit 200 - copy 100.
+                // The copied withdrawal is last by sequence and keeps balance_after 9900.
+                assert!(
+                    detail.contains("balance: expected 10000 last_row 9900 stored 10100"),
+                    "{detail}"
+                );
+            }
+        }
         let idle_no = idle.account.clone();
         let empty_no = empty.account.clone();
         let previous_date = d.to_string();
@@ -551,6 +588,9 @@ pub async fn sequence(
                     1 | 4 | 6 | 7 => {
                         assert_eq!(s.execute(&DELETE, &[&touched_id])?, 1);
                         assert_eq!(s.execute(&RESTORE, &[&saved])?, 1);
+                    }
+                    8 => {
+                        assert_eq!(s.execute(&DELETE, &[&inserted_id.unwrap()])?, 1);
                     }
                     2 => {
                         assert_eq!(s.execute(&TRANSFER_AMOUNT, &[&-1i64, &leg_id])?, 1);
