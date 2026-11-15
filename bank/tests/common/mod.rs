@@ -343,8 +343,23 @@ pub fn daily_logs() -> Logs {
     init_logs();
     DAILY_LOGS.get_or_init(Logs::default).clone()
 }
+/// A whole ULID or 64-character hex digest: an identifier whose digits may
+/// contain a PIN by chance, so it is not scanned for one.
+pub fn opaque_id(s: &str) -> bool {
+    let ulid = s.len() == 26
+        && s.bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b));
+    let hex = s.len() == 64
+        && (s
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)));
+    ulid || hex
+}
 pub fn find_pin(haystack: &Value, pin: &str) -> Option<String> {
     match haystack {
+        Value::String(s) if opaque_id(s) => None,
         Value::String(s) => {
             let boundary = |b: u8| !b.is_ascii_digit() && b != b'.';
             s.match_indices(pin)

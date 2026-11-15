@@ -42,18 +42,7 @@ fn leaks(text: &str, secret: &str) -> bool {
 }
 fn numeric_leak(value: &Value, secret: &str) -> bool {
     match value {
-        Value::String(s) => {
-            let ulid = s.len() == 26
-                && s.bytes()
-                    .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b));
-            let hex = s.len() == 64
-                && (s
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    || s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)));
-            !ulid && !hex && common::find_pin(value, secret).is_some()
-        }
+        Value::String(_) => common::find_pin(value, secret).is_some(),
         Value::Number(_) => common::find_pin(value, secret).is_some(),
         Value::Array(values) => values.iter().any(|v| numeric_leak(v, secret)),
         Value::Object(fields) => fields

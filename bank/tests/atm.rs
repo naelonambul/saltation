@@ -319,10 +319,18 @@ async fn secret_checks_catch_a_planted_pin() {
             std::panic::catch_unwind(|| assert_no_pin("planted", &values, TEST_ATM_PIN)).is_err()
         );
     }
-    for value in ["17391", "7391.5", "73910"] {
+    for value in [
+        "17391",
+        "7391.5",
+        "73910",
+        "01M7ERBQ7MPG8TGTZFT7391H8A",
+        "7391a7391b7391c7391d7391e7391f7391a7391b7391c7391d7391e7391f0000",
+    ] {
         assert!(find_pin(&json!(value), TEST_ATM_PIN).is_none());
     }
     assert!(find_pin(&json!(7391), TEST_ATM_PIN).is_some());
+    // Only a whole identifier is exempt: the same digits in other text still leak.
+    assert!(find_pin(&json!("ULID 01M7ERBQ7MPG8TGTZFT7391H8A"), TEST_ATM_PIN).is_some());
 }
 
 #[tokio::test]
