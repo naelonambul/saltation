@@ -21,5 +21,19 @@
     "scripts/dev/**",
     "spec.md"
   ],
-  "approvals": []
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f",
+      "by": "naelonambul",
+      "at": "2026-11-15T10:04:44Z"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a7c7ef5d9387ad34f3409ccda94ab932ddb0691ec662dd5dd97dcca578936c04",
+      "by": "naelonambul",
+      "at": "2026-11-15T10:04:44Z",
+      "write_scope_sha256": "sha256:0354e617f569bd255b8b0a131a5623149ff298b156aee59f2061ffcb6225db8c"
+    }
+  ]
 }
