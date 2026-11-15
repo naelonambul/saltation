@@ -292,6 +292,7 @@ async def test_seed_party_batches():
         ["clock", "advance", "60"],
         ["clock", "live"],
         ["seed-parties", "--counterparties", "5"],
+        ["seed-terminals"],
     ],
 )
 async def test_new_commands_without_truth(argv, monkeypatch, capsys):
@@ -326,6 +327,13 @@ async def test_new_commands_without_truth(argv, monkeypatch, capsys):
         async def seed_counterparties(self, items):
             return len(items)
 
+        async def seed_atm_terminals(self, items):
+            from saltation_gen.config import ATM_TERMINALS
+
+            assert items == ATM_TERMINALS
+            calls.append(("terminals",))
+            return len(items)
+
         async def seed_counterparty_clients(self, items):
             return len(items)
 
@@ -339,5 +347,8 @@ async def test_new_commands_without_truth(argv, monkeypatch, capsys):
     if argv[0] == "clock":
         assert calls[0] == ((argv[1], int(argv[2])) if argv[1] == "advance" else tuple(argv[1:]))
         assert set(result) == {"mode", "business_time", "rolled_through"}
+    elif argv[0] == "seed-terminals":
+        assert result == {"atm_terminals": 17}
+        assert calls == [("terminals",)]
     else:
         assert result == {"counterparties": 5, "counterparty_clients": 3}

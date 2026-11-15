@@ -31,6 +31,8 @@ async def _main(args: argparse.Namespace) -> None:
             await truth.setup()
         if args.command == "seed-parties":
             print(json.dumps(await seeding.seed_parties(bank, settings.seed, args.counterparties)))
+        elif args.command == "seed-terminals":
+            print(json.dumps({"atm_terminals": await seeding.seed_terminals(bank)}))
         elif args.command == "clock":
             if args.clock_command == "show":
                 result = await bank.clock()
@@ -76,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rate", type=float, default=5.0, help="requests per second")
     p = sub.add_parser("seed-parties")
     p.add_argument("--counterparties", type=int, required=True)
+    sub.add_parser("seed-terminals")
     p = sub.add_parser("clock")
     clocks = p.add_subparsers(dest="clock_command", required=True)
     clocks.add_parser("show")

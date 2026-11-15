@@ -32,6 +32,11 @@ def new_ulid() -> str:
     return "".join(_CROCKFORD[(value >> (5 * i)) & 31] for i in reversed(range(26)))
 
 
+def atm_idempotency_key() -> str:
+    """Twenty printable characters from the monotonic ULID's low 100 bits."""
+    return new_ulid()[-20:]
+
+
 def bank_tran_id(client_code: str = "M2026SALTG") -> str:
     """KFTC bank_tran_id, AN(20): 10-character client code, `U`, 9 characters."""
     return f"{client_code[:10]:0<10}U" + "".join(secrets.choice(_ALNUM) for _ in range(9))
@@ -397,4 +402,56 @@ class BankClient:
                 "tran_amt": str(amount),
             },
             accept=(200, 404, 422),
+        )
+
+    async def seed_atm_terminals(self, items: list[dict[str, Any]]) -> int:
+        _, body = await self._call("POST", "/internal/v1/seed/atm_terminals", json={"atm_terminals": items})
+        return len(body["atm_terminals"])
+
+    async def atm_start_session(
+        self, request_id: str, terminal_id: str, account_no: str, pin: str, ctx: Context
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST",
+            "/atm/v1/session",
+            request_id,
+            ctx=ctx,
+            json={"terminal_id": terminal_id, "account_no": account_no, "pin": pin},
+            accept=(200, 400, 404, 422),
+        )
+
+    async def atm_end_session(self, request_id: str, token: str, ctx: Context) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST", "/atm/v1/session/end", request_id, token, ctx, accept=(200, 400, 401, 503)
+        )
+
+    async def atm_withdraw(
+        self, request_id: str, token: str, idempotency_key: str, amount: int, ctx: Context
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST",
+            "/atm/v1/cash/withdraw",
+            request_id,
+            token,
+            ctx,
+            json={"idempotency_key": idempotency_key, "amount": str(amount)},
+            accept=(200, 400, 401, 409, 422, 503),
+        )
+
+    async def atm_deposit(
+        self, request_id: str, token: str, idempotency_key: str, amount: int, ctx: Context
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST",
+            "/atm/v1/cash/deposit",
+            request_id,
+            token,
+            ctx,
+            json={"idempotency_key": idempotency_key, "amount": str(amount)},
+            accept=(200, 400, 401, 409, 422, 503),
+        )
+
+    async def atm_balance(self, request_id: str, token: str, ctx: Context) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "GET", "/atm/v1/balance", request_id, token, ctx, accept=(200, 400, 401, 422, 503)
         )

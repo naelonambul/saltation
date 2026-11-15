@@ -6,6 +6,7 @@ import random
 from typing import Any
 
 from saltation_gen.client import BankClient
+from saltation_gen.config import ATM_TERMINALS
 from saltation_gen.truth import TruthStore
 
 FAMILY = ["김", "이", "박", "최", "정", "강", "조", "윤", "장", "임"]
@@ -95,3 +96,7 @@ async def seed_parties(bank: BankClient, seed: int, count: int) -> dict[str, int
         for i in range(0, len(items), BATCH):
             counts[key] += await send(items[i : i + BATCH])
     return counts
+
+
+async def seed_terminals(bank: BankClient) -> int:
+    return await bank.seed_atm_terminals(ATM_TERMINALS)
