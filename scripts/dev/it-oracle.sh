@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: driver-parity, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -108,6 +108,15 @@ esac
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
     | "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null
+  "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null <<'SQL'
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = ORCLPDB1;
+GRANT SELECT ON SYS.V_$SQL TO saltation;
+GRANT SELECT ON SYS.V_$SQL_PLAN TO saltation;
+GRANT SELECT ON SYS.V_$SQL_PLAN_STATISTICS_ALL TO saltation;
+GRANT SELECT ON SYS.V_$SESSION TO saltation;
+EXIT
+SQL
   "${compose[@]}" exec -T mongo mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs \
     --eval 'db.getSiblingDB("bank_logs").events.deleteMany({})' >/dev/null
 }
@@ -274,6 +283,7 @@ browser_dates() {
 
 run_target() {
   case "$1" in
+    driver-parity) reset_schema; cargo_test driver_parity ;;
     migrations)  reset_schema; cargo_test migrations ;;
     backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
@@ -300,9 +310,9 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity
   run_target observability
 else
   run_target "$target"
