@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "redact-bench-numbers",
+  "kind": "repository",
+  "title": "Keep measured Oracle benchmark numbers out of the public repository",
+  "base": {
+    "ref": "main",
+    "commit": "648e60a6f2c945ce0199c7e58ca626d9a5ea8b3a"
+  },
+  "baseline": {},
+  "write_scope": [
+    "changes/oracledb-driver/plan.md",
+    "REVIEW.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:1f6978835a86437f0521556e64e822f0895df700d0f1836e5be5aae129b684d6",
+      "by": "naelonambul",
+      "at": "2026-11-16T03:53:17Z",
+      "write_scope_sha256": "sha256:41aea1225c655d48e62e62469a8139d9119f80c16c566453fb900a8508bac6d1",
+      "note": "Owner in session 2026-11-16: '\ub458\ub2e4 \uc2b9\uc778' (redact-bench-numbers and revised oracle-tuning plan)"
+    }
+  ]
+}
