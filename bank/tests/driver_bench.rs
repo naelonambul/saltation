@@ -666,6 +666,8 @@ async fn driver_bench() {
         })
         .await
         .expect("outbox fixture");
+        // Reparse the backlog cursor after reset and population, before snapshots.
+        outbox::backlog(&db).await.expect("backlog warm-up");
     }
     let duplicate_body = if workload == "duplicate" {
         let n = cursor.fetch_add(1, Ordering::Relaxed);
@@ -769,7 +771,7 @@ async fn driver_bench() {
         "successes": result.successes, "business_rejections": result.business_rejections, "busy": result.busy, "other_errors": result.other_errors,
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
-        "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+        "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "oracle_cpus": env("BENCH_ORACLE_CPUS"), "oracle_memory": env("BENCH_ORACLE_MEMORY"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
     if workload == "outbox" {
         line["latency_scope"] = json!("complete backlog drain, including completion polling");
     }

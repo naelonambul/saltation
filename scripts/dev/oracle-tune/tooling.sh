@@ -131,6 +131,7 @@ SQL
     TUNE_COVERAGE_OUT="$output/xplan-coverage.txt" IT_DB_USER=saltation_tune cargo_test driver_bench -- --ignored --exact tune_coverage --nocapture >"$output/coverage.txt" 2>&1 || failed=1
   fi
   cat "$root/scripts/dev/oracle-tune/segments.sql" | tune_sql >"$output/segments.txt" || failed=1
+  python3 "$root/scripts/dev/oracle-tune/counters.py" "$output" || failed=1
   echo "tune-capture evidence: $output"
   return "$failed"
 )

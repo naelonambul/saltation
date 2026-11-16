@@ -92,3 +92,19 @@ limits are recorded in `host.txt` in the evidence directory. Segment/index summa
 are recorded after the run. Evidence lives under
 `.evidence/oracle-tuning/<UTC timestamp>/`; measured performance stays there and is
 never written into this README or other tracked files.
+
+Every result line includes `oracle_cpus` and `oracle_memory` strings from the
+Oracle container's Docker limits. CPUs are decimal CPU units and memory is in
+bytes; a zero Docker limit is reported as `unlimited`.
+
+`counters.txt` contains session counter deltas per successful request and the
+absolute logon delta for each captured entry and run, followed by per-cursor
+executions per successful request and buffer gets per execution. Session counters
+match SID and serial number; newly observed sessions contribute their end values.
+Zero denominators produce `n/a`; unknown cursor deltas produce `?`.
+
+Outbox drain and truncate happen before the benchmark process and its warm-up.
+After fixture population, the benchmark warms the backlog query before the start
+snapshot, so a cursor invalidated by truncate is reparsed outside the timed window.
+No truncate or statistics gathering runs between the start and end snapshots.
+The final counters summary runs after segment capture; summary failures fail capture.

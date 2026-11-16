@@ -194,6 +194,17 @@ driver_bench() {
   local runs="${BENCH_RUNS:-3}" entries entry workload concurrency run failed=0 output
   case "$BENCH_DRIVER" in *[!a-zA-Z0-9._-]*|'') echo "invalid BENCH_DRIVER" >&2; return 2 ;; esac
   case "$runs" in *[!0-9]*|''|0) echo "BENCH_RUNS must be positive" >&2; return 2 ;; esac
+  local oracle_container oracle_limits oracle_cpus oracle_memory
+  oracle_container=$("${compose[@]}" ps -q oracle)
+  oracle_limits=$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' "$oracle_container")
+  read -r oracle_cpus oracle_memory <<<"$(python3 - "$oracle_limits" <<'LIMITS'
+from decimal import Decimal
+import sys
+cpu, memory = map(int, sys.argv[1].split())
+print(format(Decimal(cpu) / Decimal(1000000000), 'f') if cpu else 'unlimited',
+      str(memory) if memory else 'unlimited')
+LIMITS
+)"
   local bench_env=() watcher="" bench_user=saltation
   if [ "${BENCH_POPULATED:-}" = 1 ]; then
     bench_user=saltation_tune
@@ -249,6 +260,7 @@ driver_bench() {
         -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
         -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
         ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
+        -e BENCH_ORACLE_CPUS="$oracle_cpus" -e BENCH_ORACLE_MEMORY="$oracle_memory" \
         -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT="/out/${BENCH_RESULT_NAME:-bench.jsonl}" \
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
         -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
