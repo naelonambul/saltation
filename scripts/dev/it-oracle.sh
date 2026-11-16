@@ -414,6 +414,7 @@ run_target() {
     payees)      cargo_test payees ;;
     outcomes)    cargo_test outcomes ;;
     atm)         cargo_test atm ;;
+    cards)       cargo_test cards ;;
     inbound)     cargo_test inbound ;;
     password_reset) cargo_test password_reset ;;
     deposits) cargo_test deposits ;;
@@ -432,9 +433,9 @@ if [ "$target" = all ]; then
   host_load start
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes
+  cargo_test listeners auth accounts transfers payees cards inbound password_reset deposits loans outbox outcomes
   run_target backfill
-  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts transfers payees cards inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   db_pool_isolated
   run_target observability
   host_load end

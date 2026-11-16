@@ -97,6 +97,37 @@ components:
               account_no: { type: string, pattern: "^[0-9]{1,16}$" }
               atm_pin: { type: string, pattern: "^[0-9]{4}$" }
               opening_balance: { type: integer, minimum: 0 }
+    SeedCardsRequest:
+      type: object
+      required: [cards]
+      properties:
+        cards:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [account_no, status]
+            properties:
+              account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+              status: { enum: [ACTIVE, BLOCKED] }
+    SeedCardsResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [cards]
+          properties:
+            cards:
+              type: array
+              minItems: 1
+              maxItems: 500
+              items:
+                type: object
+                required: [account_no, card_no, status]
+                properties:
+                  account_no: { type: string, pattern: "^[0-9]{1,16}$" }
+                  card_no: { type: string, pattern: "^0000[0-9]{12}$", description: Synthetic number with a Luhn check digit. }
+                  status: { enum: [ACTIVE, BLOCKED] }
     SeedAccountsResponse:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -124,7 +155,7 @@ components:
               client_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,40}$" }
               client_secret: { type: string, minLength: 16, maxLength: 128 }
               institution_code: { type: string, pattern: "^[0-9]{3}$" }
-              scope: { enum: [oob] }
+              scope: { enum: [oob, card] }
     SeedCounterpartiesRequest:
       type: object
       required: [counterparties]
@@ -259,3 +290,15 @@ paths:
         content: { application/json: { schema: { $ref: "#/components/schemas/SeedAtmTerminalsRequest" } } }
       responses:
         "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/SeedAtmTerminalsResponse" } } } }
+  /internal/v1/seed/cards:
+    post:
+      summary: Seed synthetic debit cards for demand accounts, atomically and in request order
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedCardsRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/SeedCardsResponse" } } } }
+        "400": { description: Invalid batch or account, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Synthetic number collision retries exhausted, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "500": { description: Internal error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Busy, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

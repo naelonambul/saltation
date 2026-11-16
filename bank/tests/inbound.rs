@@ -96,7 +96,7 @@ async fn inbound_credentials_and_deposits() {
         ("client_secret", "123456789012345"),
         ("client_id", "bad!"),
         ("institution_code", "000"),
-        ("scope", "card"),
+        ("scope", "other"),
     ] {
         let mut bad = seed.clone();
         bad["counterparty_clients"][0][field] = json!(value);
@@ -344,4 +344,97 @@ async fn inbound_credentials_and_deposits() {
     assert_eq!(event["payload"]["method"], "POST");
     assert_eq!(event["payload"]["http_status"], 422);
     assert!(event["payload"]["duration_ms"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn card_client_token_is_scoped_and_cannot_deposit() {
+    let api = api().await;
+    let client = format!("card_{}", new_id());
+    let secret = "card-secret-123456";
+    let (http,body) = call(&api.generator,"POST","/internal/v1/seed/counterparty_clients",&new_id(),None,
+        Some(json!({"counterparty_clients":[{"client_id":client,"client_secret":secret,"institution_code":"901","scope":"card"}]}))).await;
+    assert_eq!(http, StatusCode::OK, "{body}");
+    let (http, body) = form_call(
+        &api.generator,
+        "/oauth/2.0/token",
+        format!(
+            "client_id={client}&client_secret={secret}&scope=card&grant_type=client_credentials"
+        ),
+    )
+    .await;
+    assert_eq!(http, StatusCode::OK, "{body}");
+    assert_inbound_contract("TokenResponse", &body);
+    assert_eq!(body["scope"], "card");
+    let token = body["access_token"].as_str().unwrap();
+    let hash = bank::shared::auth::token_hash(token);
+    let stored: (
+        String,
+        String,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::FixedOffset>,
+    ) = api
+        .state
+        .db
+        .run(move |s| s.query_row(&TOKEN, &[&hash]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (stored.0, stored.1, stored.2, stored.3),
+        ("CLIENT".into(), client.clone(), "card".into(), None)
+    );
+    let receiver = customer(&api, 0).await;
+    let time = api
+        .state
+        .clock
+        .state()
+        .await
+        .unwrap()
+        .business_time
+        .format("%Y%m%d%H%M%S")
+        .to_string();
+    let (http, body) = deposit(&api, Some(token), payload(&receiver.fin, "1", &time)).await;
+    assert_eq!(http, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["rsp_code"], "O0003");
+    assert_inbound_contract("Error", &body);
+    assert_eq!(snapshot(&api, &receiver.account).await.1, 0);
+    let (http, body) = form_call(
+        &api.generator,
+        "/oauth/2.0/token",
+        format!(
+            "client_id={client}&client_secret={secret}&scope=oob&grant_type=client_credentials"
+        ),
+    )
+    .await;
+    assert_eq!(http, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["rsp_code"], "O0003");
+    assert_inbound_contract("Error", &body);
+}
+
+#[tokio::test]
+async fn oob_client_cannot_request_card_scope() {
+    let api = api().await;
+    let client = format!("oob_{}", new_id());
+    let secret = "oob-secret-123456";
+    let (http, body) = call(
+        &api.generator,
+        "POST",
+        "/internal/v1/seed/counterparty_clients",
+        &new_id(),
+        None,
+        Some(json!({"counterparty_clients": [{"client_id": client, "client_secret": secret, "institution_code": "901", "scope": "oob"}]})),
+    )
+    .await;
+    assert_eq!(http, StatusCode::OK, "{body}");
+    let (http, body) = form_call(
+        &api.generator,
+        "/oauth/2.0/token",
+        format!(
+            "client_id={client}&client_secret={secret}&scope=card&grant_type=client_credentials"
+        ),
+    )
+    .await;
+    assert_eq!(http, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["rsp_code"], "O0003");
+    assert_inbound_contract("Error", &body);
 }
