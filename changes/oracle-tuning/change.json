@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "oracle-tuning",
   "kind": "implementation",
-  "title": "Tune the bank's Oracle access paths, lock hold time and indexes",
+  "title": "Tune the bank's Oracle access paths, commit overhead and indexes",
   "base": {
     "ref": "main",
     "commit": "648e60a6f2c945ce0199c7e58ca626d9a5ea8b3a"
@@ -21,11 +21,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:583da5b034e99b4803b85e12936d53f21a7622cc1f158fd73ee5dc5bd11a2600",
+      "sha256": "sha256:a983506af237220d1a9cd28028c61a9fd84f496a70fdd01f0ed74ec8a883bb17",
       "by": "naelonambul",
-      "at": "2026-11-16T03:53:17Z",
+      "at": "2026-11-16T12:29:31Z",
       "write_scope_sha256": "sha256:5be14c7203e6d99ac90ff450962dc8e29d06c02230a21e4f47bb646b96f0527e",
-      "note": "Owner in session 2026-11-16: '\ub458\ub2e4 \uc2b9\uc778' (revision keeping measured numbers private)"
+      "note": "\ubcf4\ub0b4\ub3c4\ub418. \uc2b9\uc778\ud558\uace0 \uc9c4\ud589\ud558\uc790 (sha256 a983506a...)"
     }
   ]
 }
