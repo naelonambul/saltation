@@ -21,11 +21,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:cdc9e502225680435fe2e0a618c73f718fd617399b467336f95b2ecd44b68f91",
+      "sha256": "sha256:583da5b034e99b4803b85e12936d53f21a7622cc1f158fd73ee5dc5bd11a2600",
       "by": "naelonambul",
-      "at": "2026-11-15T13:52:12Z",
+      "at": "2026-11-16T03:53:17Z",
       "write_scope_sha256": "sha256:5be14c7203e6d99ac90ff450962dc8e29d06c02230a21e4f47bb646b96f0527e",
-      "note": "Owner in session: approved both (test-speed and oracle-tuning) via question dialog, 2026-11-15"
+      "note": "Owner in session 2026-11-16: '\ub458\ub2e4 \uc2b9\uc778' (revision keeping measured numbers private)"
     }
   ]
 }
