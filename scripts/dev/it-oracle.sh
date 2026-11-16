@@ -208,7 +208,7 @@ LIMITS
   local bench_env=() watcher="" bench_user=saltation
   if [ "${BENCH_POPULATED:-}" = 1 ]; then
     bench_user=saltation_tune
-    bench_env+=(-e BENCH_POPULATED=1)
+    bench_env+=(-e BENCH_POPULATED=1 -e "TUNE_OUTBOX_LONG=${TUNE_OUTBOX_LONG:-500000}")
   fi
   if [ "${BENCH_RATE+x}" = x ]; then
     case "$BENCH_RATE" in *[!0-9]*|'') echo "BENCH_RATE must be a positive integer" >&2; return 2 ;; esac
@@ -222,7 +222,7 @@ LIMITS
   [ -z "${BENCH_WARMUP_SECS:-}" ] || bench_env+=(-e "BENCH_WARMUP_SECS=$BENCH_WARMUP_SECS")
   entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64 duplicate:200 outbox:1)
   if [ "${BENCH_POPULATED:-}" = 1 ]; then
-    entries+=(transfer_hot:32 transfer_hot:64)
+    entries+=(transfer_hot:32 transfer_hot:64 history_recent_first_shallow:8 history_recent_first_deep:8 history_recent_deep_shallow:8 history_recent_deep_deep:8 history_old_first_shallow:8 history_old_first_deep:8 history_old_deep_shallow:8 history_old_deep_deep:8 history_filtered_deep:8 outbox_long:1)
   fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     local found=no

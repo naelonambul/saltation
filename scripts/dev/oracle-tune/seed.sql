@@ -120,6 +120,53 @@ BEGIN
     IF TO_CHAR(d,'DD')='01' OR d=today THEN DBMS_OUTPUT.PUT_LINE('seeded through '||TO_CHAR(d,'YYYY-MM-DD')); END IF;
     d:=d+1;
   END LOOP;
+  -- Zero-balance term accounts need no ledger legs; completed-date closes cover them.
+  INSERT INTO account(account_id,account_no,customer_id,terms_id,subtype,status,balance,next_sequence,opened_at)
+  SELECT n+rn,'20'||LPAD(n+rn,12,'0'),cid,2,'TERM',
+    CASE WHEN maturity<=today THEN 'CLOSED' ELSE 'ACTIVE' END,0,1,
+    FROM_TZ(CAST(first_day AS TIMESTAMP),'+09:00')
+  FROM (SELECT LEVEL rn,1+10*(LEVEL-1) cid,
+    first_day+30+TRUNC((LEVEL-1)*(today+365-first_day-30)/GREATEST(FLOOR(n/10)-1,1)) maturity
+    FROM dual CONNECT BY LEVEL<=GREATEST(FLOOR(n/10),1)) WHERE rn<=FLOOR(n/10);
+  INSERT INTO deposit_detail(account_id,linked_account_id,principal,maturity_date,closed_at,close_type)
+  SELECT account_id,customer_id,100000,maturity,
+    CASE WHEN maturity<=today THEN FROM_TZ(CAST(maturity AS TIMESTAMP),'+09:00') END,
+    CASE WHEN maturity<=today THEN 'MATURITY' END
+  FROM (SELECT a.*,first_day+30+TRUNC((account_id-n-1)*(today+365-first_day-30)/GREATEST(FLOOR(n/10)-1,1)) maturity
+    FROM account a WHERE subtype='TERM');
+  INSERT INTO fintech_account(fintech_use_num,account_id,user_seq_no)
+  SELECT '998'||LPAD(account_id,21,'0'),account_id,LPAD(customer_id,10,'0') FROM account WHERE subtype='TERM';
+  INSERT INTO account_status_history(account_id,to_status,reason,occurred_at)
+  SELECT account_id,'ACTIVE','OPENED',opened_at FROM account WHERE subtype='TERM';
+  INSERT INTO account_status_history(account_id,from_status,to_status,reason,occurred_at)
+  SELECT account_id,'ACTIVE','CLOSED','maturity',closed_at FROM deposit_detail WHERE closed_at IS NOT NULL;
+  INSERT INTO daily_close(account_id,business_date,opening_balance,closing_balance,verified)
+  SELECT a.account_id,first_day+k-1,0,0,'Y' FROM account a
+  CROSS JOIN (SELECT LEVEL k FROM dual CONNECT BY LEVEL<=today-first_day) WHERE a.subtype='TERM';
+  INSERT INTO password_reset(customer_id,code_hash,issued_at,expires_at,used_at)
+  SELECT cid,'$argon2id$v=19$m=19456,t=2,p=1$dHVuZS1yZXNldC1zYWx0ITA$Ki6s9/x/m1RaBkeVvvLSkRQDG2HokffVrI9PpTnTZZs',issued,issued+INTERVAL '5' MINUTE,issued+INTERVAL '1' MINUTE
+  FROM (SELECT 1+50*(LEVEL-1) cid,
+    FROM_TZ(CAST(first_day+TRUNC((LEVEL-1)*(today-first_day)/GREATEST(FLOOR(n/50),1)) AS TIMESTAMP),'+09:00') issued,
+    LEVEL rn FROM dual CONNECT BY LEVEL<=GREATEST(FLOOR(n/50),1)) WHERE rn<=FLOOR(n/50);
+  INSERT INTO atm_terminal(terminal_id,region,location,latitude,longitude)
+  SELECT 'TUNE-ATM','SEOUL','Synthetic terminal',37.5,127 FROM dual WHERE FLOOR(n/100)>0;
+  INSERT INTO atm_session(session_id,terminal_id,account_no,token_hash,started_at,expires_at,ended_at,end_reason,request_id)
+  SELECT LPAD('A'||rn,26,'0'),'TUNE-ATM','9600'||LPAD(cid,8,'0'),
+    LOWER(STANDARD_HASH('tune-atm-token-'||rn,'SHA256')),started,
+    started+INTERVAL '3' MINUTE,started+INTERVAL '1' MINUTE,'ended',LPAD('R'||rn,26,'0')
+  FROM (SELECT LEVEL rn,1+100*(LEVEL-1) cid,
+    FROM_TZ(CAST(first_day+TRUNC((LEVEL-1)*(today-first_day)/GREATEST(FLOOR(n/100),1)) AS TIMESTAMP),'+09:00') started
+    FROM dual CONNECT BY LEVEL<=GREATEST(FLOOR(n/100),1)) WHERE rn<=FLOOR(n/100);
+  INSERT INTO payee(customer_id,bank_code,account_no,holder_name,registered_at,channel)
+  SELECT customer_id,'998',account_no,'Synthetic '||recipient,at,'MOBILE'
+  FROM (SELECT a.customer_id,b.account_no,b.customer_id recipient,a.opened_at at,
+      ROW_NUMBER() OVER(PARTITION BY a.customer_id ORDER BY MOD(b.customer_id-a.customer_id+n,n)) rn
+    FROM account a CROSS JOIN (SELECT LEVEL k FROM dual CONNECT BY LEVEL<=LEAST(n-1,4))
+    JOIN account b ON b.subtype='DEMAND' AND b.customer_id=MOD(a.customer_id+k-1,n)+1
+    WHERE a.subtype='DEMAND' AND a.customer_id<=LEAST(n,1000)
+      AND NOT EXISTS (SELECT 1 FROM payee p WHERE p.customer_id=a.customer_id AND p.bank_code='998' AND p.account_no=b.account_no))
+  WHERE rn<=LEAST(3,n-2);
+  COMMIT;
 END;
 /
 -- Explicit seed IDs must not collide with subsequent real API inserts.

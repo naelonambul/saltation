@@ -100,6 +100,7 @@ struct Customer {
     account: String,
     fin: String,
     token: String,
+    history_path: String,
 }
 
 async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Customer> {
@@ -112,6 +113,7 @@ async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Cust
             account: format!("9600{n:08}"),
             fin: String::new(),
             token: String::new(),
+            history_path: String::new(),
         })
         .collect();
     // Stay below both the 500-row contract implementation limit and body limits.
@@ -190,11 +192,19 @@ async fn tune_credentials() {
 
 async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Customer> {
     let deep = i64::from(matches!(workload, "history" | "balance" | "transfer_hot"));
+    let history_case = workload.starts_with("history_");
+    let (minimum, maximum) = if history_case && workload.ends_with("_shallow") {
+        (26_i64, 50_000_i64)
+    } else if history_case {
+        (50_000, i64::MAX)
+    } else {
+        (26, i64::MAX)
+    };
     let rows = db.run(move |s| {
         s.query_all::<(String, String, String)>(&SqlStmt {
             name: "tune.accounts",
-            sql: "SELECT phone,account_no,fintech_use_num FROM (SELECT c.phone,a.account_no,f.fintech_use_num FROM customer c JOIN account a ON a.customer_id=c.customer_id JOIN fintech_account f ON f.account_id=a.account_id WHERE a.subtype='DEMAND' AND a.status='ACTIVE' AND a.next_sequence>25 ORDER BY CASE WHEN :deep=1 THEN a.next_sequence ELSE 0 END DESC, ORA_HASH(a.account_id,4294967295,20261115)) WHERE ROWNUM<=1000",
-        }, &[&deep])
+            sql: "SELECT phone,account_no,fintech_use_num FROM (SELECT c.phone,a.account_no,f.fintech_use_num FROM customer c JOIN account a ON a.customer_id=c.customer_id JOIN fintech_account f ON f.account_id=a.account_id WHERE a.subtype='DEMAND' AND a.status='ACTIVE' AND a.next_sequence>=:minimum AND a.next_sequence<:maximum ORDER BY CASE WHEN :deep=1 THEN a.next_sequence ELSE 0 END DESC, ORA_HASH(a.account_id,4294967295,20261115)) WHERE ROWNUM<=1000",
+        }, &[&minimum, &maximum, &deep])
     }).await.expect("seeded accounts");
     assert!(rows.len() >= 2, "run tune-seed first");
     let mut customers: Vec<Customer> = rows
@@ -204,6 +214,7 @@ async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Cu
             account,
             fin,
             token: String::new(),
+            history_path: String::new(),
         })
         .collect();
     if workload == "transfer_hot" {
@@ -233,6 +244,133 @@ async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Cu
         }
     }
     customers
+}
+
+async fn history_customers(
+    db: &Db,
+    public: &Router,
+    customers: Vec<Customer>,
+    workload: &str,
+    now: DateTime<FixedOffset>,
+) -> Vec<Customer> {
+    let old = workload.starts_with("history_old_");
+    let from =
+        if old {
+            let date: String = db
+                .run(|s| {
+                    s.query_row(&SqlStmt {
+            name: "tune.history_start",
+            sql: "SELECT TO_CHAR(ADD_MONTHS(first_day,1),'YYYYMMDD') FROM tune_seed",
+        }, &[])
+                })
+                .await
+                .expect("old history window");
+            chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").expect("seed first month")
+        } else {
+            (now - chrono::Months::new(3)).date_naive()
+        };
+    let to = if old {
+        from + chrono::Months::new(3)
+    } else {
+        now.date_naive()
+    };
+    let inquiry = if workload == "history_filtered_deep" {
+        "I"
+    } else {
+        "A"
+    };
+    let deep_page = workload.contains("_deep_");
+    let mut selected = Vec::new();
+    for mut customer in customers {
+        let base = format!(
+            "/v2.0/account/transaction_list/fin_num?fintech_use_num={}&inquiry_type={inquiry}&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}",
+            customer.fin,
+            from.format("%Y%m%d"),
+            to.format("%Y%m%d"),
+            now.format("%Y%m%d%H%M%S")
+        );
+        let mut path = base.clone();
+        let mut reached = 0;
+        if deep_page {
+            for step in 0..=10 {
+                let (status, page) = call(
+                    public,
+                    "GET",
+                    &format!("{path}&bank_tran_id={}", btid(step)),
+                    &id(),
+                    Some(&customer.token),
+                    None,
+                )
+                .await
+                .expect("history pagination");
+                assert_eq!(status, 200, "history setup status");
+                assert_eq!(page["rsp_code"], "A0000", "history setup response");
+                reached = step;
+                if page["next_page_yn"] == "N" || step == 10 {
+                    break;
+                }
+                assert_eq!(page["next_page_yn"], "Y");
+                let trace = page["befor_inquiry_trace_info"]
+                    .as_str()
+                    .expect("history trace");
+                let _: i64 = trace.parse().expect("reusable sequence cursor");
+                path = format!("{base}&befor_inquiry_trace_info={trace}");
+            }
+            if reached == 0 {
+                continue;
+            }
+        }
+        customer.history_path = path;
+        selected.push(customer);
+    }
+    assert!(!selected.is_empty(), "no eligible history pages");
+    selected
+}
+
+async fn queue_events(db: &Db, ids: Vec<String>, now: DateTime<FixedOffset>) {
+    db.run(move |s| {
+        let at = now.to_rfc3339();
+        let date = now.date_naive().to_string();
+        for batch in ids.chunks(500) {
+            let binds: Vec<Vec<&dyn bank::shared::db::ToSql>> = batch
+                .iter()
+                .map(|id| vec![id as &dyn bank::shared::db::ToSql, id, &at, &at, &date])
+                .collect();
+            s.execute_batch(&OUTBOX, &binds)?;
+        }
+        s.commit()
+    })
+    .await
+    .expect("outbox fixture");
+}
+
+async fn drain_events(
+    db: &Db,
+    events: &mongodb::Collection<mongodb::bson::Document>,
+    ids: &[String],
+) {
+    let relay = tokio::spawn(outbox_relay::run(db.clone(), env("MONGO_URI")));
+    // Allow 300 s plus 10 ms per event, so the default long fixture has time to drain.
+    let deadline = Instant::now() + Duration::from_secs(300 + ids.len() as u64 / 100);
+    loop {
+        assert!(Instant::now() < deadline, "relay did not drain fixture");
+        if outbox::backlog(db).await.expect("relay backlog").0 == 0 {
+            let mut delivered = 0;
+            // Bound the Mongo command size even for the default long fixture.
+            for batch in ids.chunks(1000) {
+                delivered += events
+                    .count_documents(mongodb::bson::doc! {"_id": {"$in": batch}})
+                    .await
+                    .expect("relay progress");
+            }
+            if delivered == ids.len() as u64 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    relay.abort();
+    let _ = relay.await;
 }
 
 fn transfer(
@@ -400,6 +538,7 @@ async fn window(
                     "lookup" => ("GET", "/v2.0/account/list".to_owned(), None),
                     "balance" => ("GET", format!("/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={}&tran_dtime={}", btid(n), c.fin, now.format("%Y%m%d%H%M%S")), None),
                     "history" => ("GET", format!("/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={}&inquiry_type=A&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}", btid(n), c.fin, (now - chrono::Months::new(3)).format("%Y%m%d"), now.format("%Y%m%d"), now.format("%Y%m%d%H%M%S")), None),
+                    name if name.starts_with("history_") => ("GET", format!("{}&bank_tran_id={}", c.history_path, btid(n)), None),
                     _ => unreachable!(),
                 };
                 let request = id();
@@ -504,19 +643,21 @@ fn env(name: &str) -> String {
 #[ignore]
 async fn driver_bench() {
     let workload = env("BENCH_WORKLOAD");
-    if workload == "transfer_hot" {
-        assert!(populated(), "transfer_hot requires the populated tune seed");
+    if workload == "transfer_hot" || workload.starts_with("history_") || workload == "outbox_long" {
+        assert!(populated(), "workload requires the populated tune seed");
     }
     let _ = bench_rate(&workload);
     let concurrency: usize = env("BENCH_CONCURRENCY").parse().expect("concurrency");
-    assert!(matches!(
-        (workload.as_str(), concurrency),
-        ("lookup" | "balance" | "history", 8)
-            | ("transfer", 1 | 8 | 32 | 64)
-            | ("transfer_hot", 32 | 64)
-            | ("duplicate", 200)
-            | ("outbox", 1)
-    ));
+    assert!(
+        matches!(
+            (workload.as_str(), concurrency),
+            ("lookup" | "balance" | "history", 8)
+                | ("transfer", 1 | 8 | 32 | 64)
+                | ("transfer_hot", 32 | 64)
+                | ("duplicate", 200)
+                | ("outbox" | "outbox_long", 1)
+        ) || (workload.starts_with("history_") && concurrency == 8)
+    );
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -543,17 +684,22 @@ async fn driver_bench() {
     let generator = app::generator_router(state.clone());
     let seeded = Instant::now();
     let mut rng = StdRng::seed_from_u64(20261115);
-    let customers = Arc::new(if populated() {
+    let customers = if populated() {
         populated_customers(&db, &public, &workload).await
     } else {
         seed(&generator, &public, &mut rng).await
-    });
+    };
     let now = state
         .clock
         .state()
         .await
         .expect("clock state")
         .business_time;
+    let customers = Arc::new(if workload.starts_with("history_") {
+        history_customers(&db, &public, customers, &workload, now).await
+    } else {
+        customers
+    });
     if !populated() {
         db.run(move |s| {
             s.execute(&HISTORY, &[&now.date_naive(), &id()])?;
@@ -588,7 +734,7 @@ async fn driver_bench() {
             .collect(),
     );
     let cursor = Arc::new(AtomicUsize::new(0));
-    let collection = if workload == "outbox" {
+    let collection = if matches!(workload.as_str(), "outbox" | "outbox_long") {
         Some(
             outbox_relay::events_collection(&env("MONGO_URI"))
                 .await
@@ -648,24 +794,23 @@ async fn driver_bench() {
             .expect("pre-drain")
             > 0
         {}
-        event_ids = (0..if populated() { 50_000 } else { 5000 })
-            .map(|_| id())
-            .collect();
-        let ids = event_ids.clone();
-        db.run(move |s| {
-            let at = now.to_rfc3339();
-            let date = now.date_naive().to_string();
-            for batch in ids.chunks(500) {
-                let binds: Vec<Vec<&dyn bank::shared::db::ToSql>> = batch
-                    .iter()
-                    .map(|id| vec![id as &dyn bank::shared::db::ToSql, id, &at, &at, &date])
-                    .collect();
-                s.execute_batch(&OUTBOX, &binds)?;
-            }
-            s.commit()
-        })
-        .await
-        .expect("outbox fixture");
+        if workload == "outbox_long" {
+            let count = bench_secs("TUNE_OUTBOX_LONG", 500_000);
+            let historical: Vec<String> = (0..count).map(|_| id()).collect();
+            queue_events(&db, historical.clone(), now).await;
+            drain_events(&db, events, &historical).await;
+        }
+        let count = if workload == "outbox_long" {
+            1000
+        } else if populated() {
+            50_000
+        } else {
+            5000
+        };
+        event_ids = (0..count).map(|_| id()).collect();
+        if workload != "outbox_long" {
+            queue_events(&db, event_ids.clone(), now).await;
+        }
         // Reparse the backlog cursor after reset and population, before snapshots.
         outbox::backlog(&db).await.expect("backlog warm-up");
     }
@@ -681,22 +826,10 @@ async fn driver_bench() {
     let started = Instant::now();
     let mut result = if let Some(events) = &collection {
         let expected = event_ids.len() as u64;
-        let relay = tokio::spawn(outbox_relay::run(db.clone(), env("MONGO_URI")));
-        let deadline = Instant::now() + Duration::from_secs(300);
-        // Drive the actual production loop, which calls backlog before relay_once.
-        loop {
-            assert!(Instant::now() < deadline, "relay did not drain fixture");
-            let delivered = events
-                .count_documents(mongodb::bson::doc! {"_id": {"$in": &event_ids}})
-                .await
-                .expect("relay progress");
-            if delivered == expected && outbox::backlog(&db).await.expect("relay backlog").0 == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if workload == "outbox_long" {
+            queue_events(&db, event_ids.clone(), now).await;
         }
-        relay.abort();
-        let _ = relay.await;
+        drain_events(&db, events, &event_ids).await;
         let mut r = Results {
             successes: expected,
             ..Results::default()
@@ -772,7 +905,7 @@ async fn driver_bench() {
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
         "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "oracle_cpus": env("BENCH_ORACLE_CPUS"), "oracle_memory": env("BENCH_ORACLE_MEMORY"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
-    if workload == "outbox" {
+    if matches!(workload.as_str(), "outbox" | "outbox_long") {
         line["latency_scope"] = json!("complete backlog drain, including completion polling");
     }
     if populated() {
@@ -821,7 +954,9 @@ async fn driver_bench() {
         }
     }
     if let Some(events) = collection {
-        if populated() {
+        if workload == "outbox_long" {
+            assert_eq!(result.successes, 1000);
+        } else if populated() {
             assert_eq!(result.successes, 50_000);
         } else {
             assert_eq!(result.successes, 5000);
@@ -831,7 +966,9 @@ async fn driver_bench() {
             .count_documents(mongodb::bson::doc! {"_id": {"$in": event_ids}})
             .await
             .expect("Mongo event count");
-        if populated() {
+        if workload == "outbox_long" {
+            assert_eq!(count, 1000);
+        } else if populated() {
             assert_eq!(count, 50_000);
         } else {
             assert_eq!(count, 5000);

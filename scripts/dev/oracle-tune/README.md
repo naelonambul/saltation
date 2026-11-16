@@ -28,7 +28,7 @@ opening inbound movement and paired payee. Reference products come from migratio
 Counterparties use the synthetic 9700 prefix; bank accounts use 9600. About 1% of
 accounts have at least 50,000 transfer legs; most have one leg every other day
 (about 550 in three years). Default volume is about 21 million ledger rows.
-All accounts start at 100 million won; paired 100-won movements preserve funds.
+Demand accounts start at 100 million won; paired 100-won movements preserve funds.
 The current business date comes from the migrated bank clock; the history starts
 that date minus `TUNE_YEARS` calendar years. Daily closes cover completed dates,
 while current-date daily totals remain available for posting. Posting reads
@@ -39,6 +39,25 @@ a completed request. Historical outbox rows are inserted and deleted in delivery
 order, with at most 100 rows left as backlog. The seed does not deliver historical
 events to MongoDB. Two shared Argon2 hashes are generated through the bank's
 hashing code solely for the synthetic benchmark password and PIN.
+
+After the daily loop, the seed adds one term deposit for each of
+`FLOOR(TUNE_CUSTOMERS/10)` customers, starting with customers 1, 11, 21, and so on.
+Maturities are evenly spaced from the first seeded date plus 30 days through the
+business date plus 365 days. Matured deposits have CLOSED accounts and MATURITY
+closures; future deposits remain ACTIVE. These synthetic product fixtures have
+zero balances, next sequence 1, no ledger rows, and zero-balance daily closes for
+all completed dates, preserving every consistency check. Each has a linked demand
+account, fintech number, and status history.
+
+The seed also adds `FLOOR(TUNE_CUSTOMERS/50)` consumed password resets spread over
+the seeded period, using a fixed synthetic Argon2id PHC hash that is never logged,
+and `FLOOR(TUNE_CUSTOMERS/100)` ended ATM sessions with a synthetic terminal.
+ATM bearer token hashes use the feature's SHA-256 format. Reset expiry is five
+minutes; ATM expiry is three minutes. Each of the first
+`LEAST(TUNE_CUSTOMERS,1000)` customers gets up to three additional distinct payees,
+excluding themselves and their existing paired payee; small populations receive
+`LEAST(3,TUNE_CUSTOMERS-2)` extra payees. The post-consistency table counts include
+DEPOSIT_DETAIL, PASSWORD_RESET, ATM_SESSION, and PAYEE.
 
 `BENCH_POPULATED=1 ... driver-bench` skips schema reset and API population,
 selects up to 1,000 seeded accounts and logs in through the public router.
@@ -56,6 +75,28 @@ one-won amounts so repeated contention windows do not exhaust daily limits.
 The populated outbox fixture contains 50,000 pending events and drives the real
 production relay loop, including its backlog query before every batch.
 
+Populated capture additionally runs all eight
+`history_<window>_<page>_<depth>:8` combinations: windows `recent` and `old`,
+pages `first` and `deep`, and account depths `shallow` and `deep`. Recent uses the
+existing three-month period ending on the business date; old starts one calendar
+month after TUNE_SEED.first_day and spans three months. Deep accounts have at
+least 50,000 ledger rows; shallow accounts are ordinary seeded demand accounts.
+For deep pages, untimed setup follows reusable sequence traces at most ten times,
+retains the request for the reached page, and excludes single-page windows.
+Timed requests repeat that saved page, including the last page when fewer than
+eleven exist. No additional ledger history is created. `history_filtered_deep:8`
+uses recent first pages on deep accounts with `inquiry_type=I`. The original
+`history:8` request is unchanged.
+
+`outbox_long:1` first queues `TUNE_OUTBOX_LONG` events (default 500000) with no
+relay running, then drains them through the production relay and confirms Mongo
+delivery during untimed setup. It retains the outbox segment after that drain.
+The measured window queues and delivers 1000 more events through the production
+relay, reporting 1000 successes. The backlog cursor is parsed before the start
+snapshot. For a smaller verification fixture, pass `TUNE_OUTBOX_LONG=20000` to
+`tune-capture`; the value is forwarded to both timed and separate plan processes.
+The nine new history cases and long outbox case require `BENCH_POPULATED=1`.
+
 Timed windows use normal session statistics with no logon trigger. After each
 entry a separate short process runs with a temporary schema logon trigger setting
 `STATISTICS_LEVEL=ALL`, including replacement pool connections. Its request warm-up
@@ -65,7 +106,8 @@ only. An exit trap removes the trigger, including after failure.
 
 At capture start, schema optimizer statistics are gathered once. Before every timed window
 and plan entry the outbox is delivered to MongoDB, checked empty, and its tune
-schema segment is truncated. `resets.txt` records each reset; drain logs record
+schema segment is truncated. No truncate occurs between the long outbox setup
+and its measured window. `resets.txt` records each reset; drain logs record
 failures. Other persistent data is not reset: reseed for identical starting data.
 
 The snapshot request/ack protocol records database-time bounds in `TUNE_WINDOWS`.

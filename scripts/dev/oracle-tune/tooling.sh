@@ -107,10 +107,10 @@ BEGIN
   END LOOP;
 END;
 /
-CREATE TABLE saltation_tune.tune_windows(workload VARCHAR2(20),concurrency NUMBER,run NUMBER,started_at TIMESTAMP WITH TIME ZONE,ended_at TIMESTAMP WITH TIME ZONE,PRIMARY KEY(workload,concurrency,run));
+CREATE TABLE saltation_tune.tune_windows(workload VARCHAR2(40),concurrency NUMBER,run NUMBER,started_at TIMESTAMP WITH TIME ZONE,ended_at TIMESTAMP WITH TIME ZONE,PRIMARY KEY(workload,concurrency,run));
 CREATE TABLE saltation_tune.tune_plan_bounds(entry VARCHAR2(40),started_at TIMESTAMP WITH TIME ZONE);
 SQL
-  for entry in transfer:8 transfer:32 transfer:64 transfer_hot:32 transfer_hot:64 history:8 balance:8 lookup:8 outbox:1; do
+  for entry in transfer:8 transfer:32 transfer:64 transfer_hot:32 transfer_hot:64 history:8 balance:8 lookup:8 outbox:1 history_recent_first_shallow:8 history_recent_first_deep:8 history_recent_deep_shallow:8 history_recent_deep_deep:8 history_old_first_shallow:8 history_old_first_deep:8 history_old_deep_shallow:8 history_old_deep_deep:8 history_filtered_deep:8 outbox_long:1; do
     label="${entry/:/-}"
     BENCH_CAPTURE=1 BENCH_POPULATED=1 BENCH_ORA_SNAP=1 BENCH_DRIVER="${BENCH_DRIVER:-check}" BENCH_RUNS="${BENCH_RUNS:-1}" BENCH_ONLY="$entry" BENCH_OUTPUT="$output" driver_bench >"$output/bench-$label.log" 2>&1 || { failed=1; break; }
     for ((run=1; run<=${BENCH_RUNS:-1}; run++)); do
