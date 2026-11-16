@@ -36,7 +36,16 @@ const OPENING: i64 = 100_000_000;
 fn id() -> String {
     ulid::Ulid::new().to_string()
 }
+fn populated() -> bool {
+    std::env::var("BENCH_POPULATED").as_deref() == Ok("1")
+}
 fn btid(n: usize) -> String {
+    if populated() {
+        // Each process shares the persistent schema; idempotency keys must be fresh.
+        static PREFIX: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let prefix = PREFIX.get_or_init(|| rand::rng().random_range(10..1_000_000_000));
+        return format!("T{prefix:09}U{n:09}");
+    }
     format!("T000000001U{n:09}")
 }
 
@@ -140,6 +149,79 @@ async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Cust
             let router = public.clone();
             let phone = c.phone.clone();
             tasks.spawn(async move { (i, seed_call(&router, "/v2.0/ext/auth/login", json!({"phone": phone, "password": "pw-bench", "device_id": "driver-bench"})).await) });
+        }
+        while let Some(result) = tasks.join_next().await {
+            let (i, body) = result.expect("login task");
+            batch[i].token = body["access_token"].as_str().expect("token").to_owned();
+        }
+    }
+    customers
+}
+
+// Use the production migration runner, including its version tracking and splitter.
+#[tokio::test]
+#[ignore]
+async fn tune_prepare() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    db.migrate().await.expect("migrate tune schema");
+    Clock::init(db.clone(), Registry::default())
+        .await
+        .expect("clock");
+}
+
+#[tokio::test]
+#[ignore]
+async fn tune_credentials() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let password = bank::shared::auth::hash_secret("pw-bench".into())
+        .await
+        .expect("hash");
+    let pin = bank::shared::auth::hash_secret("7391".into())
+        .await
+        .expect("hash");
+    db.run(move |s| {
+        s.execute(&SqlStmt { name: "tune.credentials", sql: "INSERT INTO customer_credential(customer_id,password_hash,password_changed_at) SELECT customer_id,:hash,created_at FROM customer" }, &[&password])?;
+        s.execute(&SqlStmt { name: "tune.pins", sql: "INSERT INTO atm_credential(account_no,pin_hash) SELECT account_no,:hash FROM account" }, &[&pin])?;
+        s.commit()
+    }).await.expect("synthetic credentials");
+}
+
+async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Customer> {
+    let deep = i64::from(matches!(workload, "history" | "balance"));
+    let rows = db.run(move |s| {
+        s.query_all::<(String, String, String)>(&SqlStmt {
+            name: "tune.accounts",
+            sql: "SELECT phone,account_no,fintech_use_num FROM (SELECT c.phone,a.account_no,f.fintech_use_num FROM customer c JOIN account a ON a.customer_id=c.customer_id JOIN fintech_account f ON f.account_id=a.account_id WHERE a.subtype='DEMAND' AND a.status='ACTIVE' AND a.next_sequence>25 ORDER BY CASE WHEN :deep=1 THEN a.next_sequence ELSE 0 END DESC, ORA_HASH(a.account_id,4294967295,20261115)) WHERE ROWNUM<=1000",
+        }, &[&deep])
+    }).await.expect("seeded accounts");
+    assert!(rows.len() >= 2, "run tune-seed first");
+    let mut customers: Vec<Customer> = rows
+        .into_iter()
+        .map(|(phone, account, fin)| Customer {
+            phone,
+            account,
+            fin,
+            token: String::new(),
+        })
+        .collect();
+    for batch in customers.chunks_mut(8) {
+        let mut tasks = JoinSet::new();
+        for (i, c) in batch.iter().enumerate() {
+            let router = public.clone();
+            let phone = c.phone.clone();
+            tasks.spawn(async move {
+                (
+                    i,
+                    seed_call(
+                        &router,
+                        "/v2.0/ext/auth/login",
+                        json!({"phone":phone,"password":"pw-bench","device_id":"driver-bench"}),
+                    )
+                    .await,
+                )
+            });
         }
         while let Some(result) = tasks.join_next().await {
             let (i, body) = result.expect("login task");
@@ -427,7 +509,11 @@ async fn driver_bench() {
         )
         .init();
     let metrics = telemetry::metrics_handle();
-    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let mut config = DbConfig::from_env().expect("config");
+    if populated() {
+        config.user = "saltation_tune".into();
+    }
+    let db = Db::connect(&config).expect("connect");
     db.migrate().await.expect("migrate");
     let clock = Clock::init(db.clone(), Registry::default())
         .await
@@ -441,19 +527,25 @@ async fn driver_bench() {
     let generator = app::generator_router(state.clone());
     let seeded = Instant::now();
     let mut rng = StdRng::seed_from_u64(20261115);
-    let customers = Arc::new(seed(&generator, &public, &mut rng).await);
+    let customers = Arc::new(if populated() {
+        populated_customers(&db, &public, &workload).await
+    } else {
+        seed(&generator, &public, &mut rng).await
+    });
     let now = state
         .clock
         .state()
         .await
         .expect("clock state")
         .business_time;
-    db.run(move |s| {
-        s.execute(&HISTORY, &[&now.date_naive(), &id()])?;
-        s.commit()
-    })
-    .await
-    .expect("history fixture");
+    if !populated() {
+        db.run(move |s| {
+            s.execute(&HISTORY, &[&now.date_naive(), &id()])?;
+            s.commit()
+        })
+        .await
+        .expect("history fixture");
+    }
     // The history workload must measure real pages, not empty ones.
     let first = &customers[0];
     let (status, page) = call(&public, "GET", &format!("/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={}&inquiry_type=A&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}", btid(0), first.fin, (now - chrono::Months::new(3)).format("%Y%m%d"), now.format("%Y%m%d"), now.format("%Y%m%d%H%M%S")), &id(), Some(&first.token), None)
@@ -473,8 +565,8 @@ async fn driver_bench() {
     let pairs: Arc<Vec<usize>> = Arc::new(
         (0..1_000_000)
             .map(|n| {
-                let from = n % 1000;
-                let to = rng.random_range(0..999);
+                let from = n % customers.len();
+                let to = rng.random_range(0..customers.len() - 1);
                 if to >= from { to + 1 } else { to }
             })
             .collect(),
@@ -643,6 +735,13 @@ async fn driver_bench() {
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
         "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+    if populated() {
+        let params: (i64,i64,i64,String,String) = db.run(|s| s.query_row(&SqlStmt {
+            name: "tune.parameters", sql: "SELECT customers,years,max_gb,TO_CHAR(first_day,'YYYY-MM-DD'),TO_CHAR(last_day,'YYYY-MM-DD') FROM tune_seed"
+        }, &[])).await.expect("seed parameters");
+        line["populated"] = json!(true);
+        line["seed"] = json!({"customers":params.0,"years":params.1,"max_gb":params.2,"first_day":params.3,"last_day":params.4});
+    }
     if let Some(rate) = bench_rate(&workload) {
         line["rate"] = json!(rate);
         line["late"] = json!(result.late);
