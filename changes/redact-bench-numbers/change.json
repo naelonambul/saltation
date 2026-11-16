@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "redact-bench-numbers",
+  "kind": "repository",
+  "title": "Keep measured Oracle benchmark numbers out of the public repository",
+  "base": {
+    "ref": "main",
+    "commit": "648e60a6f2c945ce0199c7e58ca626d9a5ea8b3a"
+  },
+  "baseline": {},
+  "write_scope": [
+    "changes/oracledb-driver/plan.md",
+    "REVIEW.md"
+  ],
+  "approvals": []
+}
