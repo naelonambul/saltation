@@ -11,6 +11,7 @@ Review the implementation against the human owner's explicit decisions, `AGENTS.
    - Flag any undocumented material plan deviation.
 3. **Security, privacy, and safety**
    - Find exposed secrets, unsafe input handling, authorization gaps, privacy leaks, insecure defaults, and dangerous operational behavior relevant to the change.
+   - Flag measured performance results of Oracle Database (throughput, latency, wait times, plan statistics such as A-Time or buffers) in committed files, pull request bodies or comments. They stay in the ignored `.evidence/` directory; public text states the outcome only (OTN license benchmark-disclosure clause).
 4. **Verification quality**
    - Confirm tests and other proof actually demonstrate the required behavior, and that `repo.py verify` evidence exists for the reviewed revision.
    - Flag skipped, weakened, deleted, or misleading checks.
