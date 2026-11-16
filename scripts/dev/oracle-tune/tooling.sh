@@ -8,21 +8,26 @@ tune_sql() {
 }
 
 tune_seed() {
-  local customers="${TUNE_CUSTOMERS:-20000}" years="${TUNE_YEARS:-3}" max_gb="${TUNE_MAX_GB:-25}" value docker_root available output
+  local customers="${TUNE_CUSTOMERS:-20000}" years="${TUNE_YEARS:-3}" max_gb="${TUNE_MAX_GB:-25}" value available output
   for value in "$customers" "$years" "$max_gb"; do
     case "$value" in ''|*[!0-9]*|0) echo 'tune-seed: parameters must be positive integers' >&2; return 2 ;; esac
   done
   [ "$customers" -ge 2 ] && [ "$customers" -le 1000000 ] && [ "$years" -le 20 ] && [ "$max_gb" -le 25 ] \
     || { echo 'tune-seed: require 2..1000000 customers, 1..20 years, TUNE_MAX_GB <=25' >&2; return 2; }
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  available=$(df -Pk "$docker_root" | awk 'END {print $4}')
-  [ "$available" -ge 31457280 ] || { echo 'tune-seed: Docker data filesystem has less than 30 GB free; aborting before schema reset' >&2; return 1; }
+  available=$("${compose[@]}" exec -T oracle df -Pk /opt/oracle/oradata | awk 'END {print $4}')
+  [ "$available" -ge 31457280 ] || { echo 'tune-seed: Oracle data filesystem has less than 30 GB free; aborting before schema reset' >&2; return 1; }
   output="$root/.evidence/oracle-tuning/$(date -u +%Y%m%dT%H%M%SZ)-seed"
   mkdir -p "$output"
   # Password is inherited by name, never a process argument or console output.
   if ! { printf 'SET VERIFY OFF ECHO OFF\nDEFINE pw = "%s"\n' "$SALTATION_DB_PASSWORD"; cat <<'SQL'
 WHENEVER SQLERROR EXIT FAILURE
 ALTER SESSION SET CONTAINER=ORCLPDB1;
+BEGIN
+  FOR f IN (SELECT file_name FROM dba_data_files WHERE tablespace_name LIKE 'UNDOTBS%' AND bytes <= 4*1024*1024*1024) LOOP
+    EXECUTE IMMEDIATE 'ALTER DATABASE DATAFILE ''' || f.file_name || ''' AUTOEXTEND ON MAXSIZE 4G';
+  END LOOP;
+END;
+/
 BEGIN
   EXECUTE IMMEDIATE 'DROP USER saltation_tune CASCADE';
 EXCEPTION WHEN OTHERS THEN IF SQLCODE<>-1918 THEN RAISE; END IF;

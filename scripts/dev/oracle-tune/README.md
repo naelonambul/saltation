@@ -7,9 +7,10 @@ V$ grants are retained. Capture runs as SYSDBA, so no extra diagnostic grants
 are required on the application user. SQL*Plus input uses AL32UTF8.
 
 Defaults: `TUNE_CUSTOMERS=20000 TUNE_YEARS=3 TUNE_MAX_GB=25`. Start with
-`TUNE_CUSTOMERS=500 TUNE_YEARS=1`. The script checks free space on the Docker
-root filesystem before dropping the tune user (30 GiB minimum). Before each
-business-date batch it checks allocated segments in `SALTATION_DATA`, reserving
+`TUNE_CUSTOMERS=500 TUNE_YEARS=1`. Before dropping the tune user, the script checks
+free space on `/opt/oracle/oradata` inside the Oracle container (30 GiB minimum)
+and caps the PDB's undo datafiles at 4 GiB, skipping files already larger than that.
+Before each business-date batch it checks allocated segments in `SALTATION_DATA`, reserving
 8 KiB per projected movement/account for the next batch. The limit includes
 other users' segments in that tablespace; it is deliberately conservative.
 The maximum accepted limit is 25 GiB. An aborted seed must be recreated.
