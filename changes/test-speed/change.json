@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "test-speed",
+  "kind": "implementation",
+  "title": "Cut Oracle integration test time without weakening any test",
+  "base": {
+    "ref": "main",
+    "commit": "d5f0398a1eac28bf303229ef0bf0f5e82ee9fa22"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "bank/Cargo.toml",
+    "bank/tests/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:49c008f2878e1946ca3031b8d397814cd54caa34ed8b4a6a9df80ff0997899b5",
+      "by": "naelonambul",
+      "at": "2026-11-15T13:52:12Z",
+      "write_scope_sha256": "sha256:39c74d0461d7885755f41672f35b3acc270d4c06f3711df8e4d0904bb3e078f6",
+      "note": "Owner in session: approved both (test-speed and oracle-tuning) via question dialog, 2026-11-15"
+    }
+  ]
+}

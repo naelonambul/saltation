@@ -10,7 +10,49 @@ use bank::shared::db::{Db, DbConfig};
 use bank::shared::rollover::Registry;
 use http_body_util::BodyExt;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt;
+
+type Cache<K, V> = OnceLock<Mutex<HashMap<K, Arc<OnceLock<Arc<V>>>>>>;
+
+// Initialize outside the map lock: a malformed contract must not poison other keys.
+fn cached<K: Eq + std::hash::Hash, V>(
+    cache: &Cache<K, V>,
+    key: K,
+    init: impl FnOnce() -> V,
+) -> Arc<V> {
+    let entry = cache
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_default()
+        .clone();
+    entry.get_or_init(|| Arc::new(init())).clone()
+}
+
+fn contract_document(dir: &str, file: &str, init: impl FnOnce() -> Value) -> Arc<Value> {
+    static DOCUMENTS: Cache<(String, String), Value> = OnceLock::new();
+    cached(&DOCUMENTS, (dir.into(), file.into()), init)
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum SchemaKey {
+    Named(String),
+    Envelope,
+    Response(String, String, u16),
+}
+
+fn contract_validator(
+    dir: &str,
+    file: &str,
+    schema: SchemaKey,
+    init: impl FnOnce() -> jsonschema::Validator,
+) -> Arc<jsonschema::Validator> {
+    static VALIDATORS: Cache<(String, String, SchemaKey), jsonschema::Validator> = OnceLock::new();
+    cached(&VALIDATORS, (dir.into(), file.into(), schema), init)
+}
 
 pub async fn state() -> AppState {
     init_logs();
@@ -105,23 +147,31 @@ pub async fn call_with_capture(
 /// Returns the validation errors, empty when valid.
 pub fn contract_errors(schema_name: &str, value: &Value) -> Vec<String> {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
-    let text = std::fs::read_to_string(format!("{dir}/openapi/public.yaml"))
-        .expect("read the public contract");
-    let mut doc: Value = serde_yaml::from_str(&text).expect("contract YAML");
-    if doc["components"]["schemas"].get(schema_name).is_none() {
-        let text = std::fs::read_to_string(format!("{dir}/openapi/internal.yaml"))
-            .expect("internal contract");
-        doc = serde_yaml::from_str(&text).expect("internal YAML");
-    }
-    let defs = doc["components"]["schemas"]
-        .to_string()
-        .replace("#/components/schemas/", "#/$defs/");
-    let schema = serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$defs": serde_json::from_str::<Value>(&defs).expect("defs"),
-        "$ref": format!("#/$defs/{schema_name}"),
+    let mut file = "openapi/public.yaml";
+    let mut doc = contract_document(&dir, file, || {
+        let text = std::fs::read_to_string(format!("{dir}/openapi/public.yaml"))
+            .expect("read the public contract");
+        serde_yaml::from_str(&text).expect("contract YAML")
     });
-    let validator = jsonschema::draft202012::new(&schema).expect("valid contract schema");
+    if doc["components"]["schemas"].get(schema_name).is_none() {
+        file = "openapi/internal.yaml";
+        doc = contract_document(&dir, file, || {
+            let text = std::fs::read_to_string(format!("{dir}/openapi/internal.yaml"))
+                .expect("internal contract");
+            serde_yaml::from_str(&text).expect("internal YAML")
+        });
+    }
+    let validator = contract_validator(&dir, file, SchemaKey::Named(schema_name.into()), || {
+        let defs = doc["components"]["schemas"]
+            .to_string()
+            .replace("#/components/schemas/", "#/$defs/");
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": serde_json::from_str::<Value>(&defs).expect("defs"),
+            "$ref": format!("#/$defs/{schema_name}"),
+        });
+        jsonschema::draft202012::new(&schema).expect("valid contract schema")
+    });
     validator
         .iter_errors(value)
         .map(|e| format!("{} at {}", e, e.instance_path()))
@@ -144,10 +194,15 @@ pub fn bank_tran_id() -> String {
 /// Validates a business event against the shared log envelope schema.
 pub fn envelope_errors(event: &Value) -> Vec<String> {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
-    let text = std::fs::read_to_string(format!("{dir}/schemas/log-envelope.schema.json"))
-        .expect("read the log envelope contract");
-    let schema: Value = serde_json::from_str(&text).expect("envelope JSON");
-    let validator = jsonschema::draft202012::new(&schema).expect("valid envelope schema");
+    let file = "schemas/log-envelope.schema.json";
+    let validator = contract_validator(&dir, file, SchemaKey::Envelope, || {
+        let schema = contract_document(&dir, file, || {
+            let text = std::fs::read_to_string(format!("{dir}/{file}"))
+                .expect("read the log envelope contract");
+            serde_json::from_str(&text).expect("envelope JSON")
+        });
+        jsonschema::draft202012::new(&schema).expect("valid envelope schema")
+    });
     validator
         .iter_errors(event)
         .map(|e| format!("{} at {}", e, e.instance_path()))
@@ -241,15 +296,19 @@ pub async fn register_payee(api: &Api, token: &str, bank: &str, account: &str) -
 /// Validate the separate generator inbound contract rather than public.yaml.
 pub fn assert_inbound_contract(schema_name: &str, value: &Value) {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".to_owned());
-    let text =
-        std::fs::read_to_string(format!("{dir}/openapi/inbound.yaml")).expect("inbound contract");
-    let doc: Value = serde_yaml::from_str(&text).expect("inbound YAML");
-    let defs = doc["components"]["schemas"]
-        .to_string()
-        .replace("#/components/schemas/", "#/$defs/");
-    let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema",
+    let file = "openapi/inbound.yaml";
+    let validator = contract_validator(&dir, file, SchemaKey::Named(schema_name.into()), || {
+        let doc = contract_document(&dir, file, || {
+            let text = std::fs::read_to_string(format!("{dir}/{file}")).expect("inbound contract");
+            serde_yaml::from_str(&text).expect("inbound YAML")
+        });
+        let defs = doc["components"]["schemas"]
+            .to_string()
+            .replace("#/components/schemas/", "#/$defs/");
+        let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": serde_json::from_str::<Value>(&defs).expect("defs"), "$ref": format!("#/$defs/{schema_name}")});
-    let validator = jsonschema::draft202012::new(&schema).expect("inbound schema");
+        jsonschema::draft202012::new(&schema).expect("inbound schema")
+    });
     let errors: Vec<_> = validator
         .iter_errors(value)
         .map(|e| format!("{} at {}", e, e.instance_path()))
@@ -392,13 +451,18 @@ pub fn assert_no_pin(what: &str, values: &[Value], pin: &str) {
 /// Validate the generator ATM contract independently of public schemas.
 pub fn assert_atm_contract(schema_name: &str, value: &Value) {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
-    let text = std::fs::read_to_string(format!("{dir}/openapi/atm.yaml")).expect("ATM contract");
-    let doc: Value = serde_yaml::from_str(&text).expect("ATM YAML");
-    let defs = doc["components"]["schemas"]
-        .to_string()
-        .replace("#/components/schemas/", "#/$defs/");
-    let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": serde_json::from_str::<Value>(&defs).unwrap(), "$ref": format!("#/$defs/{schema_name}")});
-    let validator = jsonschema::draft202012::new(&schema).expect("ATM schema");
+    let file = "openapi/atm.yaml";
+    let validator = contract_validator(&dir, file, SchemaKey::Named(schema_name.into()), || {
+        let doc = contract_document(&dir, file, || {
+            let text = std::fs::read_to_string(format!("{dir}/{file}")).expect("ATM contract");
+            serde_yaml::from_str(&text).expect("ATM YAML")
+        });
+        let defs = doc["components"]["schemas"]
+            .to_string()
+            .replace("#/components/schemas/", "#/$defs/");
+        let schema = serde_json::json!({"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": serde_json::from_str::<Value>(&defs).unwrap(), "$ref": format!("#/$defs/{schema_name}")});
+        jsonschema::draft202012::new(&schema).expect("ATM schema")
+    });
     let errors: Vec<_> = validator
         .iter_errors(value)
         .map(|e| e.to_string())
@@ -409,42 +473,80 @@ pub fn assert_atm_contract(schema_name: &str, value: &Value) {
 /// Validate every documented ATM response, including rejection and retry paths.
 pub fn assert_atm_response(method: &str, path: &str, status: u16, body: &Value) {
     let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
-    let text = std::fs::read_to_string(format!("{dir}/openapi/atm.yaml")).expect("ATM contract");
-    let doc: Value = serde_yaml::from_str(&text).expect("ATM YAML");
+    let file = "openapi/atm.yaml";
     let method = method.to_lowercase();
-    let mut response = doc["paths"][path][&method]["responses"]
-        .get(status.to_string())
-        .unwrap_or_else(|| panic!("undocumented ATM response: {method} {path} {status}"));
-    while let Some(reference) = response.get("$ref") {
-        response = doc
-            .pointer(
-                reference
-                    .as_str()
-                    .unwrap()
-                    .strip_prefix('#')
-                    .expect("local response reference"),
+    let validator = contract_validator(
+        &dir,
+        file,
+        SchemaKey::Response(method.clone(), path.into(), status),
+        || {
+            let doc = contract_document(&dir, file, || {
+                let text = std::fs::read_to_string(format!("{dir}/{file}")).expect("ATM contract");
+                serde_yaml::from_str(&text).expect("ATM YAML")
+            });
+            let mut response = doc["paths"][path][&method]["responses"]
+                .get(status.to_string())
+                .unwrap_or_else(|| panic!("undocumented ATM response: {method} {path} {status}"));
+            while let Some(reference) = response.get("$ref") {
+                response = doc
+                    .pointer(
+                        reference
+                            .as_str()
+                            .unwrap()
+                            .strip_prefix('#')
+                            .expect("local response reference"),
+                    )
+                    .expect("response reference resolves");
+            }
+            let content = response["content"]["application/json"]["schema"].clone();
+            assert!(
+                content.is_object(),
+                "response schema: {method} {path} {status}"
+            );
+            let components: Value = serde_json::from_str(
+                &doc["components"]
+                    .to_string()
+                    .replace("#/components/", "#/$defs/"),
             )
-            .expect("response reference resolves");
-    }
-    let content = response["content"]["application/json"]["schema"].clone();
-    assert!(
-        content.is_object(),
-        "response schema: {method} {path} {status}"
+            .unwrap();
+            let content: Value =
+                serde_json::from_str(&content.to_string().replace("#/components/", "#/$defs/"))
+                    .unwrap();
+            let schema = serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": components,
+                "allOf": [content]
+            });
+            jsonschema::draft202012::new(&schema).expect("ATM response schema")
+        },
     );
-    let components: Value = serde_json::from_str(
-        &doc["components"]
-            .to_string()
-            .replace("#/components/", "#/$defs/"),
-    )
-    .unwrap();
-    let content: Value =
-        serde_json::from_str(&content.to_string().replace("#/components/", "#/$defs/")).unwrap();
-    let schema = serde_json::json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$defs": components,
-        "allOf": [content]
-    });
-    let validator = jsonschema::draft202012::new(&schema).expect("ATM response schema");
     let errors: Vec<_> = validator.iter_errors(body).map(|e| e.to_string()).collect();
     assert!(errors.is_empty(), "{method} {path} {status}: {errors:?}");
+}
+
+#[test]
+fn cached_validation_still_rejects_invalid_bodies() {
+    let valid = serde_json::json!({
+        "api_tran_id": "cache-test",
+        "api_tran_dtm": "20261115000000000",
+        "rsp_code": "A0000",
+        "rsp_message": "",
+        "request_id": "00000000000000000000000000",
+        "created": 1
+    });
+    let invalid = serde_json::json!({});
+    for schema in ["Envelope", "CreatedResponse"] {
+        assert!(contract_errors(schema, &valid).is_empty());
+        let expected = contract_errors(schema, &invalid);
+        assert!(!expected.is_empty());
+        for _ in 0..3 {
+            assert!(contract_errors(schema, &valid).is_empty());
+            assert_eq!(contract_errors(schema, &invalid), expected);
+        }
+    }
+    let expected = envelope_errors(&invalid);
+    assert!(!expected.is_empty());
+    for _ in 0..3 {
+        assert_eq!(envelope_errors(&invalid), expected);
+    }
 }

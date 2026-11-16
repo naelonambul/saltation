@@ -69,7 +69,7 @@ fn assert_refs_resolve(value: &Value, doc: &Value) {
 mod common;
 use axum::http::StatusCode;
 use bank::shared::auth;
-use bank::shared::db::SqlStmt;
+use bank::shared::db::{Db, DbConfig, SqlStmt};
 use bank::sql_stmt;
 use common::{Api, TEST_ATM_PIN, assert_no_pin, call, find_pin, new_id};
 use serde_json::json;
@@ -78,10 +78,28 @@ const TERMINAL: SqlStmt = sql_stmt!("test.atm_terminal", "sql/atm_terminal.sql")
 const ACCOUNT_COUNT: SqlStmt = sql_stmt!("test.atm_account_count", "sql/atm_account_count.sql");
 const CREDENTIAL: SqlStmt = sql_stmt!("test.atm_credential", "sql/atm_credential.sql");
 const EVENTS: SqlStmt = sql_stmt!("test.atm_events", "sql/atm_events.sql");
+const EVENT_WATERMARK: SqlStmt =
+    sql_stmt!("test.atm_event_watermark", "sql/atm_event_watermark.sql");
+
+async fn event_watermark() -> String {
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    db.migrate().await.expect("migrate");
+    db.run(|s| s.query_row(&EVENT_WATERMARK, &[]))
+        .await
+        .expect("event watermark")
+}
+
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn live() -> Api {
     let api = common::api().await;
+    if std::env::var("SALTATION_TEST_EXPECT_LIVE").as_deref() == Ok("1") {
+        assert_eq!(
+            api.state.clock.state().await.expect("clock state").mode,
+            bank::shared::clock::ClockMode::Live,
+            "clock must already be live before the ATM fixture switches it"
+        );
+    }
     let (status, body) = call(
         &api.generator,
         "POST",
@@ -256,30 +274,62 @@ async fn seeding_leaks_no_pin() {
     let _guard = TEST_LOCK.lock().await;
     // Keep every line emitted during this test, including initialization.
     let start = common::logs().len();
+    let watermark = event_watermark().await;
     let api = live().await;
     let no = format!("C{}", common::unique_digits(10));
     let account = format!("94{}", common::unique_digits(10));
     let (status, customer_response) = call(&api.generator, "POST", "/internal/v1/seed/customers", &new_id(), None,
         Some(json!({"customers": [{"customer_no": no, "name": "ATM 고객", "phone": format!("010{}", common::unique_digits(8)), "customer_type": "INDIVIDUAL", "password": "atm-test-password"}]}))).await;
     assert_eq!(status, StatusCode::OK, "{customer_response}");
-    let (status, account_response) = seed_account(&api, vec![json!({"customer_no": no, "account_no": account, "atm_pin": TEST_ATM_PIN, "opening_balance": 10000})]).await;
+    let account_request_id = new_id();
+    let (status, account_response) = call(&api.generator, "POST", "/internal/v1/seed/accounts", &account_request_id, None,
+        Some(json!({"accounts": [{"customer_no": no, "account_no": account, "atm_pin": TEST_ATM_PIN, "opening_balance": 10000}]}))).await;
     assert_eq!(status, StatusCode::OK, "{account_response}");
-    let (status, terminal_response) = seed_terminal(
-        &api,
-        vec![terminal(&format!("T{}", common::unique_digits(15)))],
-    )
-    .await;
+    let terminal_id = format!("T{}", common::unique_digits(15));
+    let (status, terminal_response) = seed_terminal(&api, vec![terminal(&terminal_id)]).await;
     assert_eq!(status, StatusCode::OK, "{terminal_response}");
+    let start_id = new_id();
+    let end_id = new_id();
+    let (status, mut started) =
+        start_session(&api, &terminal_id, &account, TEST_ATM_PIN, &start_id).await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let token = started["atm_session_token"].as_str().unwrap().to_owned();
+    let (status, ended) = finish_session(&api, &token, &end_id).await;
+    assert_eq!(status, StatusCode::OK, "{ended}");
+    assert_eq!(
+        started.as_object_mut().unwrap().remove("atm_session_token"),
+        Some(json!(token))
+    );
     let (hash, _, _) = credential(&api, &account).await;
     let rows: Vec<String> = api
         .state
         .db
-        .run(|s| s.query_all(&EVENTS, &[]))
+        .run(move |s| s.query_all(&EVENTS, &[&watermark]))
         .await
         .unwrap();
-    assert!(!rows.is_empty(), "opening balance emits an event");
     let events: Vec<Value> = rows.iter().map(|s| checked_event(s)).collect();
-    let responses = vec![customer_response, account_response, terminal_response];
+    assert!(
+        rows.iter().any(|row| row.contains(account.as_str())),
+        "the seeded account's opening balance must emit an event inside the secrecy scan"
+    );
+    for (id, event_type) in [
+        (&start_id, "atm.session_started"),
+        (&end_id, "atm.session_ended"),
+    ] {
+        assert!(
+            events
+                .iter()
+                .any(|event| { event["request_id"] == *id && event["event_type"] == event_type }),
+            "{id}: {event_type} must be included in the secrecy scan"
+        );
+    }
+    let responses = vec![
+        customer_response,
+        account_response,
+        terminal_response,
+        started,
+        ended,
+    ];
     let lines = common::logs();
     let lines = &lines[start..];
     for (what, values) in [
@@ -291,6 +341,7 @@ async fn seeding_leaks_no_pin() {
         assert_no_pin(what, values, common::WRONG_ATM_PIN);
         for value in values {
             let text = value.to_string();
+            assert!(!text.contains(&token), "{what} contains session token");
             assert!(!text.contains(&hash), "{what} contains stored PIN hash");
             assert!(
                 !text.contains("$argon2id$"),
@@ -798,27 +849,34 @@ async fn concurrent_starts_replace() {
 #[tokio::test]
 async fn no_token_or_pin_leaks() {
     let _guard = TEST_LOCK.lock().await;
+    let watermark = event_watermark().await;
     let api = live().await;
     let (terminal, customer) = fixture(&api).await;
     let begin = common::logs().len();
+    let start_id = new_id();
+    let deposit_id = new_id();
+    let withdraw_id = new_id();
+    let balance_id = new_id();
+    let end_id = new_id();
+    let wrong_id = new_id();
     let (status, mut started) =
-        start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &new_id()).await;
+        start_session(&api, &terminal, &customer.account, TEST_ATM_PIN, &start_id).await;
     assert_eq!(status, StatusCode::OK);
     let token = started["atm_session_token"].as_str().unwrap().to_owned();
-    let cash_deposit = cash(&api, &token, "deposit", "leak-deposit", 123, &new_id())
+    let cash_deposit = cash(&api, &token, "deposit", "leak-deposit", 123, &deposit_id)
         .await
         .1;
-    let cash_withdraw = cash(&api, &token, "withdraw", "leak-withdraw", 123, &new_id())
+    let cash_withdraw = cash(&api, &token, "withdraw", "leak-withdraw", 123, &withdraw_id)
         .await
         .1;
-    let balance = inquiry(&api, &token, &new_id()).await.1;
-    let ended = finish_session(&api, &token, &new_id()).await.1;
+    let balance = inquiry(&api, &token, &balance_id).await.1;
+    let ended = finish_session(&api, &token, &end_id).await.1;
     let wrong = start_session(
         &api,
         &terminal,
         &customer.account,
         common::WRONG_ATM_PIN,
-        &new_id(),
+        &wrong_id,
     )
     .await
     .1;
@@ -831,10 +889,30 @@ async fn no_token_or_pin_leaks() {
     let raw: Vec<String> = api
         .state
         .db
-        .run(|s| s.query_all(&EVENTS, &[]))
+        .run(move |s| s.query_all(&EVENTS, &[&watermark]))
         .await
         .unwrap();
     let events: Vec<Value> = raw.iter().map(|s| checked_event(s)).collect();
+    for (id, event_type, operation) in [
+        (&start_id, "atm.session_started", None),
+        (&deposit_id, "atm.operation", Some("deposit")),
+        (&withdraw_id, "atm.operation", Some("withdraw")),
+        (&balance_id, "atm.operation", Some("balance")),
+        (&end_id, "atm.session_ended", None),
+        (&wrong_id, "atm.session_rejected", None),
+    ] {
+        for expected_type in [event_type, "request.completed"] {
+            assert!(
+                events.iter().any(|event| {
+                    event["request_id"] == *id
+                        && event["event_type"] == expected_type
+                        && (expected_type != "atm.operation"
+                            || event["payload"]["operation"].as_str() == operation)
+                }),
+                "{id}: {expected_type} must be included in the secrecy scan"
+            );
+        }
+    }
     let hash = credential(&api, &customer.account).await.0;
     for (what, values) in [
         ("responses", responses.as_slice()),
