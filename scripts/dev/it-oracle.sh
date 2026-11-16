@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 project="saltation-it"
@@ -108,6 +108,15 @@ esac
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
     | "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null
+  "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null <<'SQL'
+WHENEVER SQLERROR EXIT SQL.SQLCODE
+ALTER SESSION SET CONTAINER = ORCLPDB1;
+GRANT SELECT ON SYS.V_$SQL TO saltation;
+GRANT SELECT ON SYS.V_$SQL_PLAN TO saltation;
+GRANT SELECT ON SYS.V_$SQL_PLAN_STATISTICS_ALL TO saltation;
+GRANT SELECT ON SYS.V_$SESSION TO saltation;
+EXIT
+SQL
   "${compose[@]}" exec -T mongo mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs \
     --eval 'db.getSiblingDB("bank_logs").events.deleteMany({})' >/dev/null
 }
@@ -129,12 +138,109 @@ cargo_test() {
   local extra_env=()
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
+  [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
+  local deadline_command=()
+  [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
   dev_image
-  docker run --rm --name saltation-it-cargo --network "${project}_data" \
+  ${deadline_command[@]+"${deadline_command[@]}"} docker run --rm --name saltation-it-cargo --network "${project}_data" \
     -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
     -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
     -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
     saltation/bank-dev:local cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
+}
+
+# Requests and acknowledgements delimit only the measured benchmark window.
+bench_snapshot_watch() {
+  local directory="$1" request stem
+  while :; do
+    for request in "$directory"/snap-*-run*-start.req "$directory"/snap-*-run*-end.req; do
+      [ -f "$request" ] || continue
+      stem="${request%.req}"
+      [ ! -f "$stem.ack" ] || continue
+      if "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >"$stem.txt" <<'SQL'
+WHENEVER SQLERROR EXIT FAILURE
+WHENEVER OSERROR EXIT FAILURE
+SET PAGES 0 LINES 300 FEEDBACK OFF HEADING OFF TRIMSPOOL ON
+ALTER SESSION SET CONTAINER=ORCLPDB1;
+SELECT 'startup '||TO_CHAR(startup_time,'YYYYMMDDHH24MISS') FROM v$instance;
+SELECT 'sys '||REPLACE(name,' ','_')||' '||value FROM v$sysstat WHERE name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
+SELECT 'sev '||s.sid||' '||s.serial#||' '||REPLACE(e.event,' ','_')||' '||e.total_waits||' '||e.time_waited_micro FROM v$session s JOIN v$session_event e ON e.sid=s.sid WHERE s.username='SALTATION';
+SELECT 'sst '||s.sid||' '||s.serial#||' '||REPLACE(n.name,' ','_')||' '||t.value FROM v$session s JOIN v$sesstat t ON t.sid=s.sid JOIN v$statname n ON n.statistic#=t.statistic# WHERE s.username='SALTATION' AND n.name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
+SELECT 'hist '||REPLACE(event,' ','_')||' '||wait_time_milli||' '||wait_count FROM v$event_histogram WHERE event IN ('log file sync','log file parallel write');
+SELECT 'sysev '||REPLACE(event,' ','_')||' '||total_waits||' '||time_waited_micro FROM v$system_event WHERE event IN ('log file sync','log file parallel write');
+EXIT
+SQL
+      then
+        touch "$stem.ack"
+      fi
+    done
+    sleep 0.1
+  done
+}
+
+# Each workload/run has a fresh schema and its own resource-limited process.
+driver_bench() {
+  : "${BENCH_DRIVER:?BENCH_DRIVER is required}"
+  local runs="${BENCH_RUNS:-3}" entries entry workload concurrency run failed=0 output
+  case "$BENCH_DRIVER" in *[!a-zA-Z0-9._-]*|'') echo "invalid BENCH_DRIVER" >&2; return 2 ;; esac
+  case "$runs" in *[!0-9]*|''|0) echo "BENCH_RUNS must be positive" >&2; return 2 ;; esac
+  local bench_env=() watcher=""
+  if [ "${BENCH_RATE+x}" = x ]; then
+    case "$BENCH_RATE" in *[!0-9]*|'') echo "BENCH_RATE must be a positive integer" >&2; return 2 ;; esac
+    [[ "$BENCH_RATE" =~ [1-9] ]] || { echo "BENCH_RATE must be a positive integer" >&2; return 2; }
+    bench_env+=(-e "BENCH_RATE=$BENCH_RATE")
+  fi
+  if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
+    bench_env+=(-e BENCH_ORA_SNAP=1)
+  fi
+  entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64 duplicate:200 outbox:1)
+  if [ -n "${BENCH_ONLY:-}" ]; then
+    local found=no
+    for entry in "${entries[@]}"; do [ "$entry" != "$BENCH_ONLY" ] || found=yes; done
+    [ "$found" = yes ] || { echo "invalid BENCH_ONLY" >&2; return 2; }
+    entries=("$BENCH_ONLY")
+  fi
+  if [ "${BENCH_RATE+x}" = x ] && [ -z "${BENCH_ONLY:-}" ]; then
+    entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64)
+  fi
+  output="$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER"
+  mkdir -p "$output"
+  dev_image
+  for entry in "${entries[@]}"; do
+    workload="${entry%:*}"; concurrency="${entry#*:}"
+    if [ "${BENCH_RATE+x}" = x ]; then
+      case "$workload" in
+        lookup|balance|history|transfer) ;;
+        *) echo "BENCH_RATE only supports lookup, balance, history, transfer" >&2; return 2 ;;
+      esac
+    fi
+    for ((run=1; run<=runs; run++)); do
+      echo "driver-bench: $entry run $run"
+      if ! reset_schema; then failed=1; continue; fi
+      if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
+        bench_snapshot_watch "$output" &
+        watcher=$!
+      fi
+      if ! docker run --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
+        -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
+        -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
+        ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
+        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT=/out/bench.jsonl \
+        -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
+        -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
+        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
+        saltation/bank-dev:local sh -c 'cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
+        failed=1
+      fi
+      if [ -n "$watcher" ]; then
+        kill "$watcher" 2>/dev/null || true
+        wait "$watcher" 2>/dev/null || true
+        watcher=""
+      fi
+    done
+  done
+  echo "driver-bench output: $output/bench.jsonl"
+  return "$failed"
 }
 
 mongo_users() {
@@ -272,8 +378,25 @@ browser_dates() {
   fi
 }
 
+# The db-pool cases that need their own process: another session time zone, and a
+# timed exit after closing a warmed pool.
+db_pool_isolated() {
+  ORA_SDTZ=+00:00 cargo_test db_pool -- --ignored --exact db_pool_rejects_other_time_zones
+  # Compile and run once before timing the already-built test process.
+  cargo_test db_pool -- --ignored --exact db_pool_close_exits
+  local started=$SECONDS
+  CARGO_TEST_TIMEOUT=60 cargo_test db_pool -- --ignored --exact db_pool_close_exits
+  [ "$((SECONDS - started))" -le 5 ] || { echo "db-pool close process exceeded 5 s" >&2; return 1; }
+}
+
 run_target() {
   case "$1" in
+    driver-bench) driver_bench ;;
+    driver-parity) reset_schema; cargo_test driver_parity ;;
+    db-pool)
+      cargo_test db_pool
+      db_pool_isolated
+      ;;
     migrations)  reset_schema; cargo_test migrations ;;
     backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
@@ -300,9 +423,10 @@ run_target() {
 if [ "$target" = all ]; then
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   run_target backfill
-  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm
+  cargo_test listeners auth accounts transfers payees inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  db_pool_isolated
   run_target observability
 else
   run_target "$target"

@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
+use crate::shared::db::ToSql;
 use mongodb::bson::{self, Document};
 use mongodb::options::{InsertManyOptions, WriteConcern};
 use mongodb::{Client, Collection};
-use oracle::sql_type::ToSql;
 use serde_json::Value;
 
 use crate::shared::db::{Db, DbError, SqlStmt};

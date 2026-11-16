@@ -243,7 +243,10 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
             } else {
                 match error {
                     DbError::Busy => ApiError::busy(&ctx).into_response(),
-                    _ => ApiError::internal(&ctx).into_response(),
+                    _ => {
+                        tracing::error!(request_id = %ctx.request_id, %error, "business clock unavailable");
+                        ApiError::internal(&ctx).into_response()
+                    }
                 }
             };
         }

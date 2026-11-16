@@ -163,7 +163,14 @@ impl FromRequestParts<AppState> for AuthCustomer {
                 }))
             })
             .await
-            .map_err(|_| ApiError::internal(&ctx))?;
+            .map_err(|e| {
+                if matches!(e, crate::shared::db::DbError::Busy) {
+                    ApiError::busy(&ctx)
+                } else {
+                    tracing::error!(request_id = %ctx.request_id, error = %e, "customer token lookup failed");
+                    ApiError::internal(&ctx)
+                }
+            })?;
         let customer = found.ok_or_else(unauthorized)?;
         if let Some(slot) = parts
             .extensions

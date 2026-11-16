@@ -3,24 +3,24 @@
 //! named [`SqlStmt`] embedded from a `.sql` file; nothing assembles SQL text.
 
 mod migrations;
+mod oracle_conn;
+mod pool;
+mod values;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use oracle::Connection;
-use oracle::SqlValue;
-use oracle::pool::{CloseMode, GetMode, Pool, PoolBuilder};
-use oracle::sql_type::{OracleType, ToSql};
-use tokio::sync::Semaphore;
+use oracle_conn::OracleConnector;
+use oracledb::Connection;
+use pool::{Connector, Lease, Pool, PoolError};
+use values::with_statement_binds;
+pub use values::{RowValue, ToSql};
 
 use crate::shared::telemetry::RequestStats;
 
 pub use migrations::{MIGRATIONS, Migration};
 
 /// A named SQL statement loaded from a file at compile time.
-/// How long warming the pool at start may take.
-const WARM_UP_WAIT: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Clone, Copy)]
 pub struct SqlStmt {
     pub name: &'static str,
@@ -49,6 +49,8 @@ pub struct DbConfig {
     pub max_sessions: u32,
     pub stmt_cache_size: u32,
     pub acquire_timeout: Duration,
+    pub call_timeout: Duration,
+    pub warm_up_wait: Duration,
 }
 
 impl DbConfig {
@@ -72,6 +74,11 @@ impl DbConfig {
             max_sessions: num("SALTATION_DB_MAX_SESSIONS", 12)?,
             stmt_cache_size: num("SALTATION_DB_STMT_CACHE", 64)?,
             acquire_timeout: Duration::from_millis(u64::from(num("SALTATION_DB_ACQUIRE_MS", 200)?)),
+            call_timeout: Duration::from_millis(u64::from(num(
+                "SALTATION_DB_CALL_TIMEOUT_MS",
+                30000,
+            )?)),
+            warm_up_wait: Duration::from_millis(u64::from(num("SALTATION_DB_WARM_UP_MS", 30000)?)),
         })
     }
 }
@@ -82,13 +89,21 @@ pub enum DbError {
     Config(String),
     #[error("database busy: no session within the acquire timeout")]
     Busy,
+    #[error("database connector panicked")]
+    Panicked,
+    #[error("database pool is closed")]
+    Closed,
+    #[error("unexpected session time zone: {0}")]
+    TimeZone(String),
+    #[error("database worker spawn failed: {0}")]
+    Spawn(std::io::Error),
     #[error("oracle error in {statement}: {source}")]
     Oracle {
         statement: &'static str,
-        source: oracle::Error,
+        source: oracledb::Error,
     },
     #[error("oracle error: {0}")]
-    Pool(#[from] oracle::Error),
+    Pool(#[from] oracledb::Error),
     #[error("blocking task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
@@ -100,47 +115,31 @@ impl DbError {
             DbError::Oracle { source, .. } | DbError::Pool(source) => source,
             _ => return None,
         };
-        source.db_error().map(|e| e.code())
+        source
+            .db_error_code()
+            .and_then(|code| i32::try_from(code).ok())
     }
 }
 
 /// The bank's handle on Oracle. Cheap to clone.
 #[derive(Clone)]
 pub struct Db {
-    pool: Arc<Pool>,
-    gate: Arc<Semaphore>,
+    pool: Arc<Pool<OracleConnector>>,
+    connector: OracleConnector,
     acquire_timeout: Duration,
 }
 
 impl Db {
     pub fn connect(config: &DbConfig) -> Result<Self, DbError> {
-        // The pool is created empty and warmed here. Oracle client 23 would open a non-zero
-        // minimum in background threads (kpuspExtendStartup), and that wait can hang forever
-        // when another pool in the process is active.
-        let pool = PoolBuilder::new(&config.user, &config.password, &config.connect_string)
-            .min_connections(0)
-            .max_connections(config.max_sessions)
-            .connection_increment(1)
-            .stmt_cache_size(config.stmt_cache_size)
-            .get_mode(GetMode::TimedWait(config.acquire_timeout))
-            .build()?;
-        // The get mode cannot change after creation (ORA-24499), so a get that times out
-        // while the pool is still opening the session (ORA-24459) is retried.
-        let deadline = Instant::now() + WARM_UP_WAIT;
-        let mut held: Vec<Connection> = Vec::new();
-        while held.len() < config.min_sessions.min(config.max_sessions) as usize {
-            match pool.get() {
-                Ok(conn) => held.push(conn),
-                Err(e)
-                    if e.db_error().is_some_and(|d| d.code() == 24459)
-                        && Instant::now() < deadline => {}
-                Err(e) => return Err(e.into()),
-            }
+        let connector = OracleConnector(config.clone());
+        let pool = Pool::new(connector.clone(), config.max_sessions as usize);
+        if let Err(error) = pool.warm(config.min_sessions as usize, config.warm_up_wait) {
+            pool.close();
+            return Err(map_pool_error(error));
         }
-        drop(held);
         Ok(Self {
             pool: Arc::new(pool),
-            gate: Arc::new(Semaphore::new(config.max_sessions as usize)),
+            connector,
             acquire_timeout: config.acquire_timeout,
         })
     }
@@ -181,31 +180,30 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Session) -> Result<T, DbError> + Send + 'static,
     {
-        let permit =
-            match tokio::time::timeout(self.acquire_timeout, self.gate.clone().acquire_owned())
-                .await
-            {
-                Ok(Ok(p)) => p,
-                _ => return (Err(DbError::Busy), StatementStats::default()),
-            };
-        let pool = self.pool.clone();
+        let lease = match self.pool.acquire(self.acquire_timeout).await {
+            Ok(lease) => lease,
+            Err(error) => {
+                let error = map_pool_error(error);
+                if !matches!(error, DbError::Busy) {
+                    tracing::warn!(%error, "database session unavailable");
+                }
+                return (Err(error), StatementStats::default());
+            }
+        };
         let joined = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let conn = match pool.get() {
-                Ok(c) => c,
-                Err(e) => return (Err(DbError::from(e)), StatementStats::default()),
-            };
-            let mut session = Session {
-                conn,
-                stats: StatementStats::default(),
-                pending_completion: false,
-                outcome_endpoint: None,
-                outcome_method: None,
-                outcome_arrival: None,
-            };
-            let result = work(&mut session);
-            let _ = session.rollback();
-            (result, session.stats)
+            let mut session = Session::new(SessionConnection::Pooled(lease));
+            if let SessionConnection::Pooled(lease) = &mut session.conn {
+                lease.mark_blocking();
+            }
+            let result = work_and_rollback(&mut session, work, Session::rollback);
+            let healthy = result.as_ref().is_ok_and(|(_, healthy)| *healthy);
+            if let SessionConnection::Pooled(lease) = session.conn {
+                lease.release(healthy);
+            }
+            match result {
+                Ok((result, _)) => (result, session.stats),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
         })
         .await;
         match joined {
@@ -216,11 +214,31 @@ impl Db {
 
     /// Applies pending migrations in order; returns how many were applied.
     pub async fn migrate(&self) -> Result<usize, DbError> {
-        self.run(migrations::apply).await
+        let connector = Arc::new(self.connector.clone());
+        let conn = pool::open_detached(connector.clone())
+            .map_err(DbError::Spawn)?
+            .await
+            .map_err(|_| DbError::Panicked)?
+            .map_err(map_pool_error)?;
+        tokio::task::spawn_blocking(move || {
+            let mut session = Session::new(SessionConnection::Standalone(conn));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.conn.as_ref().set_call_timeout(None)?;
+                migrations::apply(&mut session)
+            }));
+            if let SessionConnection::Standalone(conn) = session.conn {
+                pool::close_detached(connector, conn);
+            }
+            match result {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        })
+        .await?
     }
 
     pub fn close(&self) -> Result<(), DbError> {
-        self.pool.close(&CloseMode::Default)?;
+        self.pool.close();
         Ok(())
     }
 }
@@ -248,39 +266,9 @@ impl StatementStats {
     }
 }
 
-/// Binds Rust strings as VARCHAR2. The driver's default is NVARCHAR2, which makes Oracle
-/// convert the VARCHAR2 column instead (`SYS_OP_C2C(col) = :bind`), so no index on a
-/// character column is used and every keyed lookup scans its table.
-struct Bind<'a>(&'a dyn ToSql);
-
-/// Longest string still bound as VARCHAR2 (4 bytes per character, 32767-byte limit).
-const VARCHAR_BIND_CHARS: u32 = 8000;
-
-impl ToSql for Bind<'_> {
-    fn oratype(&self, conn: &Connection) -> oracle::Result<OracleType> {
-        Ok(match self.0.oratype(conn)? {
-            OracleType::NVarchar2(chars) if chars <= VARCHAR_BIND_CHARS => {
-                OracleType::Varchar2(chars.max(1) * 4)
-            }
-            other => other,
-        })
-    }
-
-    fn to_sql(&self, val: &mut SqlValue) -> oracle::Result<()> {
-        self.0.to_sql(val)
-    }
-}
-
-/// Runs `f` with the binds wrapped in [`Bind`].
-fn with_binds<T>(params: &[&dyn ToSql], f: impl FnOnce(&[&dyn ToSql]) -> T) -> T {
-    let wrapped: Vec<Bind<'_>> = params.iter().map(|p| Bind(*p)).collect();
-    let refs: Vec<&dyn ToSql> = wrapped.iter().map(|b| b as &dyn ToSql).collect();
-    f(&refs)
-}
-
 /// One connection checked out for one unit of work.
 pub struct Session {
-    conn: Connection,
+    conn: SessionConnection,
     pub stats: StatementStats,
     pending_completion: bool,
     pub(crate) outcome_endpoint: Option<String>,
@@ -288,14 +276,48 @@ pub struct Session {
     pub(crate) outcome_arrival: Option<Instant>,
 }
 
+enum SessionConnection {
+    Pooled(Lease<OracleConnector>),
+    Standalone(Connection),
+}
+
+impl AsRef<Connection> for SessionConnection {
+    fn as_ref(&self) -> &Connection {
+        match self {
+            Self::Pooled(lease) => lease.conn(),
+            Self::Standalone(conn) => conn,
+        }
+    }
+}
+
+impl SessionConnection {
+    fn as_mut(&mut self) -> &mut Connection {
+        match self {
+            Self::Pooled(lease) => lease.conn_mut(),
+            Self::Standalone(conn) => conn,
+        }
+    }
+}
+
 impl Session {
+    fn new(conn: SessionConnection) -> Self {
+        Self {
+            conn,
+            stats: StatementStats::default(),
+            pending_completion: false,
+            outcome_endpoint: None,
+            outcome_method: None,
+            outcome_arrival: None,
+        }
+    }
+
     fn timed<T>(
         &mut self,
         stmt: &SqlStmt,
-        f: impl FnOnce(&Connection) -> oracle::Result<T>,
+        f: impl FnOnce(&Connection) -> Result<T, oracledb::Error>,
     ) -> Result<T, DbError> {
         let started = Instant::now();
-        let result = f(&self.conn);
+        let result = f(self.conn.as_ref());
         let elapsed = started.elapsed();
         metrics::histogram!("bank_db_statement_duration_seconds", "statement" => stmt.name)
             .record(elapsed.as_secs_f64());
@@ -318,7 +340,14 @@ impl Session {
     /// Executes a statement that returns no rows; returns the affected row count.
     pub fn execute(&mut self, stmt: &SqlStmt, params: &[&dyn ToSql]) -> Result<u64, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.execute(stmt.sql, p)).and_then(|s| s.row_count())
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |mut s, p| s.execute(p),
+                |mut s, p| s.execute_named(p),
+            )
+            .map(|s| s.rows_affected())
         })
     }
 
@@ -329,10 +358,20 @@ impl Session {
         params: &[&dyn ToSql],
     ) -> Result<i64, DbError> {
         let ids = self.timed(stmt, |c| {
-            let mut statement = c.statement(stmt.sql).build()?;
-            statement.bind("id", &None::<i64>)?;
-            with_binds(params, |p| statement.execute(p))?;
-            statement.returned_values::<_, i64>("id")
+            let null_id = None::<i64>;
+            let mut binds = params.to_vec();
+            binds.push(&null_id);
+            with_statement_binds(
+                c,
+                stmt.sql,
+                &binds,
+                |mut s, p| s.execute(p),
+                |mut s, p| s.execute_named(p),
+            )?
+            .returned_data()
+            .iter()
+            .map(|row| row.get::<i64>(0))
+            .collect::<Result<Vec<_>, _>>()
         })?;
         match ids.as_slice() {
             [id] => Ok(*id),
@@ -345,18 +384,25 @@ impl Session {
     }
 
     /// Executes a query expected to return exactly one row.
-    pub fn query_row<T: oracle::RowValue>(
+    pub fn query_row<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<T, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.query_row_as::<T>(stmt.sql, p))
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |s, p| s.query_row(p),
+                |s, p| s.query_row_named(p),
+            )
+            .and_then(|row| T::from_row(&row))
         })
     }
 
     /// Executes a query expected to return at most one row.
-    pub fn query_opt<T: oracle::RowValue>(
+    pub fn query_opt<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
@@ -364,7 +410,7 @@ impl Session {
         match self.query_row(stmt, params) {
             Ok(row) => Ok(Some(row)),
             Err(DbError::Oracle { source, .. })
-                if source.kind() == oracle::ErrorKind::NoDataFound =>
+                if *source.kind() == oracledb::ErrorKind::NoDataFound =>
             {
                 Ok(None)
             }
@@ -373,13 +419,21 @@ impl Session {
     }
 
     /// Executes a query returning any number of rows.
-    pub fn query_all<T: oracle::RowValue>(
+    pub fn query_all<T: RowValue>(
         &mut self,
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<Vec<T>, DbError> {
         self.timed(stmt, |c| {
-            with_binds(params, |p| c.query_as::<T>(stmt.sql, p)?.collect())
+            with_statement_binds(
+                c,
+                stmt.sql,
+                params,
+                |s, p| s.query(p),
+                |s, p| s.query_named(p),
+            )?
+            .map(|row| T::from_row(&row?))
+            .collect()
         })
     }
 
@@ -392,13 +446,17 @@ impl Session {
         if rows.is_empty() {
             return Ok(());
         }
-        let size = rows.len();
         self.timed(stmt, |c| {
-            let mut batch = c.batch(stmt.sql, size).build()?;
-            for row in rows {
-                with_binds(row, |p| batch.append_row(p))?;
-            }
-            batch.execute()
+            let values: Vec<_> = rows
+                .iter()
+                .map(|row| row.iter().map(|v| v.bind_value()).collect::<Vec<_>>())
+                .collect();
+            let refs: Vec<Vec<&dyn oracledb::ToDbValue>> = values
+                .iter()
+                .map(|row| row.iter().map(|v| v.as_ref()).collect())
+                .collect();
+            let slices: Vec<&[&dyn oracledb::ToDbValue]> = refs.iter().map(Vec::as_slice).collect();
+            c.execute_batch(stmt.sql, slices.as_slice()).map(|_| ())
         })
     }
 
@@ -407,7 +465,7 @@ impl Session {
     }
 
     pub fn commit(&mut self) -> Result<(), DbError> {
-        self.conn.commit()?;
+        self.conn.as_mut().commit()?;
         self.stats.completion_committed |= self.pending_completion;
         self.pending_completion = false;
         Ok(())
@@ -415,7 +473,30 @@ impl Session {
 
     pub fn rollback(&mut self) -> Result<(), DbError> {
         self.pending_completion = false;
-        self.conn.rollback()?;
+        self.conn.as_mut().rollback()?;
         Ok(())
     }
+}
+
+fn map_pool_error(error: PoolError<DbError>) -> DbError {
+    match error {
+        PoolError::Panicked => DbError::Panicked,
+        PoolError::Busy => DbError::Busy,
+        PoolError::Closed => DbError::Closed,
+        PoolError::Open(error) => error,
+        PoolError::Spawn(error) => DbError::Spawn(error),
+    }
+}
+
+// Keep cleanup inside the unwind boundary, including a rollback that panics.
+fn work_and_rollback<S, T, E>(
+    session: &mut S,
+    work: impl FnOnce(&mut S) -> Result<T, E>,
+    rollback: impl FnOnce(&mut S) -> Result<(), E>,
+) -> std::thread::Result<(Result<T, E>, bool)> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = work(session);
+        let healthy = result.is_ok() && rollback(session).is_ok();
+        (result, healthy)
+    }))
 }
