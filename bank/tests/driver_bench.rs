@@ -189,7 +189,7 @@ async fn tune_credentials() {
 }
 
 async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Customer> {
-    let deep = i64::from(matches!(workload, "history" | "balance"));
+    let deep = i64::from(matches!(workload, "history" | "balance" | "transfer_hot"));
     let rows = db.run(move |s| {
         s.query_all::<(String, String, String)>(&SqlStmt {
             name: "tune.accounts",
@@ -206,6 +206,10 @@ async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Cu
             token: String::new(),
         })
         .collect();
+    if workload == "transfer_hot" {
+        // The seed makes about 1% of accounts hot; contend on the 20 deepest of them.
+        customers.truncate(20);
+    }
     for batch in customers.chunks_mut(8) {
         let mut tasks = JoinSet::new();
         for (i, c) in batch.iter().enumerate() {
@@ -384,7 +388,15 @@ async fn window(
                 let n = cursor.fetch_add(1, Ordering::Relaxed);
                 let from = n % customers.len(); let c = &customers[from];
                 let (method, path, body) = match workload.as_str() {
-                    "transfer" => ("POST", TRANSFER.to_owned(), Some(transfer(&customers, from, pairs[n % pairs.len()], n, now))),
+                    "transfer" | "transfer_hot" => {
+                        let mut body = transfer(&customers, from, pairs[n % pairs.len()], n, now);
+                        if workload == "transfer_hot" {
+                            // Contention runs reuse very few accounts across windows. Avoid
+                            // exhausting their daily limit while preserving the posting path.
+                            body["tran_amt"] = json!("1");
+                        }
+                        ("POST", TRANSFER.to_owned(), Some(body))
+                    },
                     "lookup" => ("GET", "/v2.0/account/list".to_owned(), None),
                     "balance" => ("GET", format!("/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={}&tran_dtime={}", btid(n), c.fin, now.format("%Y%m%d%H%M%S")), None),
                     "history" => ("GET", format!("/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={}&inquiry_type=A&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}", btid(n), c.fin, (now - chrono::Months::new(3)).format("%Y%m%d"), now.format("%Y%m%d"), now.format("%Y%m%d%H%M%S")), None),
@@ -492,12 +504,16 @@ fn env(name: &str) -> String {
 #[ignore]
 async fn driver_bench() {
     let workload = env("BENCH_WORKLOAD");
+    if workload == "transfer_hot" {
+        assert!(populated(), "transfer_hot requires the populated tune seed");
+    }
     let _ = bench_rate(&workload);
     let concurrency: usize = env("BENCH_CONCURRENCY").parse().expect("concurrency");
     assert!(matches!(
         (workload.as_str(), concurrency),
         ("lookup" | "balance" | "history", 8)
             | ("transfer", 1 | 8 | 32 | 64)
+            | ("transfer_hot", 32 | 64)
             | ("duplicate", 200)
             | ("outbox", 1)
     ));
@@ -582,7 +598,7 @@ async fn driver_bench() {
         None
     };
     if let Some(events) = &collection {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(bench_secs("BENCH_WARMUP_SECS", 30));
         while Instant::now() < deadline {
             if outbox_relay::relay_once(&db, events, true)
                 .await
@@ -610,7 +626,10 @@ async fn driver_bench() {
             warm_workload,
             now,
             cursor.clone(),
-            (warm_concurrency, Duration::from_secs(30)),
+            (
+                warm_concurrency,
+                Duration::from_secs(bench_secs("BENCH_WARMUP_SECS", 30)),
+            ),
         )
         .await;
         assert_eq!(
@@ -629,13 +648,19 @@ async fn driver_bench() {
             .expect("pre-drain")
             > 0
         {}
-        event_ids = (0..5000).map(|_| id()).collect();
+        event_ids = (0..if populated() { 50_000 } else { 5000 })
+            .map(|_| id())
+            .collect();
         let ids = event_ids.clone();
         db.run(move |s| {
             let at = now.to_rfc3339();
             let date = now.date_naive().to_string();
-            for id in ids {
-                s.execute(&OUTBOX, &[&id, &id, &at, &at, &date])?;
+            for batch in ids.chunks(500) {
+                let binds: Vec<Vec<&dyn bank::shared::db::ToSql>> = batch
+                    .iter()
+                    .map(|id| vec![id as &dyn bank::shared::db::ToSql, id, &at, &at, &date])
+                    .collect();
+                s.execute_batch(&OUTBOX, &binds)?;
             }
             s.commit()
         })
@@ -653,21 +678,28 @@ async fn driver_bench() {
     let snapshot = buckets(&metrics.render());
     let started = Instant::now();
     let mut result = if let Some(events) = &collection {
-        let mut r = Results::default();
+        let expected = event_ids.len() as u64;
+        let relay = tokio::spawn(outbox_relay::run(db.clone(), env("MONGO_URI")));
+        let deadline = Instant::now() + Duration::from_secs(300);
+        // Drive the actual production loop, which calls backlog before relay_once.
         loop {
-            let at = Instant::now();
-            match outbox_relay::relay_once(&db, events, true).await {
-                Ok(0) => break,
-                Ok(count) => {
-                    r.successes += count as u64;
-                    r.latencies.push(at.elapsed().as_secs_f64() * 1000.0);
-                }
-                Err(_) => {
-                    r.other_errors += 1;
-                    break;
-                }
+            assert!(Instant::now() < deadline, "relay did not drain fixture");
+            let delivered = events
+                .count_documents(mongodb::bson::doc! {"_id": {"$in": &event_ids}})
+                .await
+                .expect("relay progress");
+            if delivered == expected && outbox::backlog(&db).await.expect("relay backlog").0 == 0 {
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        relay.abort();
+        let _ = relay.await;
+        let mut r = Results {
+            successes: expected,
+            ..Results::default()
+        };
+        r.latencies.push(started.elapsed().as_secs_f64() * 1000.0);
         r
     } else if let Some(body) = duplicate_body {
         let mut tasks = JoinSet::new();
@@ -710,7 +742,10 @@ async fn driver_bench() {
             &workload,
             now,
             cursor,
-            (concurrency, Duration::from_secs(60)),
+            (
+                concurrency,
+                Duration::from_secs(bench_secs("BENCH_SECS", 60)),
+            ),
         )
         .await
     };
@@ -735,6 +770,9 @@ async fn driver_bench() {
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
         "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+    if workload == "outbox" {
+        line["latency_scope"] = json!("complete backlog drain, including completion polling");
+    }
     if populated() {
         let params: (i64,i64,i64,String,String) = db.run(|s| s.query_row(&SqlStmt {
             name: "tune.parameters", sql: "SELECT customers,years,max_gb,TO_CHAR(first_day,'YYYY-MM-DD'),TO_CHAR(last_day,'YYYY-MM-DD') FROM tune_seed"
@@ -757,7 +795,7 @@ async fn driver_bench() {
     assert_eq!(result.business_rejections, 0, "business rejections");
     assert_eq!(result.other_errors, 0, "other errors");
     assert!(result.successes > 0, "completed work");
-    if workload == "transfer" || workload == "duplicate" {
+    if matches!(workload.as_str(), "transfer" | "transfer_hot" | "duplicate") {
         let after = balances(&db).await;
         assert_eq!(
             before_balances.values().sum::<i64>(),
@@ -781,12 +819,51 @@ async fn driver_bench() {
         }
     }
     if let Some(events) = collection {
-        assert_eq!(result.successes, 5000);
+        if populated() {
+            assert_eq!(result.successes, 50_000);
+        } else {
+            assert_eq!(result.successes, 5000);
+        }
         assert_eq!(outbox::backlog(&db).await.expect("backlog").0, 0);
         let count = events
             .count_documents(mongodb::bson::doc! {"_id": {"$in": event_ids}})
             .await
             .expect("Mongo event count");
-        assert_eq!(count, 5000);
+        if populated() {
+            assert_eq!(count, 50_000);
+        } else {
+            assert_eq!(count, 5000);
+        }
     }
+}
+
+fn bench_secs(name: &str, default: u64) -> u64 {
+    let secs = std::env::var(name).map_or(default, |v| v.parse().expect("benchmark seconds"));
+    assert!(secs > 0, "benchmark seconds must be positive");
+    secs
+}
+
+#[path = "oracle_tune_coverage.rs"]
+mod oracle_tune_coverage;
+
+#[tokio::test]
+#[ignore]
+async fn tune_coverage() {
+    oracle_tune_coverage::run().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn tune_drain() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let events = outbox_relay::events_collection(&env("MONGO_URI"))
+        .await
+        .expect("collection");
+    while outbox_relay::relay_once(&db, &events, true)
+        .await
+        .expect("drain")
+        > 0
+    {}
+    assert_eq!(outbox::backlog(&db).await.expect("backlog").0, 0);
 }

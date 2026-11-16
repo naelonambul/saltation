@@ -26,15 +26,15 @@ AND w.workload='{workload}' AND w.concurrency={int(concurrency)}"""
 else:
     # Exact complete SQL text, including comments: this is what SqlStmt sends to Oracle.
     # Capture every executed production statement, a superset of findings 1--8.
-    print('PROMPT Cumulative cached production cursors after this workload, including setup/warm-up; not per-window execution deltas')
+    print('PROMPT Production cursors active in the separate STATISTICS_LEVEL=ALL plan run; timing results are separate')
     print("DECLARE n NUMBER; BEGIN")
     for path in sorted((root / 'bank/src').glob('**/sql/*.sql')):
         sql = path.read_text().strip()
         name = str(path.relative_to(root / 'bank/src'))
         literal = sql.replace("'", "''")
         print(f"DBMS_OUTPUT.PUT_LINE('FILE {name}'); n:=0;")
-        print(f"FOR c IN (SELECT sql_id,child_number,executions,plan_hash_value,last_active_time FROM v$sql WHERE parsing_schema_name='SALTATION_TUNE' AND executions>0 AND DBMS_LOB.COMPARE(REGEXP_REPLACE(sql_fulltext,'[[:space:]]+$',''),TO_CLOB('{literal}'))=0) LOOP")
+        print(f"FOR c IN (SELECT sql_id,child_number,executions,plan_hash_value,last_active_time FROM v$sql WHERE parsing_schema_name='SALTATION_TUNE' AND executions>0 AND last_active_time >= (SELECT CAST(started_at AS DATE) FROM saltation_tune.tune_plan_bounds WHERE entry='{entry}') AND DBMS_LOB.COMPARE(REGEXP_REPLACE(sql_fulltext,'[[:space:]]+$',''),TO_CLOB('{literal}'))=0) LOOP")
         print("n:=n+1; DBMS_OUTPUT.PUT_LINE('SQL_ID '||c.sql_id||' child '||c.child_number||' executions '||c.executions||' plan '||c.plan_hash_value);")
         print("FOR p IN (SELECT plan_table_output line FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(c.sql_id,c.child_number,'ALLSTATS LAST +PEEKED_BINDS'))) LOOP DBMS_OUTPUT.PUT_LINE(p.line); END LOOP; END LOOP;")
-        print("IF n=0 THEN DBMS_OUTPUT.PUT_LINE('NOT EXECUTED / NOT IN SHARED POOL'); END IF;")
+        print("IF n=0 THEN DBMS_OUTPUT.PUT_LINE('not executed: no matching executed cursor in plan run (possibly aged out)'); END IF;")
     print('END;\n/')

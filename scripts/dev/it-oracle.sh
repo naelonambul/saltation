@@ -163,7 +163,7 @@ WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
 SET VERIFY OFF
 DEFINE bench_user = '${BENCH_SNAPSHOT_USER:-SALTATION}'
-SET PAGES 0 LINES 300 FEEDBACK OFF HEADING OFF TRIMSPOOL ON
+SET PAGES 0 LINES 1000 FEEDBACK OFF HEADING OFF TRIMSPOOL ON
 ALTER SESSION SET CONTAINER=ORCLPDB1;
 SELECT 'startup '||TO_CHAR(startup_time,'YYYYMMDDHH24MISS') FROM v\$instance;
 SELECT 'sys '||REPLACE(name,' ','_')||' '||value FROM v\$sysstat WHERE name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
@@ -171,6 +171,7 @@ SELECT 'sev '||s.sid||' '||s.serial#||' '||REPLACE(e.event,' ','_')||' '||e.tota
 SELECT 'sst '||s.sid||' '||s.serial#||' '||REPLACE(n.name,' ','_')||' '||t.value FROM v\$session s JOIN v\$sesstat t ON t.sid=s.sid JOIN v\$statname n ON n.statistic#=t.statistic# WHERE s.username='&bench_user' AND n.name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
 SELECT 'hist '||REPLACE(event,' ','_')||' '||wait_time_milli||' '||wait_count FROM v\$event_histogram WHERE event IN ('log file sync','log file parallel write');
 SELECT 'sysev '||REPLACE(event,' ','_')||' '||total_waits||' '||time_waited_micro FROM v\$system_event WHERE event IN ('log file sync','log file parallel write');
+SELECT 'sql|'||sql_id||'|'||child_number||'|'||executions||'|'||buffer_gets||'|'||disk_reads||'|'||rows_processed||'|'||cpu_time||'|'||elapsed_time||'|'||RAWTOHEX(child_address)||':'||last_load_time||':'||invalidations||'|'||REPLACE(REPLACE(REPLACE(SUBSTR(sql_text,1,60),CHR(10),' '),CHR(13),' '),'|',' ') FROM v\$sql WHERE parsing_schema_name='&bench_user';
 EXIT
 SQL
       then
@@ -203,7 +204,12 @@ driver_bench() {
   if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
     bench_env+=(-e BENCH_ORA_SNAP=1)
   fi
+  [ -z "${BENCH_SECS:-}" ] || bench_env+=(-e "BENCH_SECS=$BENCH_SECS")
+  [ -z "${BENCH_WARMUP_SECS:-}" ] || bench_env+=(-e "BENCH_WARMUP_SECS=$BENCH_WARMUP_SECS")
   entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64 duplicate:200 outbox:1)
+  if [ "${BENCH_POPULATED:-}" = 1 ]; then
+    entries+=(transfer_hot:32 transfer_hot:64)
+  fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     local found=no
     for entry in "${entries[@]}"; do [ "$entry" != "$BENCH_ONLY" ] || found=yes; done
@@ -226,6 +232,9 @@ driver_bench() {
     fi
     for ((run=1; run<=runs; run++)); do
       echo "driver-bench: $entry run $run"
+      if [ "${BENCH_CAPTURE:-}" = 1 ]; then
+        tune_reset_outbox "${entry/:/-}-run$run-timed" || { failed=1; break; }
+      fi
       if [ "${BENCH_POPULATED:-}" != 1 ]; then
         if ! reset_schema; then failed=1; continue; fi
       fi
@@ -237,7 +246,7 @@ driver_bench() {
         -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
         -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
         ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
-        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT=/out/bench.jsonl \
+        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT="/out/${BENCH_RESULT_NAME:-bench.jsonl}" \
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
         -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
         -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
@@ -251,7 +260,7 @@ driver_bench() {
       fi
     done
   done
-  echo "driver-bench output: $output/bench.jsonl"
+  echo "driver-bench output: $output/${BENCH_RESULT_NAME:-bench.jsonl}"
   return "$failed"
 }
 
