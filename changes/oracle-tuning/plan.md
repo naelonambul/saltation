@@ -6,7 +6,7 @@ Status: draft for the owner. Not approved.
 
 Tune the bank's Oracle access paths, lock hold time and indexes, without changing any API, spec rule or stored meaning.
 
-The work starts from a read-only review of every migration and every production SQL file by three reviewers (Fable, Astra and Hydrogen, 2026-11-15). Each one ranked lock hold time in the posting path as the main limit on throughput. Measured on the OCI host, transfers level off at about 320/s from concurrency 32 upward, and p95 grows with concurrency. The slowest statement is `ledger.lock_accounts`. Its plan is a primary-key IN-list, so the time is spent queueing behind transactions that hold the account rows.
+The work starts from a read-only review of every migration and every production SQL file by three reviewers (Fable, Astra and Hydrogen, 2026-11-15). Each one ranked lock hold time in the posting path as the main limit on throughput. Measured on the OCI host, transfer throughput levels off from concurrency 32 upward, and p95 grows with concurrency. The slowest statement is `ledger.lock_accounts`. Its plan is a primary-key IN-list, so the time is spent queueing behind transactions that hold the account rows.
 
 Every finding is a hypothesis until a plan or wait profile confirms it. Step 1 measures, and each later step lands only when its proof shows a gain, or at least no loss.
 
@@ -82,6 +82,7 @@ Every finding is a hypothesis until a plan or wait profile confirms it. Step 1 m
 - No assertion is relaxed. The 200-concurrent-duplicate test, the random-transfer conservation test, rollback cases, `outbox-outage`, `observability` and `e2e` stay unchanged and passing.
 - New plan-shape tests use `EXPLAIN PLAN` or `DBMS_XPLAN` to assert the intended access path for each rewritten statement, so a later edit cannot silently lose it.
 - Each step that claims a speed-up keeps its `driver-bench` JSON next to step 1's, same host and same container limits.
+- Measured numbers (throughput, latency, wait times, plan statistics such as A-Time or buffers) stay in the ignored `.evidence/` directory. `docs/oracle-tuning-baseline.md`, commit messages and pull request text state each outcome (confirmed, refuted, faster, not slower), plan shapes and wait-event names, and point to the evidence path, because the OTN license forbids disclosing benchmark results without Oracle's consent and this repository is public (owner decision, 2026-11-16).
 
 ## Risks and mitigations
 
