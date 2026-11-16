@@ -2,6 +2,7 @@
 //! Requires an already migrated and populated SALTATION_TUNE schema. No commits or DDL.
 use bank::shared::db::{Db, DbConfig, DbError, Session, SqlStmt};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
+use std::io::Write;
 
 type At = DateTime<FixedOffset>;
 type TransactionRow = (i64, At, i64, i64, String, String, Option<String>);
@@ -24,6 +25,17 @@ macro_rules! production {
             },
             $binds,
         )?;
+        capture_plan(
+            $s,
+            concat!("features/", $feature, "/sql/", $file, ".sql"),
+            include_str!(concat!(
+                "../src/features/",
+                $feature,
+                "/sql/",
+                $file,
+                ".sql"
+            )),
+        )?;
         println!(concat!(
             "coverage FILE features/",
             $feature,
@@ -33,6 +45,51 @@ macro_rules! production {
         ));
         result
     }};
+}
+
+// Call before any other SQL can replace the session's previous cursor.
+fn capture_plan(s: &mut Session, path: &str, sql: &str) -> Result<(), DbError> {
+    let (id, child): (String, i64) = s.query_row(
+        &SqlStmt {
+            name: "tune.coverage.previous",
+            sql: "SELECT prev_sql_id, prev_child_number FROM v$session WHERE sid = SYS_CONTEXT('USERENV','SID')",
+        },
+        &[],
+    )?;
+    let text: String = s.query_row(
+        &SqlStmt {
+            name: "tune.coverage.text",
+            sql: "SELECT sql_text FROM v$sql WHERE sql_id = :id AND child_number = :child",
+        },
+        &[&id, &child],
+    )?;
+    let first = sql.lines().next().expect("production SQL first line");
+    if !text.starts_with(first) {
+        return Err(DbError::Config(format!(
+            "previous cursor does not match {path}"
+        )));
+    }
+    let lines: Vec<String> = s.query_all(
+        &SqlStmt {
+            name: "tune.coverage.plan",
+            sql: "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY_CURSOR(:id, :child, 'ALLSTATS LAST +PEEKED_BINDS'))",
+        },
+        &[&id, &child],
+    )?;
+    if !lines.iter().any(|line| line.contains("A-Rows")) {
+        return Err(DbError::Config(format!(
+            "no runtime plan statistics for {path}"
+        )));
+    }
+    let output = std::env::var("TUNE_COVERAGE_OUT")
+        .map_err(|_| DbError::Config("TUNE_COVERAGE_OUT is required".into()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(output)
+        .map_err(|e| DbError::Config(format!("open coverage plans: {e}")))?;
+    writeln!(file, "FILE {path}\n{}", lines.join("\n"))
+        .map_err(|e| DbError::Config(format!("write coverage plans: {e}")))?;
+    Ok(())
 }
 
 fn fixture(
@@ -52,6 +109,8 @@ fn fixture(
 /// Execute all coverage work on one adapter lease, then explicitly roll back.
 /// The adapter also discards/cleans the lease on errors; no helper calls commit.
 pub async fn run() {
+    let output = std::env::var("TUNE_COVERAGE_OUT").expect("TUNE_COVERAGE_OUT is required");
+    std::fs::File::create(output).expect("create coverage plans");
     let mut config = DbConfig::from_env().expect("coverage database configuration");
     config.user = "SALTATION_TUNE".into();
     let db = Db::connect(&config).expect("connect SALTATION_TUNE");
@@ -68,6 +127,13 @@ pub async fn run() {
 }
 
 fn cover(s: &mut Session) -> Result<(), DbError> {
+    s.execute(
+        &SqlStmt {
+            name: "tune.coverage.statistics",
+            sql: "ALTER SESSION SET STATISTICS_LEVEL=ALL",
+        },
+        &[],
+    )?;
     let (customer, phone, hash): (i64, String, String) = s.query_row(&SqlStmt {
         name: "tune.coverage.customer",
         sql: "SELECT c.customer_id, c.phone, cr.password_hash FROM customer c JOIN customer_credential cr ON cr.customer_id = c.customer_id ORDER BY c.customer_id FETCH FIRST 1 ROW ONLY",

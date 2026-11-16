@@ -140,6 +140,9 @@ cargo_test() {
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
   [ "${SALTATION_TEST_EXPECT_LIVE:-}" = 1 ] && extra_env+=(-e SALTATION_TEST_EXPECT_LIVE=1)
+  if [ -n "${TUNE_COVERAGE_OUT:-}" ]; then
+    extra_env+=(-e "TUNE_COVERAGE_OUT=/coverage/$(basename "$TUNE_COVERAGE_OUT")" -v "$(dirname "$TUNE_COVERAGE_OUT"):/coverage")
+  fi
   local deadline_command=()
   [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
   dev_image

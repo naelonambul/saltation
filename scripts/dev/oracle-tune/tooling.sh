@@ -128,9 +128,7 @@ SQL
     tune_normal_stats >>"$output/statistics.txt" || { failed=1; break; }
   done
   if [ "$failed" = 0 ]; then
-    tune_reset_outbox coverage && tune_plan_stats coverage >>"$output/statistics.txt" \
-      && IT_DB_USER=saltation_tune cargo_test driver_bench -- --ignored --exact tune_coverage --nocapture >"$output/coverage.txt" 2>&1 \
-      && python3 "$root/scripts/dev/oracle-tune/capture.py" "$root" coverage xplan | tune_sql >"$output/xplan-coverage.txt" || failed=1
+    TUNE_COVERAGE_OUT="$output/xplan-coverage.txt" IT_DB_USER=saltation_tune cargo_test driver_bench -- --ignored --exact tune_coverage --nocapture >"$output/coverage.txt" 2>&1 || failed=1
   fi
   cat "$root/scripts/dev/oracle-tune/segments.sql" | tune_sql >"$output/segments.txt" || failed=1
   echo "tune-capture evidence: $output"
