@@ -1096,6 +1096,7 @@ async fn backfill_sequence() {
     let restoration = daily_close_tests::sequence(&api, &close_logs, &close_metrics).await;
     live_switch_is_one_way(&api, &recording).await;
     daily_close_tests::final_check(&api, &close_logs, restoration).await;
+    card_payment_reconciliation(&api).await;
 }
 
 const ATM_SESSIONS: SqlStmt = sql_stmt!(
@@ -1404,4 +1405,48 @@ async fn atm_sessions_in_business_time(api: &Api) {
     atm_advance(api, 86400).await;
     atm_assert_expired(api, &terminals[1], 0, None).await;
     assert_eq!(atm_rows(api, ATM_END_EVENTS, b_id).await.len(), 1);
+}
+
+async fn card_payment_reconciliation(api: &Api) {
+    use common::card_network::{card, message, send, token};
+
+    const AUDIT: SqlStmt = sql_stmt!(
+        "test.card_payment_close_audit",
+        "../src/features/daily_close/sql/transfers.sql"
+    );
+    const SELECT_ID: SqlStmt = sql_stmt!(
+        "test.card_payment_transfer_id",
+        "sql/card_payment_transfer_id.sql"
+    );
+    const BAD_LEG: SqlStmt = sql_stmt!("test.card_payment_bad_leg", "sql/card_payment_bad_leg.sql");
+
+    let account = common::customer(api, 100).await.account;
+    let card = card(api, &account, "ACTIVE").await;
+    let token = token(api, "card").await;
+    let id = new_id();
+    let (status, response) = send(api, Some(&token), &id, message(&card, &id, "25")).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let now = api.state.clock.state().await.unwrap().business_time;
+    let date = business_date(now);
+    let midnight = kst()
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+        .unwrap();
+    let end = midnight + chrono::Duration::days(1);
+    api.state
+        .db
+        .run(move |s| {
+            let transfer: i64 = s.query_row(&SELECT_ID, &[&id])?;
+            let valid: Vec<(i64, String, Option<i64>)> = s.query_all(&AUDIT, &[&midnight, &end])?;
+            assert!(valid.iter().all(|row| row.0 != transfer));
+            assert_eq!(s.execute(&BAD_LEG, &[&id])?, 1);
+            let invalid: Vec<(i64, String, Option<i64>)> =
+                s.query_all(&AUDIT, &[&midnight, &end])?;
+            let invalid = invalid.iter().find(|row| row.0 == transfer).unwrap();
+            assert_eq!(invalid.1, "card_payment");
+            assert!(invalid.2.is_some());
+            s.rollback()
+        })
+        .await
+        .unwrap();
 }

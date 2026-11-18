@@ -92,6 +92,17 @@ impl Recorder {
             stats.outcome_method = Some(req.method().to_string());
             stats.outcome_arrival = req.extensions().get::<Arrival>().map(|a| a.0);
         }
+        let channel = if path.starts_with("/atm/v1/") {
+            "ATM"
+        } else if path == "/card/v1/authorize"
+            && ctx.listener == crate::shared::context::Listener::Generator
+        {
+            "CARD"
+        } else if matches!(path, "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num") {
+            "EXTERNAL"
+        } else {
+            "MOBILE"
+        };
         Self {
             ctx,
             stats: req
@@ -107,13 +118,7 @@ impl Recorder {
                 .unwrap_or(Arrival(Instant::now())),
             endpoint,
             method: req.method().to_string(),
-            channel: if path.starts_with("/atm/v1/") {
-                "ATM"
-            } else if matches!(path, "/oauth/2.0/token" | "/v2.0/transfer/deposit/fin_num") {
-                "EXTERNAL"
-            } else {
-                "MOBILE"
-            },
+            channel,
             excluded: req.method() == axum::http::Method::OPTIONS
                 || matches!(path, "/healthz" | "/metrics")
                 || path.starts_with("/internal/"),
@@ -295,7 +300,9 @@ pub fn conflict(
         .payload(serde_json::json!({"http_status": 409, "request_type": kind}));
     event.customer_no = identity.0.map(str::to_owned);
     event.session_id = identity.1.map(str::to_owned);
-    let (id, reused) = reject_attempt(session, ctx, &event, Some(key), terminal_id)?;
+    // Card keys are up to 40 bytes and are not Open Banking transaction IDs.
+    let bank_tran_id = (channel != "CARD").then_some(key);
+    let (id, reused) = reject_attempt(session, ctx, &event, bank_tran_id, terminal_id)?;
     if reused {
         event.payload["attempt_id"] = id.into();
     }
@@ -308,6 +315,7 @@ fn money_operation(method: &str, route: &str) -> Option<(&'static str, &'static 
         return None;
     }
     match route {
+        "/card/v1/authorize" => Some(("CARD_PAYMENT", "CARD")),
         "/atm/v1/cash/withdraw" => Some(("ATM_WITHDRAW", "ATM")),
         "/atm/v1/cash/deposit" => Some(("ATM_DEPOSIT", "ATM")),
         "/v2.0/transfer/withdraw/fin_num" => Some(("TRANSFER", "MOBILE")),

@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "card-payments",
+  "kind": "implementation",
+  "title": "Authorize and post debit card payments",
+  "base": {
+    "ref": "main",
+    "commit": "4c54c7fd4b216ad86351534bd6005afd556aa574"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "bank/src/features/cards/**",
+    "bank/src/features/daily_close/**",
+    "bank/src/app.rs",
+    "bank/src/shared/ledger/**",
+    "bank/src/shared/outcome/**",
+    "bank/tests/**",
+    "contracts/openapi/card.yaml",
+    "scripts/dev/it-oracle.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:e86942018830de44e532900764ccac2d3bd9f5b4d5d970925233f31a1788d74b",
+      "by": "naelonambul",
+      "at": "2026-11-18T23:16:18Z",
+      "write_scope_sha256": "sha256:43ecf114b78dd3860d9e30418c7cddfdb6983e26a696d7c127f7db7c914da2ce",
+      "note": "Owner in originating chat: \uc2b9\uc778 (reviewed plan e8694201)"
+    }
+  ]
+}
