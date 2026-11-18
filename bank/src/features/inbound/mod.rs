@@ -94,11 +94,12 @@ async fn token(
             "인증 실패",
         ));
     };
-    if req.scope != scope || scope != "oob" {
+    if req.scope != scope || !matches!(scope.as_str(), "oob" | "card") {
         return Err(forbidden(&ctx));
     }
     let (token, hash) = auth::new_token();
     let expires = now + chrono::Duration::days(90);
+    let response_scope = scope.clone();
     let c = ctx.clone();
     state
         .db
@@ -117,7 +118,7 @@ async fn token(
     Ok(api::ok(
         &ctx,
         json!({"access_token": token, "token_type": "Bearer", "expires_in": 7776000,
-        "scope": "oob", "client_use_code": req.client_id}),
+        "scope": response_scope, "client_use_code": req.client_id}),
     ))
 }
 #[derive(Clone, Deserialize, Serialize)]

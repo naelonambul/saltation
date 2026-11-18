@@ -27,7 +27,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=19).collect::<Vec<_>>()
+        (1..=20).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -174,6 +174,104 @@ async fn migrations_apply_once_and_are_recorded() {
     })
     .await
     .expect("ATM tables and open-session uniqueness");
+
+    db.run(|s| {
+        let tables: Vec<String> =
+            s.query_all(&sql_stmt!("test.card_tables", "sql/card_tables.sql"), &[])?;
+        assert_eq!(tables, ["CARD", "CARD_AUTHORIZATION"]);
+        let indexes: Vec<String> =
+            s.query_all(&sql_stmt!("test.card_indexes", "sql/card_indexes.sql"), &[])?;
+        assert_eq!(
+            indexes,
+            [
+                "CARD_ACCOUNT_IX",
+                "CARD_AUTHORIZATION_CARD_IX",
+                "CARD_NO_UK"
+            ]
+        );
+        let kind: String = s.query_row(&sql_stmt!("test.card_kind", "sql/card_kind.sql"), &[])?;
+        for value in [
+            "transfer",
+            "inbound",
+            "atm_cash",
+            "term_open",
+            "term_close",
+            "loan_disburse",
+            "loan_repay",
+            "card_payment",
+        ] {
+            assert!(
+                kind.contains(&format!("'{value}'")),
+                "missing {value}: {kind}"
+            );
+        }
+        let nullable: String = s.query_row(
+            &sql_stmt!(
+                "test.transfer_kind_nullable",
+                "sql/transfer_kind_nullable.sql"
+            ),
+            &[],
+        )?;
+        assert_eq!(nullable, "N", "transfer.kind must remain NOT NULL");
+        s.execute(&sql_stmt!("test.card_fixture", "sql/card_fixture.sql"), &[])?;
+        let null_kind = s
+            .execute(
+                &sql_stmt!("test.transfer_null_kind", "sql/transfer_null_kind.sql"),
+                &[],
+            )
+            .expect_err("transfer.kind rejects NULL");
+        assert_eq!(null_kind.ora_code(), Some(1400));
+        let wrong_prefix = s
+            .execute(
+                &sql_stmt!("test.card_wrong_prefix", "sql/card_wrong_prefix.sql"),
+                &[],
+            )
+            .expect_err("card_no_ck rejects another prefix");
+        assert_eq!(wrong_prefix.ora_code(), Some(2290));
+        assert!(wrong_prefix.to_string().contains("CARD_NO_CK"));
+        let duplicate = s
+            .execute(
+                &sql_stmt!("test.card_duplicate", "sql/card_duplicate.sql"),
+                &[],
+            )
+            .expect_err("card number must be unique");
+        assert_eq!(duplicate.ora_code(), Some(1));
+        let insert = sql_stmt!("test.card_authorization", "sql/card_authorization.sql");
+        let none: Option<&str> = None;
+        for (mode, lat, lon, valid) in [
+            ("online", none, none, true),
+            ("online", Some("0"), none, false),
+            ("online", none, Some("0"), false),
+            ("online", Some("0"), Some("0"), false),
+            ("in_person", none, none, false),
+            ("in_person", Some("0"), none, false),
+            ("in_person", none, Some("0"), false),
+            ("in_person", Some("-90"), Some("180"), true),
+            ("in_person", Some("90"), Some("-180"), true),
+            ("in_person", Some("90.000001"), Some("0"), false),
+            ("in_person", Some("0"), Some("180.000001"), false),
+        ] {
+            let result = s.execute(&insert, &[&mode, &lat, &lon]);
+            if valid {
+                result?;
+                s.execute(
+                    &sql_stmt!(
+                        "test.card_delete_authorization",
+                        "sql/card_delete_authorization.sql"
+                    ),
+                    &[],
+                )?;
+            } else {
+                assert_eq!(
+                    result.expect_err("coordinate constraint").ora_code(),
+                    Some(2290)
+                );
+            }
+        }
+        s.rollback()
+    })
+    .await
+    .expect("card schema constraints");
 
     assert_eq!(recorded, MIGRATIONS.len() as i64);
     assert_eq!(

@@ -457,7 +457,7 @@ async fn seed_counterparty_clients(
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 || !(16..=128).contains(&c.client_secret.chars().count())
-                || c.scope != "oob"
+                || !matches!(c.scope.as_str(), "oob" | "card")
                 || c.institution_code.len() != 3
                 || !c.institution_code.bytes().all(|b| b.is_ascii_digit())
         })

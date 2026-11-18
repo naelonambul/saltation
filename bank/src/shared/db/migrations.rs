@@ -43,6 +43,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(17, "0017_tune_predicates"),
     migration!(18, "0018_tune_unused_index"),
     migration!(19, "0019_tune_daily_close"),
+    migration!(20, "0020_cards"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

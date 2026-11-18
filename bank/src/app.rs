@@ -116,6 +116,7 @@ pub fn generator_router(state: AppState) -> Router {
     with_layers(
         public_routes()
             .merge(features::internal::router())
+            .merge(features::cards::seed_router(features::cards::random_number))
             .merge(features::password_reset::sms_router())
             .merge(features::inbound::router())
             .merge(features::atm::router()),

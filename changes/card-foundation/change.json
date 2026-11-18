@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "card-foundation",
+  "kind": "implementation",
+  "title": "Debit cards, card network client and fixed-rate conversion without payment processing",
+  "base": {
+    "ref": "main",
+    "commit": "35829775eb1e49d5fd00098da83bbb3cbc9227e6"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "bank/src/features/cards/**",
+    "bank/src/features/internal/**",
+    "bank/src/features/inbound/**",
+    "bank/src/features/mod.rs",
+    "bank/src/shared/db/migrations.rs",
+    "bank/src/app.rs",
+    "bank/migrations/**",
+    "bank/tests/**",
+    "contracts/**",
+    "scripts/dev/it-oracle.sh",
+    "docs/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8b19199fdc68b31c88bc45fd6bc58ad6222cd9ac1d832af0b328fd465725aabd",
+      "by": "naelonambul",
+      "at": "2026-11-16T19:30:56Z",
+      "write_scope_sha256": "sha256:a647859a60f10906487d4f7754c327eb6e531b7b9e81c3c246f45df9ccac3a93",
+      "note": "\uc9c8\ubb38 \ucc3d\uc5d0\uc11c '0000 (\ucd94\ucc9c)' \uc811\ub450\uc5b4\uc640 '\uc2b9\uc778' \uc120\ud0dd (sha256 8b19199f...)"
+    }
+  ]
+}

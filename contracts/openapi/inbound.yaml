@@ -5,7 +5,7 @@ info:
   description: >
     Served on the generator listener only. A simulated counterparty client
     (another bank's system) gets a token with client credentials and sends
-    inbound deposits to Saltation accounts. Shapes follow KFTC Open Banking
+    inbound deposits to Saltation accounts. Card network clients receive card-scope tokens from the same endpoint. Shapes follow KFTC Open Banking
     v3.3.6 (token issue and deposit transfer) as a subset; numeric values are
     JSON strings. Every response carries the common envelope of public.yaml.
 servers:
@@ -40,7 +40,7 @@ components:
       properties:
         client_id: { type: string, maxLength: 40 }
         client_secret: { type: string, maxLength: 128 }
-        scope: { enum: [oob] }
+        scope: { enum: [oob, card] }
         grant_type: { const: client_credentials }
     TokenResponse:
       allOf:
@@ -51,7 +51,7 @@ components:
             access_token: { type: string, minLength: 43, maxLength: 43 }
             token_type: { const: Bearer }
             expires_in: { type: integer, minimum: 1 }
-            scope: { enum: [oob] }
+            scope: { enum: [oob, card] }
             client_use_code: { type: string, maxLength: 40, description: The client_id. }
     DepositItem:
       type: object
