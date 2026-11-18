@@ -13,8 +13,8 @@ WORKDIR /src
 
 FROM dev AS build
 COPY . .
-RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/target \
-    cargo build --release --locked && cp /target/release/bank /bank
+RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,id=saltation-bank-build-guarded-v1,target=/target,sharing=locked \
+    cargo clean --release --package bank --locked && cargo build --release --locked && cp /target/release/bank /bank
 
 FROM oraclelinux:9-slim AS runtime
 ENV ORA_SDTZ=+09:00

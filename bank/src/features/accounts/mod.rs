@@ -23,6 +23,10 @@ use crate::sql_stmt;
 const SELECT_USER: SqlStmt = sql_stmt!("accounts.select_user", "sql/select_user.sql");
 const SELECT_ACCOUNTS: SqlStmt = sql_stmt!("accounts.select_accounts", "sql/select_accounts.sql");
 const SELECT_BALANCE: SqlStmt = sql_stmt!("accounts.select_balance", "sql/select_balance.sql");
+const SELECT_HISTORY_ACCOUNT: SqlStmt = sql_stmt!(
+    "accounts.select_history_account",
+    "sql/select_history_account.sql"
+);
 const SELECT_DESC: SqlStmt = sql_stmt!(
     "accounts.select_transactions_desc",
     "sql/select_transactions_desc.sql"
@@ -259,6 +263,8 @@ struct HistoryQuery {
     befor_inquiry_trace_info: Option<String>,
 }
 
+type HistoryAccountRow = (i64, String, i64, Option<i64>, Option<i64>);
+
 type HistoryRow = (
     i64,
     DateTime<FixedOffset>,
@@ -345,16 +351,19 @@ async fn transaction_list(
     let result: Option<(String, i64, Vec<HistoryRow>)> = state
         .db
         .run_in(&stats, move |s| {
-            let Some(row): Option<BalanceRow> =
-                s.query_opt(&SELECT_BALANCE, &[&fin, &customer_id])?
+            let Some(row): Option<HistoryAccountRow> =
+                s.query_opt(&SELECT_HISTORY_ACCOUNT, &[&from, &to, &fin, &customer_id])?
             else {
                 return Ok(None);
             };
-            let (account_id, account_no, balance, ..) = row;
+            let (account_id, account_no, balance, first, last) = row;
+            let Some((first, last)) = first.zip(last) else {
+                return Ok(Some((account_no, balance, Vec::new())));
+            };
             let fetch = PAGE_SIZE + 1;
             let rows: Vec<HistoryRow> = if descending {
-                let before = cursor.unwrap_or(i64::MAX);
-                s.query_all(
+                let before = cursor.unwrap_or(i64::MAX).min(last.saturating_add(1));
+                s.query_all_prefetched(
                     &SELECT_DESC,
                     &[
                         &account_id,
@@ -364,12 +373,14 @@ async fn transaction_list(
                         &itype,
                         &itype,
                         &before,
+                        &first,
                         &fetch,
                     ],
+                    (fetch + 1) as u32,
                 )?
             } else {
-                let after = cursor.unwrap_or(0);
-                s.query_all(
+                let after = cursor.unwrap_or(0).max(first.saturating_sub(1));
+                s.query_all_prefetched(
                     &SELECT_ASC,
                     &[
                         &account_id,
@@ -379,8 +390,10 @@ async fn transaction_list(
                         &itype,
                         &itype,
                         &after,
+                        &last,
                         &fetch,
                     ],
+                    (fetch + 1) as u32,
                 )?
             };
             Ok(Some((account_no, balance, rows)))

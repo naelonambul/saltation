@@ -3,9 +3,10 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$root/scripts/dev/cargo-container.sh"
 project="saltation-it"
 
 # State lives outside the checkout (CI checkouts delete untracked files), so the
@@ -124,7 +125,8 @@ SQL
 dev_image_built=no
 dev_image() {
   if [ "$dev_image_built" = no ]; then
-    docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null
+    docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null || return
+    cargo_cache_capacity saltation/bank-dev:local "$root/scripts/dev" || return
     dev_image_built=yes
   fi
 }
@@ -139,15 +141,17 @@ cargo_test() {
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
+  [ -z "${TUNE_SEED_AT:-}" ] || extra_env+=(-e TUNE_SEED_AT)
   [ "${SALTATION_TEST_EXPECT_LIVE:-}" = 1 ] && extra_env+=(-e SALTATION_TEST_EXPECT_LIVE=1)
-  local deadline_command=()
-  [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
-  dev_image
-  ${deadline_command[@]+"${deadline_command[@]}"} docker run --rm --name saltation-it-cargo --network "${project}_data" \
-    -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
+  if [ -n "${TUNE_COVERAGE_OUT:-}" ]; then
+    extra_env+=(-e "TUNE_COVERAGE_OUT=/coverage/$(basename "$TUNE_COVERAGE_OUT")" -v "$(dirname "$TUNE_COVERAGE_OUT"):/coverage")
+  fi
+  dev_image || return
+  cargo_container --rm --name saltation-it-cargo --network "${project}_data" \
+    -e SALTATION_DB_USER="${IT_DB_USER:-saltation}" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
     -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
-    -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
-    saltation/bank-dev:local cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
+    -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
+    saltation/bank-dev:local python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile debug -- cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
 }
 
 # Requests and acknowledgements delimit only the measured benchmark window.
@@ -158,20 +162,26 @@ bench_snapshot_watch() {
       [ -f "$request" ] || continue
       stem="${request%.req}"
       [ ! -f "$stem.ack" ] || continue
-      if "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >"$stem.txt" <<'SQL'
+      if "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >"$stem.txt" <<SQL
 WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
-SET PAGES 0 LINES 300 FEEDBACK OFF HEADING OFF TRIMSPOOL ON
+SET VERIFY OFF
+DEFINE bench_user = '${BENCH_SNAPSHOT_USER:-SALTATION}'
+SET PAGES 0 LINES 1000 FEEDBACK OFF HEADING OFF TRIMSPOOL ON
 ALTER SESSION SET CONTAINER=ORCLPDB1;
-SELECT 'startup '||TO_CHAR(startup_time,'YYYYMMDDHH24MISS') FROM v$instance;
-SELECT 'sys '||REPLACE(name,' ','_')||' '||value FROM v$sysstat WHERE name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
-SELECT 'sev '||s.sid||' '||s.serial#||' '||REPLACE(e.event,' ','_')||' '||e.total_waits||' '||e.time_waited_micro FROM v$session s JOIN v$session_event e ON e.sid=s.sid WHERE s.username='SALTATION';
-SELECT 'sst '||s.sid||' '||s.serial#||' '||REPLACE(n.name,' ','_')||' '||t.value FROM v$session s JOIN v$sesstat t ON t.sid=s.sid JOIN v$statname n ON n.statistic#=t.statistic# WHERE s.username='SALTATION' AND n.name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
-SELECT 'hist '||REPLACE(event,' ','_')||' '||wait_time_milli||' '||wait_count FROM v$event_histogram WHERE event IN ('log file sync','log file parallel write');
-SELECT 'sysev '||REPLACE(event,' ','_')||' '||total_waits||' '||time_waited_micro FROM v$system_event WHERE event IN ('log file sync','log file parallel write');
+SELECT 'startup '||TO_CHAR(startup_time,'YYYYMMDDHH24MISS') FROM v\$instance;
+SELECT 'sys '||REPLACE(name,' ','_')||' '||value FROM v\$sysstat WHERE name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
+SELECT 'sev '||s.sid||' '||s.serial#||' '||REPLACE(e.event,' ','_')||' '||e.total_waits||' '||e.time_waited_micro FROM v\$session s JOIN v\$session_event e ON e.sid=s.sid WHERE s.username='&bench_user';
+SELECT 'sst '||s.sid||' '||s.serial#||' '||REPLACE(n.name,' ','_')||' '||t.value FROM v\$session s JOIN v\$sesstat t ON t.sid=s.sid JOIN v\$statname n ON n.statistic#=t.statistic# WHERE s.username='&bench_user' AND n.name IN ('user commits', 'user rollbacks', 'redo size', 'redo writes', 'redo synch writes', 'redo synch time', 'SQL*Net roundtrips to/from client', 'parse count (total)', 'parse count (hard)', 'execute count', 'logons cumulative', 'user calls');
+SELECT 'hist '||REPLACE(event,' ','_')||' '||wait_time_milli||' '||wait_count FROM v\$event_histogram WHERE event IN ('log file sync','log file parallel write');
+SELECT 'sysev '||REPLACE(event,' ','_')||' '||total_waits||' '||time_waited_micro FROM v\$system_event WHERE event IN ('log file sync','log file parallel write');
+SELECT 'sql|'||sql_id||'|'||child_number||'|'||executions||'|'||buffer_gets||'|'||disk_reads||'|'||rows_processed||'|'||cpu_time||'|'||elapsed_time||'|'||RAWTOHEX(child_address)||':'||last_load_time||':'||invalidations||'|'||REPLACE(REPLACE(REPLACE(SUBSTR(sql_text,1,60),CHR(10),' '),CHR(13),' '),'|',' ') FROM v\$sql WHERE parsing_schema_name='&bench_user';
 EXIT
 SQL
       then
+        if [ "${BENCH_CAPTURE:-}" = 1 ]; then
+          tune_window "$stem" || continue
+        fi
         touch "$stem.ack"
       fi
     done
@@ -179,13 +189,28 @@ SQL
   done
 }
 
-# Each workload/run has a fresh schema and its own resource-limited process.
+# Each workload/run has its own resource-limited process. Only empty-schema runs reset.
 driver_bench() {
   : "${BENCH_DRIVER:?BENCH_DRIVER is required}"
   local runs="${BENCH_RUNS:-3}" entries entry workload concurrency run failed=0 output
   case "$BENCH_DRIVER" in *[!a-zA-Z0-9._-]*|'') echo "invalid BENCH_DRIVER" >&2; return 2 ;; esac
   case "$runs" in *[!0-9]*|''|0) echo "BENCH_RUNS must be positive" >&2; return 2 ;; esac
-  local bench_env=() watcher=""
+  local oracle_container oracle_limits oracle_cpus oracle_memory
+  oracle_container=$("${compose[@]}" ps -q oracle)
+  oracle_limits=$(docker inspect --format '{{.HostConfig.NanoCpus}} {{.HostConfig.Memory}}' "$oracle_container")
+  read -r oracle_cpus oracle_memory <<<"$(python3 - "$oracle_limits" <<'LIMITS'
+from decimal import Decimal
+import sys
+cpu, memory = map(int, sys.argv[1].split())
+print(format(Decimal(cpu) / Decimal(1000000000), 'f') if cpu else 'unlimited',
+      str(memory) if memory else 'unlimited')
+LIMITS
+)"
+  local bench_env=() watcher="" bench_user=saltation
+  if [ "${BENCH_POPULATED:-}" = 1 ]; then
+    bench_user=saltation_tune
+    bench_env+=(-e BENCH_POPULATED=1 -e "TUNE_OUTBOX_LONG=${TUNE_OUTBOX_LONG:-500000}")
+  fi
   if [ "${BENCH_RATE+x}" = x ]; then
     case "$BENCH_RATE" in *[!0-9]*|'') echo "BENCH_RATE must be a positive integer" >&2; return 2 ;; esac
     [[ "$BENCH_RATE" =~ [1-9] ]] || { echo "BENCH_RATE must be a positive integer" >&2; return 2; }
@@ -194,7 +219,12 @@ driver_bench() {
   if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
     bench_env+=(-e BENCH_ORA_SNAP=1)
   fi
+  [ -z "${BENCH_SECS:-}" ] || bench_env+=(-e "BENCH_SECS=$BENCH_SECS")
+  [ -z "${BENCH_WARMUP_SECS:-}" ] || bench_env+=(-e "BENCH_WARMUP_SECS=$BENCH_WARMUP_SECS")
   entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64 duplicate:200 outbox:1)
+  if [ "${BENCH_POPULATED:-}" = 1 ]; then
+    entries+=(transfer_hot:32 transfer_hot:64 history_recent_first_shallow:8 history_recent_first_deep:8 history_recent_deep_shallow:8 history_recent_deep_deep:8 history_old_first_shallow:8 history_old_first_deep:8 history_old_deep_shallow:8 history_old_deep_deep:8 history_filtered_deep:8 outbox_long:1)
+  fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     local found=no
     for entry in "${entries[@]}"; do [ "$entry" != "$BENCH_ONLY" ] || found=yes; done
@@ -204,9 +234,9 @@ driver_bench() {
   if [ "${BENCH_RATE+x}" = x ] && [ -z "${BENCH_ONLY:-}" ]; then
     entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64)
   fi
-  output="$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER"
+  output="${BENCH_OUTPUT:-$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER}"
   mkdir -p "$output"
-  dev_image
+  dev_image || return
   for entry in "${entries[@]}"; do
     workload="${entry%:*}"; concurrency="${entry#*:}"
     if [ "${BENCH_RATE+x}" = x ]; then
@@ -217,20 +247,26 @@ driver_bench() {
     fi
     for ((run=1; run<=runs; run++)); do
       echo "driver-bench: $entry run $run"
-      if ! reset_schema; then failed=1; continue; fi
+      if [ "${BENCH_CAPTURE:-}" = 1 ]; then
+        tune_reset_outbox "${entry/:/-}-run$run-timed" || { failed=1; break; }
+      fi
+      if [ "${BENCH_POPULATED:-}" != 1 ]; then
+        if ! reset_schema; then failed=1; continue; fi
+      fi
       if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
-        bench_snapshot_watch "$output" &
+        BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" &
         watcher=$!
       fi
-      if ! docker run --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
-        -e SALTATION_DB_USER=saltation -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
+      if ! cargo_container --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
+        -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
         -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
         ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
-        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT=/out/bench.jsonl \
+        -e BENCH_ORACLE_CPUS="$oracle_cpus" -e BENCH_ORACLE_MEMORY="$oracle_memory" \
+        -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT="/out/${BENCH_RESULT_NAME:-bench.jsonl}" \
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
         -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
-        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
-        saltation/bank-dev:local sh -c 'cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
+        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
+        saltation/bank-dev:local sh -c 'python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile release -- cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
         failed=1
       fi
       if [ -n "$watcher" ]; then
@@ -240,7 +276,7 @@ driver_bench() {
       fi
     done
   done
-  echo "driver-bench output: $output/bench.jsonl"
+  echo "driver-bench output: $output/${BENCH_RESULT_NAME:-bench.jsonl}"
   return "$failed"
 }
 
@@ -399,6 +435,8 @@ host_load() {
 
 run_target() {
   case "$1" in
+    tune-seed) tune_seed ;;
+    tune-capture) tune_capture ;;
     driver-bench) driver_bench ;;
     driver-parity) reset_schema; cargo_test driver_parity ;;
     db-pool)
@@ -406,6 +444,13 @@ run_target() {
       db_pool_isolated
       ;;
     migrations)  reset_schema; cargo_test migrations ;;
+    tune-migrations) cargo_test migrations -- --ignored --exact tuning::populated_migrations_preserve_data ;;
+    tune-coverage)
+      local output="$root/.evidence/oracle-tuning/$(date -u +%Y%m%dT%H%M%SZ)-coverage"
+      mkdir -p "$output"
+      TUNE_COVERAGE_OUT="$output/xplan-coverage.txt" IT_DB_USER=saltation_tune cargo_test driver_bench -- --ignored --exact tune_coverage --nocapture >"$output/coverage.txt" 2>&1
+      echo "tune-coverage evidence: $output"
+      ;;
     backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
     auth)        cargo_test auth ;;
@@ -428,6 +473,9 @@ run_target() {
     *) echo "unknown target: $1" >&2; exit 2 ;;
   esac
 }
+
+# shellcheck source=scripts/dev/oracle-tune/tooling.sh
+. "$root/scripts/dev/oracle-tune/tooling.sh"
 
 if [ "$target" = all ]; then
   host_load start

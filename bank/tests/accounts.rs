@@ -5,6 +5,9 @@
 
 mod common;
 
+#[path = "accounts_tuning/mod.rs"]
+mod tuning;
+
 use axum::http::StatusCode;
 use bank::shared::db::SqlStmt;
 use bank::sql_stmt;

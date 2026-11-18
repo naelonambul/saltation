@@ -177,3 +177,256 @@ fn db_pool_close_exits() {
     db.close().unwrap();
     assert!(start.elapsed() < Duration::from_secs(1));
 }
+
+const LOCK_NOWAIT: SqlStmt = sql_stmt!("db_pool.lock_nowait", "sql/db_pool_lock_nowait.sql");
+const LOCK_WAIT: SqlStmt = sql_stmt!("db_pool.lock_wait", "sql/db_pool_lock_wait.sql");
+const SESSION_STATE: SqlStmt =
+    sql_stmt!("db_pool.session_state", "sql/db_pool_session_identity.sql");
+const ALTERNATIVE_QUOTE_LOCK: SqlStmt = sql_stmt!(
+    "db_pool.alternative_quote_lock",
+    "sql/db_pool_alternative_quote_lock.sql"
+);
+
+#[tokio::test]
+async fn db_pool_alternative_quote_for_update_releases_lock() {
+    let config = config();
+    let db = Db::connect(&config).unwrap();
+    db.run(|s| {
+        s.execute(&SETUP, &[])?;
+        s.commit()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        db.run(|s| s.query_row::<String>(&ALTERNATIVE_QUOTE_LOCK, &[]))
+            .await
+            .unwrap(),
+        "it's"
+    );
+    let observer = Db::connect(&config).unwrap();
+    observer
+        .run(|s| {
+            assert_eq!(s.query_row::<i64>(&LOCK_NOWAIT, &[])?, 7);
+            s.rollback()
+        })
+        .await
+        .unwrap();
+    observer.close().unwrap();
+    db.close().unwrap();
+}
+
+#[tokio::test]
+async fn db_pool_for_update_without_commit_releases_lock() {
+    let config = config();
+    let db = Db::connect(&config).unwrap();
+    db.run(|s| {
+        s.execute(&SETUP, &[])?;
+        s.commit()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        db.run(|s| s.query_row::<i64>(&LOCK_NOWAIT, &[]))
+            .await
+            .unwrap(),
+        7
+    );
+    let observer = Db::connect(&config).unwrap();
+    observer
+        .run(|s| {
+            assert_eq!(s.query_row::<i64>(&LOCK_NOWAIT, &[])?, 7);
+            s.rollback()
+        })
+        .await
+        .unwrap();
+    observer.close().unwrap();
+    db.close().unwrap();
+}
+
+#[tokio::test]
+async fn db_pool_lock_timeout_reuses_clean_session() {
+    let mut config = config();
+    config.max_sessions = 1;
+    config.call_timeout = Duration::from_secs(5);
+    let db = Db::connect(&config).unwrap();
+    let (sid, logon, transaction) = db
+        .run(|s| {
+            s.execute(&SETUP, &[])?;
+            s.execute(&SETUP_ROW_TWO, &[])?;
+            s.commit()?;
+            s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[])
+        })
+        .await
+        .unwrap();
+    assert!(transaction.is_none());
+
+    let observer = Db::connect(&config).unwrap();
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let holder = {
+        let observer = observer.clone();
+        tokio::spawn(async move {
+            observer
+                .run(move |s| {
+                    assert_eq!(s.query_row::<i64>(&LOCK_NOWAIT, &[])?, 7);
+                    locked.send(()).unwrap();
+                    held.recv_timeout(Duration::from_secs(15)).unwrap();
+                    s.rollback()
+                })
+                .await
+        })
+    };
+    ready.await.unwrap();
+    let error = db
+        .run(|s| {
+            s.execute(&UPDATE_ROW_TWO, &[])?;
+            s.query_row::<i64>(&LOCK_WAIT, &[])
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.ora_code(), Some(30006));
+    let independent = Db::connect(&config).unwrap();
+    independent
+        .run(|s| {
+            assert_eq!(s.query_row::<i64>(&READ_ROW_TWO, &[])?, 7);
+            assert_eq!(s.query_row::<i64>(&LOCK_ROW_TWO, &[])?, 7);
+            s.rollback()
+        })
+        .await
+        .unwrap();
+    independent.close().unwrap();
+    let (next_sid, next_logon, transaction) = db
+        .run(|s| s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[]))
+        .await
+        .unwrap();
+    assert_eq!(next_sid, sid, "recoverable lock timeout keeps the session");
+    assert_eq!(
+        next_logon, logon,
+        "recoverable lock timeout keeps the logon"
+    );
+    assert!(transaction.is_none(), "rollback leaves no transaction open");
+    release.send(()).unwrap();
+    holder.await.unwrap().unwrap();
+    observer.close().unwrap();
+    db.close().unwrap();
+}
+
+const SETUP_ROW_TWO: SqlStmt = sql_stmt!("db_pool.setup_row_two", "sql/db_pool_setup_row_two.sql");
+const UPDATE_ROW_TWO: SqlStmt =
+    sql_stmt!("db_pool.update_row_two", "sql/db_pool_update_row_two.sql");
+const READ_ROW_TWO: SqlStmt = sql_stmt!("db_pool.read_row_two", "sql/db_pool_read_row_two.sql");
+const LOCK_ROW_TWO: SqlStmt = sql_stmt!("db_pool.lock_row_two", "sql/db_pool_lock_row_two.sql");
+const DEFERRED_SETUP: SqlStmt =
+    sql_stmt!("db_pool.deferred_setup", "sql/db_pool_deferred_setup.sql");
+const DEFERRED_INSERT: SqlStmt =
+    sql_stmt!("db_pool.deferred_insert", "sql/db_pool_deferred_insert.sql");
+const DEFERRED_COUNT: SqlStmt =
+    sql_stmt!("db_pool.deferred_count", "sql/db_pool_deferred_count.sql");
+const FAIL: SqlStmt = sql_stmt!("db_pool.fail", "sql/db_pool_fail.sql");
+
+#[tokio::test]
+async fn db_pool_call_timeout_retires_session_even_when_remapped() {
+    let mut config = config();
+    config.max_sessions = 1;
+    // The two-second sleep also finishes within the driver's recovery timeout.
+    config.call_timeout = Duration::from_millis(1500);
+    let db = Db::connect(&config).unwrap();
+    let (_, logon, _) = db
+        .run(|s| s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[]))
+        .await
+        .unwrap();
+    let error = db
+        .run(|s| {
+            let error = s.execute(&SLEEP, &[]).unwrap_err();
+            assert!(
+                matches!(error, DbError::Oracle { ref source, .. }
+                if *source.kind() == oracledb::ErrorKind::CallTimeoutExceeded),
+                "{error:?}"
+            );
+            Err::<(), _>(DbError::Busy)
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Busy));
+    let (_, next_logon, transaction) = db
+        .run(|s| s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[]))
+        .await
+        .unwrap();
+    assert_ne!(next_logon, logon, "call timeout retires the logon");
+    assert!(transaction.is_none());
+    db.close().unwrap();
+}
+
+#[tokio::test]
+async fn db_pool_failed_commit_retires_session() {
+    let mut config = config();
+    config.max_sessions = 1;
+    let db = Db::connect(&config).unwrap();
+    let (_, logon, _) = db
+        .run(|s| {
+            s.execute(&DEFERRED_SETUP, &[])?;
+            s.commit()?;
+            s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[])
+        })
+        .await
+        .unwrap();
+    let error = db
+        .run(|s| {
+            s.execute(&DEFERRED_INSERT, &[])?;
+            s.commit()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.ora_code(), Some(2091));
+    let (_, next_logon, transaction) = db
+        .run(|s| {
+            assert_eq!(s.query_row::<i64>(&DEFERRED_COUNT, &[])?, 0);
+            s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[])
+        })
+        .await
+        .unwrap();
+    assert_ne!(next_logon, logon, "failed commit retires the logon");
+    assert!(transaction.is_none());
+    db.close().unwrap();
+}
+
+#[tokio::test]
+async fn db_pool_swallowed_error_rolls_back() {
+    let mut config = config();
+    config.max_sessions = 1;
+    let db = Db::connect(&config).unwrap();
+    let (sid, logon, _) = db
+        .run(|s| {
+            s.execute(&SETUP, &[])?;
+            s.commit()?;
+            s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[])
+        })
+        .await
+        .unwrap();
+    db.run(|s| {
+        s.execute(&UPDATE, &[&999_i64])?;
+        let error = s.query_row::<i64>(&FAIL, &[]).unwrap_err();
+        assert_eq!(error.ora_code(), Some(1476));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let observer = Db::connect(&config).unwrap();
+    observer
+        .run(|s| {
+            assert_eq!(s.query_row::<i64>(&READ, &[])?, 7);
+            assert_eq!(s.query_row::<i64>(&LOCK_NOWAIT, &[])?, 7);
+            s.rollback()
+        })
+        .await
+        .unwrap();
+    let (next_sid, next_logon, transaction) = db
+        .run(|s| s.query_row::<(String, String, Option<String>)>(&SESSION_STATE, &[]))
+        .await
+        .unwrap();
+    assert_eq!(next_sid, sid);
+    assert_eq!(next_logon, logon);
+    assert!(transaction.is_none());
+    observer.close().unwrap();
+    db.close().unwrap();
+}

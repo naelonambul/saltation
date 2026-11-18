@@ -30,13 +30,26 @@ const HISTORY: SqlStmt = sql_stmt!("bench.history", "sql/driver_bench_history.sq
 const OUTBOX: SqlStmt = sql_stmt!("bench.outbox", "sql/driver_bench_outbox.sql");
 const BALANCES: SqlStmt = sql_stmt!("bench.balances", "sql/driver_bench_balances.sql");
 const COUNT: SqlStmt = sql_stmt!("bench.count", "sql/driver_bench_count.sql");
+const OBSERVE_BACKLOG: SqlStmt = sql_stmt!(
+    "bench.observe_backlog",
+    "sql/driver_bench_observe_backlog.sql"
+);
 const TRANSFER: &str = "/v2.0/transfer/withdraw/fin_num";
 const OPENING: i64 = 100_000_000;
 
 fn id() -> String {
     ulid::Ulid::new().to_string()
 }
+fn populated() -> bool {
+    std::env::var("BENCH_POPULATED").as_deref() == Ok("1")
+}
 fn btid(n: usize) -> String {
+    if populated() {
+        // Each process shares the persistent schema; idempotency keys must be fresh.
+        static PREFIX: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let prefix = PREFIX.get_or_init(|| rand::rng().random_range(10..1_000_000_000));
+        return format!("T{prefix:09}U{n:09}");
+    }
     format!("T000000001U{n:09}")
 }
 
@@ -91,6 +104,7 @@ struct Customer {
     account: String,
     fin: String,
     token: String,
+    history_path: String,
 }
 
 async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Customer> {
@@ -103,6 +117,7 @@ async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Cust
             account: format!("9600{n:08}"),
             fin: String::new(),
             token: String::new(),
+            history_path: String::new(),
         })
         .collect();
     // Stay below both the 500-row contract implementation limit and body limits.
@@ -147,6 +162,232 @@ async fn seed(generator: &Router, public: &Router, rng: &mut StdRng) -> Vec<Cust
         }
     }
     customers
+}
+
+// Use the production migration runner, including its version tracking and splitter.
+#[tokio::test]
+#[ignore]
+async fn tune_prepare() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    db.migrate().await.expect("migrate tune schema");
+    let clock = Clock::init(db.clone(), Registry::default())
+        .await
+        .expect("clock");
+    if let Ok(at) = std::env::var("TUNE_SEED_AT") {
+        let at = DateTime::parse_from_rfc3339(&at).expect("TUNE_SEED_AT must be RFC 3339");
+        // The schema is still empty, so the clock permits a past reference date.
+        // Reusing that date keeps overnight captures on the same seed window.
+        clock.set(at).await.expect("set tune reference time");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn tune_credentials() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let password = bank::shared::auth::hash_secret("pw-bench".into())
+        .await
+        .expect("hash");
+    let pin = bank::shared::auth::hash_secret("7391".into())
+        .await
+        .expect("hash");
+    db.run(move |s| {
+        s.execute(&SqlStmt { name: "tune.credentials", sql: "INSERT INTO customer_credential(customer_id,password_hash,password_changed_at) SELECT customer_id,:hash,created_at FROM customer" }, &[&password])?;
+        s.execute(&SqlStmt { name: "tune.pins", sql: "INSERT INTO atm_credential(account_no,pin_hash) SELECT account_no,:hash FROM account" }, &[&pin])?;
+        s.commit()
+    }).await.expect("synthetic credentials");
+}
+
+async fn populated_customers(db: &Db, public: &Router, workload: &str) -> Vec<Customer> {
+    let deep = i64::from(matches!(workload, "history" | "balance" | "transfer_hot"));
+    let history_case = workload.starts_with("history_");
+    let (minimum, maximum) = if history_case && workload.ends_with("_shallow") {
+        (26_i64, 50_000_i64)
+    } else if history_case {
+        (50_000, i64::MAX)
+    } else {
+        (26, i64::MAX)
+    };
+    let rows = db.run(move |s| {
+        s.query_all::<(String, String, String)>(&SqlStmt {
+            name: "tune.accounts",
+            sql: "SELECT phone,account_no,fintech_use_num FROM (SELECT c.phone,a.account_no,f.fintech_use_num FROM customer c JOIN account a ON a.customer_id=c.customer_id JOIN fintech_account f ON f.account_id=a.account_id WHERE a.subtype='DEMAND' AND a.status='ACTIVE' AND a.next_sequence>=:minimum AND a.next_sequence<:maximum ORDER BY CASE WHEN :deep=1 THEN a.next_sequence ELSE 0 END DESC, ORA_HASH(a.account_id,4294967295,20261115)) WHERE ROWNUM<=1000",
+        }, &[&minimum, &maximum, &deep])
+    }).await.expect("seeded accounts");
+    assert!(rows.len() >= 2, "run tune-seed first");
+    let mut customers: Vec<Customer> = rows
+        .into_iter()
+        .map(|(phone, account, fin)| Customer {
+            phone,
+            account,
+            fin,
+            token: String::new(),
+            history_path: String::new(),
+        })
+        .collect();
+    if workload == "transfer_hot" {
+        // The seed makes about 1% of accounts hot; contend on the 20 deepest of them.
+        customers.truncate(20);
+    }
+    for batch in customers.chunks_mut(8) {
+        let mut tasks = JoinSet::new();
+        for (i, c) in batch.iter().enumerate() {
+            let router = public.clone();
+            let phone = c.phone.clone();
+            tasks.spawn(async move {
+                (
+                    i,
+                    seed_call(
+                        &router,
+                        "/v2.0/ext/auth/login",
+                        json!({"phone":phone,"password":"pw-bench","device_id":"driver-bench"}),
+                    )
+                    .await,
+                )
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            let (i, body) = result.expect("login task");
+            batch[i].token = body["access_token"].as_str().expect("token").to_owned();
+        }
+    }
+    customers
+}
+
+async fn history_customers(
+    db: &Db,
+    public: &Router,
+    customers: Vec<Customer>,
+    workload: &str,
+    now: DateTime<FixedOffset>,
+) -> Vec<Customer> {
+    let old = workload.starts_with("history_old_");
+    let from =
+        if old {
+            let date: String = db
+                .run(|s| {
+                    s.query_row(&SqlStmt {
+            name: "tune.history_start",
+            sql: "SELECT TO_CHAR(ADD_MONTHS(first_day,1),'YYYYMMDD') FROM tune_seed",
+        }, &[])
+                })
+                .await
+                .expect("old history window");
+            chrono::NaiveDate::parse_from_str(&date, "%Y%m%d").expect("seed first month")
+        } else {
+            (now - chrono::Months::new(3)).date_naive()
+        };
+    let to = if old {
+        from + chrono::Months::new(3)
+    } else {
+        now.date_naive()
+    };
+    let inquiry = if workload == "history_filtered_deep" {
+        "I"
+    } else {
+        "A"
+    };
+    let deep_page = workload.contains("_deep_");
+    let mut selected = Vec::new();
+    for mut customer in customers {
+        let base = format!(
+            "/v2.0/account/transaction_list/fin_num?fintech_use_num={}&inquiry_type={inquiry}&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}",
+            customer.fin,
+            from.format("%Y%m%d"),
+            to.format("%Y%m%d"),
+            now.format("%Y%m%d%H%M%S")
+        );
+        let mut path = base.clone();
+        let mut reached = 0;
+        if deep_page {
+            for step in 0..=10 {
+                let (status, page) = call(
+                    public,
+                    "GET",
+                    &format!("{path}&bank_tran_id={}", btid(step)),
+                    &id(),
+                    Some(&customer.token),
+                    None,
+                )
+                .await
+                .expect("history pagination");
+                assert_eq!(status, 200, "history setup status");
+                assert_eq!(page["rsp_code"], "A0000", "history setup response");
+                reached = step;
+                if page["next_page_yn"] == "N" || step == 10 {
+                    break;
+                }
+                assert_eq!(page["next_page_yn"], "Y");
+                let trace = page["befor_inquiry_trace_info"]
+                    .as_str()
+                    .expect("history trace");
+                let _: i64 = trace.parse().expect("reusable sequence cursor");
+                path = format!("{base}&befor_inquiry_trace_info={trace}");
+            }
+            if reached == 0 {
+                continue;
+            }
+        }
+        customer.history_path = path;
+        selected.push(customer);
+    }
+    assert!(!selected.is_empty(), "no eligible history pages");
+    selected
+}
+
+async fn queue_events(db: &Db, ids: Vec<String>, now: DateTime<FixedOffset>) {
+    db.run(move |s| {
+        let at = now.to_rfc3339();
+        let date = now.date_naive().to_string();
+        for batch in ids.chunks(500) {
+            let binds: Vec<Vec<&dyn bank::shared::db::ToSql>> = batch
+                .iter()
+                .map(|id| vec![id as &dyn bank::shared::db::ToSql, id, &at, &at, &date])
+                .collect();
+            s.execute_batch(&OUTBOX, &binds)?;
+        }
+        s.commit()
+    })
+    .await
+    .expect("outbox fixture");
+}
+
+// Keep completion polling out of the production sampler's cursor counters.
+async fn observe_backlog(db: &Db) -> (i64, f64) {
+    db.run(|s| s.query_row(&OBSERVE_BACKLOG, &[]))
+        .await
+        .expect("relay backlog")
+}
+
+async fn drain_events(
+    db: &Db,
+    events: &mongodb::Collection<mongodb::bson::Document>,
+    ids: &[String],
+) {
+    let relay = tokio::spawn(outbox_relay::run(db.clone(), env("MONGO_URI")));
+    // Allow 300 s plus 10 ms per event, so the default long fixture has time to drain.
+    let deadline = Instant::now() + Duration::from_secs(300 + ids.len() as u64 / 100);
+    loop {
+        assert!(Instant::now() < deadline, "relay did not drain fixture");
+        if observe_backlog(db).await.0 == 0 {
+            let mut delivered = 0;
+            // Bound the Mongo command size even for the default long fixture.
+            for batch in ids.chunks(1000) {
+                delivered += events
+                    .count_documents(mongodb::bson::doc! {"_id": {"$in": batch}})
+                    .await
+                    .expect("relay progress");
+            }
+            if delivered == ids.len() as u64 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    relay.abort();
+    let _ = relay.await;
 }
 
 fn transfer(
@@ -302,10 +543,19 @@ async fn window(
                 let n = cursor.fetch_add(1, Ordering::Relaxed);
                 let from = n % customers.len(); let c = &customers[from];
                 let (method, path, body) = match workload.as_str() {
-                    "transfer" => ("POST", TRANSFER.to_owned(), Some(transfer(&customers, from, pairs[n % pairs.len()], n, now))),
+                    "transfer" | "transfer_hot" => {
+                        let mut body = transfer(&customers, from, pairs[n % pairs.len()], n, now);
+                        if workload == "transfer_hot" {
+                            // Contention runs reuse very few accounts across windows. Avoid
+                            // exhausting their daily limit while preserving the posting path.
+                            body["tran_amt"] = json!("1");
+                        }
+                        ("POST", TRANSFER.to_owned(), Some(body))
+                    },
                     "lookup" => ("GET", "/v2.0/account/list".to_owned(), None),
                     "balance" => ("GET", format!("/v2.0/account/balance/fin_num?bank_tran_id={}&fintech_use_num={}&tran_dtime={}", btid(n), c.fin, now.format("%Y%m%d%H%M%S")), None),
                     "history" => ("GET", format!("/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={}&inquiry_type=A&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}", btid(n), c.fin, (now - chrono::Months::new(3)).format("%Y%m%d"), now.format("%Y%m%d"), now.format("%Y%m%d%H%M%S")), None),
+                    name if name.starts_with("history_") => ("GET", format!("{}&bank_tran_id={}", c.history_path, btid(n)), None),
                     _ => unreachable!(),
                 };
                 let request = id();
@@ -410,15 +660,21 @@ fn env(name: &str) -> String {
 #[ignore]
 async fn driver_bench() {
     let workload = env("BENCH_WORKLOAD");
+    if workload == "transfer_hot" || workload.starts_with("history_") || workload == "outbox_long" {
+        assert!(populated(), "workload requires the populated tune seed");
+    }
     let _ = bench_rate(&workload);
     let concurrency: usize = env("BENCH_CONCURRENCY").parse().expect("concurrency");
-    assert!(matches!(
-        (workload.as_str(), concurrency),
-        ("lookup" | "balance" | "history", 8)
-            | ("transfer", 1 | 8 | 32 | 64)
-            | ("duplicate", 200)
-            | ("outbox", 1)
-    ));
+    assert!(
+        matches!(
+            (workload.as_str(), concurrency),
+            ("lookup" | "balance" | "history", 8)
+                | ("transfer", 1 | 8 | 32 | 64)
+                | ("transfer_hot", 32 | 64)
+                | ("duplicate", 200)
+                | ("outbox" | "outbox_long", 1)
+        ) || (workload.starts_with("history_") && concurrency == 8)
+    );
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -427,7 +683,11 @@ async fn driver_bench() {
         )
         .init();
     let metrics = telemetry::metrics_handle();
-    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let mut config = DbConfig::from_env().expect("config");
+    if populated() {
+        config.user = "saltation_tune".into();
+    }
+    let db = Db::connect(&config).expect("connect");
     db.migrate().await.expect("migrate");
     let clock = Clock::init(db.clone(), Registry::default())
         .await
@@ -441,19 +701,30 @@ async fn driver_bench() {
     let generator = app::generator_router(state.clone());
     let seeded = Instant::now();
     let mut rng = StdRng::seed_from_u64(20261115);
-    let customers = Arc::new(seed(&generator, &public, &mut rng).await);
+    let customers = if populated() {
+        populated_customers(&db, &public, &workload).await
+    } else {
+        seed(&generator, &public, &mut rng).await
+    };
     let now = state
         .clock
         .state()
         .await
         .expect("clock state")
         .business_time;
-    db.run(move |s| {
-        s.execute(&HISTORY, &[&now.date_naive(), &id()])?;
-        s.commit()
-    })
-    .await
-    .expect("history fixture");
+    let customers = Arc::new(if workload.starts_with("history_") {
+        history_customers(&db, &public, customers, &workload, now).await
+    } else {
+        customers
+    });
+    if !populated() {
+        db.run(move |s| {
+            s.execute(&HISTORY, &[&now.date_naive(), &id()])?;
+            s.commit()
+        })
+        .await
+        .expect("history fixture");
+    }
     // The history workload must measure real pages, not empty ones.
     let first = &customers[0];
     let (status, page) = call(&public, "GET", &format!("/v2.0/account/transaction_list/fin_num?bank_tran_id={}&fintech_use_num={}&inquiry_type=A&inquiry_base=D&from_date={}&to_date={}&sort_order=D&tran_dtime={}", btid(0), first.fin, (now - chrono::Months::new(3)).format("%Y%m%d"), now.format("%Y%m%d"), now.format("%Y%m%d%H%M%S")), &id(), Some(&first.token), None)
@@ -473,14 +744,14 @@ async fn driver_bench() {
     let pairs: Arc<Vec<usize>> = Arc::new(
         (0..1_000_000)
             .map(|n| {
-                let from = n % 1000;
-                let to = rng.random_range(0..999);
+                let from = n % customers.len();
+                let to = rng.random_range(0..customers.len() - 1);
                 if to >= from { to + 1 } else { to }
             })
             .collect(),
     );
     let cursor = Arc::new(AtomicUsize::new(0));
-    let collection = if workload == "outbox" {
+    let collection = if matches!(workload.as_str(), "outbox" | "outbox_long") {
         Some(
             outbox_relay::events_collection(&env("MONGO_URI"))
                 .await
@@ -490,7 +761,7 @@ async fn driver_bench() {
         None
     };
     if let Some(events) = &collection {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(bench_secs("BENCH_WARMUP_SECS", 30));
         while Instant::now() < deadline {
             if outbox_relay::relay_once(&db, events, true)
                 .await
@@ -518,7 +789,10 @@ async fn driver_bench() {
             warm_workload,
             now,
             cursor.clone(),
-            (warm_concurrency, Duration::from_secs(30)),
+            (
+                warm_concurrency,
+                Duration::from_secs(bench_secs("BENCH_WARMUP_SECS", 30)),
+            ),
         )
         .await;
         assert_eq!(
@@ -537,18 +811,26 @@ async fn driver_bench() {
             .expect("pre-drain")
             > 0
         {}
-        event_ids = (0..5000).map(|_| id()).collect();
-        let ids = event_ids.clone();
-        db.run(move |s| {
-            let at = now.to_rfc3339();
-            let date = now.date_naive().to_string();
-            for id in ids {
-                s.execute(&OUTBOX, &[&id, &id, &at, &at, &date])?;
-            }
-            s.commit()
-        })
-        .await
-        .expect("outbox fixture");
+        if workload == "outbox_long" {
+            let count = bench_secs("TUNE_OUTBOX_LONG", 500_000);
+            let historical: Vec<String> = (0..count).map(|_| id()).collect();
+            queue_events(&db, historical.clone(), now).await;
+            drain_events(&db, events, &historical).await;
+        }
+        let count = if workload == "outbox_long" {
+            1000
+        } else if populated() {
+            50_000
+        } else {
+            5000
+        };
+        event_ids = (0..count).map(|_| id()).collect();
+        if workload != "outbox_long" {
+            queue_events(&db, event_ids.clone(), now).await;
+        }
+        // Reparse the backlog cursor after reset and population, before snapshots.
+        outbox::backlog(&db).await.expect("backlog warm-up");
+        observe_backlog(&db).await;
     }
     let duplicate_body = if workload == "duplicate" {
         let n = cursor.fetch_add(1, Ordering::Relaxed);
@@ -561,21 +843,16 @@ async fn driver_bench() {
     let snapshot = buckets(&metrics.render());
     let started = Instant::now();
     let mut result = if let Some(events) = &collection {
-        let mut r = Results::default();
-        loop {
-            let at = Instant::now();
-            match outbox_relay::relay_once(&db, events, true).await {
-                Ok(0) => break,
-                Ok(count) => {
-                    r.successes += count as u64;
-                    r.latencies.push(at.elapsed().as_secs_f64() * 1000.0);
-                }
-                Err(_) => {
-                    r.other_errors += 1;
-                    break;
-                }
-            }
+        let expected = event_ids.len() as u64;
+        if workload == "outbox_long" {
+            queue_events(&db, event_ids.clone(), now).await;
         }
+        drain_events(&db, events, &event_ids).await;
+        let mut r = Results {
+            successes: expected,
+            ..Results::default()
+        };
+        r.latencies.push(started.elapsed().as_secs_f64() * 1000.0);
         r
     } else if let Some(body) = duplicate_body {
         let mut tasks = JoinSet::new();
@@ -618,7 +895,10 @@ async fn driver_bench() {
             &workload,
             now,
             cursor,
-            (concurrency, Duration::from_secs(60)),
+            (
+                concurrency,
+                Duration::from_secs(bench_secs("BENCH_SECS", 60)),
+            ),
         )
         .await
     };
@@ -642,7 +922,17 @@ async fn driver_bench() {
         "successes": result.successes, "business_rejections": result.business_rejections, "busy": result.busy, "other_errors": result.other_errors,
         "tps": result.successes as f64 / measured_secs, "p50_ms": result.percentile(0.50), "p95_ms": result.percentile(0.95), "p99_ms": result.percentile(0.99),
         "slowest_statement": slowest_statement, "slowest_statement_p95_ms": slowest_statement_p95_ms,
-        "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+        "peak_rss_kb": proc_value("VmHWM:"), "threads": proc_value("Threads:"), "oracle_cpus": env("BENCH_ORACLE_CPUS"), "oracle_memory": env("BENCH_ORACLE_MEMORY"), "cpus": env("BENCH_CPUS"), "memory": env("BENCH_MEMORY"), "measured_secs": measured_secs});
+    if matches!(workload.as_str(), "outbox" | "outbox_long") {
+        line["latency_scope"] = json!("complete backlog drain, including completion polling");
+    }
+    if populated() {
+        let params: (i64,i64,i64,String,String) = db.run(|s| s.query_row(&SqlStmt {
+            name: "tune.parameters", sql: "SELECT customers,years,max_gb,TO_CHAR(first_day,'YYYY-MM-DD'),TO_CHAR(last_day,'YYYY-MM-DD') FROM tune_seed"
+        }, &[])).await.expect("seed parameters");
+        line["populated"] = json!(true);
+        line["seed"] = json!({"customers":params.0,"years":params.1,"max_gb":params.2,"first_day":params.3,"last_day":params.4});
+    }
     if let Some(rate) = bench_rate(&workload) {
         line["rate"] = json!(rate);
         line["late"] = json!(result.late);
@@ -658,7 +948,7 @@ async fn driver_bench() {
     assert_eq!(result.business_rejections, 0, "business rejections");
     assert_eq!(result.other_errors, 0, "other errors");
     assert!(result.successes > 0, "completed work");
-    if workload == "transfer" || workload == "duplicate" {
+    if matches!(workload.as_str(), "transfer" | "transfer_hot" | "duplicate") {
         let after = balances(&db).await;
         assert_eq!(
             before_balances.values().sum::<i64>(),
@@ -682,12 +972,55 @@ async fn driver_bench() {
         }
     }
     if let Some(events) = collection {
-        assert_eq!(result.successes, 5000);
+        if workload == "outbox_long" {
+            assert_eq!(result.successes, 1000);
+        } else if populated() {
+            assert_eq!(result.successes, 50_000);
+        } else {
+            assert_eq!(result.successes, 5000);
+        }
         assert_eq!(outbox::backlog(&db).await.expect("backlog").0, 0);
         let count = events
             .count_documents(mongodb::bson::doc! {"_id": {"$in": event_ids}})
             .await
             .expect("Mongo event count");
-        assert_eq!(count, 5000);
+        if workload == "outbox_long" {
+            assert_eq!(count, 1000);
+        } else if populated() {
+            assert_eq!(count, 50_000);
+        } else {
+            assert_eq!(count, 5000);
+        }
     }
+}
+
+fn bench_secs(name: &str, default: u64) -> u64 {
+    let secs = std::env::var(name).map_or(default, |v| v.parse().expect("benchmark seconds"));
+    assert!(secs > 0, "benchmark seconds must be positive");
+    secs
+}
+
+#[path = "oracle_tune_coverage.rs"]
+mod oracle_tune_coverage;
+
+#[tokio::test]
+#[ignore]
+async fn tune_coverage() {
+    oracle_tune_coverage::run().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn tune_drain() {
+    assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
+    let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
+    let events = outbox_relay::events_collection(&env("MONGO_URI"))
+        .await
+        .expect("collection");
+    while outbox_relay::relay_once(&db, &events, true)
+        .await
+        .expect("drain")
+        > 0
+    {}
+    assert_eq!(outbox::backlog(&db).await.expect("backlog").0, 0);
 }

@@ -235,12 +235,30 @@ pub(super) fn with_statement_binds<T>(
     positional: impl FnOnce(oracledb::Statement, &[&dyn ToDbValue]) -> Result<T, Error>,
     named: impl FnOnce(oracledb::Statement, &[(&str, &dyn ToDbValue)]) -> Result<T, Error>,
 ) -> Result<T, Error> {
+    with_statement_binds_prefetch(conn, sql, params, None, positional, named)
+}
+
+pub(super) fn with_statement_binds_prefetch<T>(
+    conn: &oracledb::Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+    prefetch_rows: Option<u32>,
+    positional: impl FnOnce(oracledb::Statement, &[&dyn ToDbValue]) -> Result<T, Error>,
+    named: impl FnOnce(oracledb::Statement, &[(&str, &dyn ToDbValue)]) -> Result<T, Error>,
+) -> Result<T, Error> {
     with_binds(params, |values| {
-        let statement = conn.statement(sql)?.build()?;
+        let build = || {
+            let builder = conn.statement(sql)?;
+            match prefetch_rows {
+                Some(rows) => builder.prefetch_rows(rows).build(),
+                None => builder.build(),
+            }
+        };
+        let statement = build()?;
         match positional(statement, values) {
             Err(error) if matches!(error.kind(), oracledb::ErrorKind::WrongNumPositionalBinds(expected, actual) if expected > actual) =>
             {
-                let statement = conn.statement(sql)?.build()?;
+                let statement = build()?;
                 if statement.bind_names().len() != values.len() {
                     return Err(error);
                 }

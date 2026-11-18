@@ -1,0 +1,3 @@
+MERGE INTO db_pool_probe p USING (SELECT 2 id FROM DUAL) v ON (p.id = v.id)
+WHEN MATCHED THEN UPDATE SET p.value = 7
+WHEN NOT MATCHED THEN INSERT (id, value) VALUES (2, 7)

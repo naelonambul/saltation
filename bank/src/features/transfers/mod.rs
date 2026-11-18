@@ -388,6 +388,14 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     } else {
         vec![sender_id, receiver_id]
     };
+    let registered: i64 = s.query_row(
+        &REGISTERED,
+        &[
+            &plan.customer_id,
+            &req.recv_client_bank_code,
+            &req.recv_client_account_num,
+        ],
+    )?;
     let mut locks = ledger::lock_accounts(s, &ids)?;
     let from = locks
         .get(sender_id)
@@ -451,14 +459,6 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     } else {
         truncate(&req.dps_print_content, 20)
     };
-    let registered: i64 = s.query_row(
-        &REGISTERED,
-        &[
-            &plan.customer_id,
-            &req.recv_client_bank_code,
-            &req.recv_client_account_num,
-        ],
-    )?;
     let mut movement = Movement {
         terminal_id: None,
         kind: Kind::Transfer,

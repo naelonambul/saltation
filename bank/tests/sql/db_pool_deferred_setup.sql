@@ -1,0 +1,10 @@
+BEGIN
+  BEGIN
+    EXECUTE IMMEDIATE 'CREATE TABLE db_pool_deferred_probe (
+      id NUMBER PRIMARY KEY,
+      value NUMBER CONSTRAINT db_pool_deferred_check CHECK (value > 0) DEFERRABLE INITIALLY DEFERRED)';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -955 THEN RAISE; END IF;
+  END;
+  EXECUTE IMMEDIATE 'DELETE FROM db_pool_deferred_probe';
+END;

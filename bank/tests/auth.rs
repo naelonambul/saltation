@@ -199,3 +199,506 @@ async fn login_lockout_logout_and_events() {
     assert_eq!(attempt(&api, &r).await.0, "LOCKED");
     assert_eq!(events(&api, &r).await, "login.failed,request.completed");
 }
+
+mod deferred_touch {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::{FromRequestParts, Request};
+    use axum::response::IntoResponse;
+    use bank::shared::auth::{AuthCustomer, token_hash};
+    use bank::shared::context::{BusinessTime, Listener, RequestContext};
+    use bank::shared::db::DbError;
+    use bank::shared::outbox::{self, Event};
+    use bank::shared::outcome::Recorder;
+    use bank::shared::telemetry::RequestStats;
+    use chrono::{DateTime, Duration, FixedOffset, Timelike};
+
+    const STATE: SqlStmt = sql_stmt!("test.auth_deferred_state", "sql/auth_deferred_state.sql");
+    const PREPARE: SqlStmt = sql_stmt!(
+        "test.auth_deferred_prepare",
+        "sql/auth_deferred_prepare.sql"
+    );
+    const LOCK: SqlStmt = sql_stmt!("test.auth_deferred_lock", "sql/auth_deferred_lock.sql");
+    type At = DateTime<FixedOffset>;
+    type Stored = (At, At, Option<At>, Option<At>);
+
+    async fn stored(api: &common::Api, token: &str) -> Stored {
+        let hash = token_hash(token);
+        api.state
+            .db
+            .run(move |s| s.query_row(&STATE, &[&hash]))
+            .await
+            .unwrap()
+    }
+
+    async fn prepare(api: &common::Api, token: &str, now: At, scope: &str) {
+        let hash = token_hash(token);
+        let scope = scope.to_owned();
+        api.state
+            .db
+            .run(move |s| {
+                s.execute(&PREPARE, &[&hash, &now, &scope])?;
+                s.commit()
+            })
+            .await
+            .unwrap();
+    }
+
+    fn assert_touched(state: Stored, now: At) {
+        assert_eq!(state, (now + Duration::minutes(30), now, None, None));
+    }
+
+    async fn assert_http_touched(api: &common::Api, token: &str, before: At) {
+        let after = api.state.clock.state().await.unwrap().business_time;
+        let (expires, seen, revoked, ended) = stored(api, token).await;
+        assert!(seen.timestamp_micros() >= before.timestamp_micros());
+        assert!(seen.timestamp_micros() <= after.timestamp_micros());
+        assert_eq!(expires, seen + Duration::minutes(30));
+        assert!(revoked.is_none() && ended.is_none());
+    }
+
+    struct InFlight {
+        stats: RequestStats,
+        recorder: Recorder,
+        who: AuthCustomer,
+        now: At,
+    }
+
+    async fn authenticate(api: &common::Api, token: &str, now: At) -> InFlight {
+        let stats = RequestStats::default();
+        let mut req = Request::builder()
+            .uri("/v2.0/user/me")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let ctx = RequestContext::from_headers(Listener::Public, req.headers(), None);
+        req.extensions_mut().insert(ctx.clone());
+        req.extensions_mut().insert(stats.clone());
+        req.extensions_mut().insert(BusinessTime(now));
+        let recorder = Recorder::attach(&mut req, ctx);
+        let (mut parts, _) = req.into_parts();
+        let who = AuthCustomer::from_request_parts(&mut parts, &api.state)
+            .await
+            .unwrap();
+        let collected = stats.lock().unwrap();
+        assert_eq!(
+            collected.count, 1,
+            "authentication performs only select_token"
+        );
+        assert!(!collected.completion_committed);
+        assert!(collected.pending_touch.is_some());
+        drop(collected);
+        InFlight {
+            stats,
+            recorder,
+            who,
+            now,
+        }
+    }
+
+    fn completion(request: &InFlight) -> Event {
+        Event::for_request(
+            &request.recorder.ctx,
+            "request.completed",
+            request.now,
+            "MOBILE",
+            "completed",
+        )
+        .session(request.who.session_id.clone())
+        .device(Some("deferred-test".into()))
+    }
+
+    async fn finish(api: &common::Api, request: &InFlight, status: StatusCode) {
+        let response = request
+            .recorder
+            .finish(&api.state, request.now, status.into_response())
+            .await;
+        assert_eq!(response.status(), status);
+        {
+            let stats = request.stats.lock().unwrap();
+            assert!(stats.completion_committed);
+            assert!(stats.pending_touch.is_none());
+        }
+        assert_eq!(
+            events(api, &request.recorder.ctx.request_id).await,
+            "request.completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn authentication_defers_until_completion_and_rollback_retains_touch() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let before = stored(&api, &customer.token).await;
+        let request = authenticate(&api, &customer.token, now).await;
+        assert_eq!(stored(&api, &customer.token).await, before);
+        api.state
+            .db
+            .run_in(&request.stats, |s| {
+                s.note_completion();
+                s.rollback()?;
+                s.commit() // unrelated commit must neither apply nor clear activity
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored(&api, &customer.token).await, before);
+        assert!(request.stats.lock().unwrap().pending_touch.is_some());
+        let event = completion(&request);
+        api.state
+            .db
+            .run_in(&request.stats, move |s| {
+                outbox::record(s, &event)?;
+                s.commit()?;
+                assert_eq!(s.stats.count, 2, "outbox insert and one touch block");
+                s.commit()?; // completion is no longer pending within this session
+                assert_eq!(s.stats.count, 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_touched(stored(&api, &customer.token).await, now);
+        let count = request.stats.lock().unwrap().count;
+        finish(&api, &request, StatusCode::OK).await;
+        assert_eq!(
+            request.stats.lock().unwrap().count,
+            count,
+            "finish skips committed completion"
+        );
+    }
+
+    #[test]
+    fn metadata_survives_unrelated_work_and_debug_redacts_token() {
+        use bank::shared::auth::PendingTouch;
+        use bank::shared::db::StatementStats;
+        let mut stats = StatementStats {
+            pending_touch: Some(PendingTouch {
+                token_hash: "sensitive-token-hash-sentinel".into(),
+                session_id: "session".into(),
+                now: DateTime::parse_from_rfc3339("2026-11-17T12:00:00+09:00").unwrap(),
+            }),
+            ..Default::default()
+        };
+        stats.merge(&StatementStats::default());
+        assert!(stats.pending_touch.is_some());
+        assert!(!stats.completion_committed);
+        assert!(!format!("{stats:?}").contains("sensitive-token-hash-sentinel"));
+        stats.merge(&StatementStats {
+            completion_committed: true,
+            ..Default::default()
+        });
+        assert!(stats.completion_committed);
+        assert!(stats.pending_touch.is_none());
+    }
+
+    #[tokio::test]
+    async fn rollback_and_completion_in_same_session_retain_activity() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let request = authenticate(&api, &customer.token, now).await;
+        let event = completion(&request);
+        api.state
+            .db
+            .run_in(&request.stats, move |s| {
+                outbox::record(s, &event)?;
+                s.rollback()?;
+                outbox::record(s, &event)?;
+                s.commit()?;
+                assert_eq!(s.stats.count, 3, "two insert attempts and one touch block");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_touched(stored(&api, &customer.token).await, now);
+        finish(&api, &request, StatusCode::OK).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_http_requests_and_replay_persist_activity() {
+        let api = api().await;
+        let customer = common::customer(&api, 1000).await;
+        let recipient = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        for (path, scope, expected) in [
+            ("/v2.0/user/me", "inquiry", StatusCode::FORBIDDEN),
+            (
+                "/v2.0/account/balance/fin_num?fintech_use_num=%FF",
+                "login inquiry transfer",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            prepare(&api, &customer.token, now, scope).await;
+            let id = new_id();
+            let before = api.state.clock.state().await.unwrap().business_time;
+            let answer = call(&api.public, "GET", path, &id, Some(&customer.token), None).await;
+            assert_eq!(answer.0, expected, "{}", answer.1);
+            assert_http_touched(&api, &customer.token, before).await;
+            assert_eq!(events(&api, &id).await, "request.completed");
+        }
+        let body = json!({
+            "bank_tran_id": common::bank_tran_id(), "fintech_use_num": customer.fin,
+            "tran_amt": "100", "tran_dtime": now.format("%Y%m%d%H%M%S").to_string(),
+            "transfer_purpose": "TR", "recv_client_name": "수취인",
+            "recv_client_bank_code": "998", "recv_client_account_num": recipient.account,
+        });
+        for replay in [false, true] {
+            prepare(&api, &customer.token, now, "login inquiry transfer").await;
+            let id = new_id();
+            let before = api.state.clock.state().await.unwrap().business_time;
+            let answer = call(
+                &api.public,
+                "POST",
+                "/v2.0/transfer/withdraw/fin_num",
+                &id,
+                Some(&customer.token),
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+            assert_http_touched(&api, &customer.token, before).await;
+            assert_eq!(
+                events(&api, &id)
+                    .await
+                    .split(',')
+                    .filter(|e| *e == "request.completed")
+                    .count(),
+                1
+            );
+            if replay {
+                assert_eq!(events(&api, &id).await, "request.completed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn older_completion_cannot_regress_activity_and_logout_is_not_revived() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let older = authenticate(&api, &customer.token, now + Duration::minutes(5)).await;
+        let newer = authenticate(&api, &customer.token, now + Duration::minutes(10)).await;
+        finish(&api, &newer, StatusCode::OK).await;
+        finish(&api, &older, StatusCode::OK).await;
+        assert_touched(stored(&api, &customer.token).await, newer.now);
+        let stale = authenticate(&api, &customer.token, now + Duration::minutes(15)).await;
+        let before = stored(&api, &customer.token).await;
+        let id = new_id();
+        let answer = call(
+            &api.public,
+            "POST",
+            "/oauth/2.0/revoke",
+            &id,
+            Some(&customer.token),
+            None,
+        )
+        .await;
+        assert_eq!(answer.0, StatusCode::OK, "{}", answer.1);
+        let logged_out = stored(&api, &customer.token).await;
+        assert_eq!((logged_out.0, logged_out.1), (before.0, before.1));
+        assert!(logged_out.2.is_some() && logged_out.3.is_some());
+        finish(&api, &stale, StatusCode::OK).await;
+        assert_eq!(stored(&api, &customer.token).await, logged_out);
+        assert_eq!(events(&api, &id).await, "logout,request.completed");
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_requests_sharing_token_both_complete() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let first = new_id();
+        let second = new_id();
+        let before = api.state.clock.state().await.unwrap().business_time;
+        let (a, b) = tokio::join!(
+            call(
+                &api.public,
+                "GET",
+                "/v2.0/user/me",
+                &first,
+                Some(&customer.token),
+                None
+            ),
+            call(
+                &api.public,
+                "GET",
+                "/v2.0/user/me",
+                &second,
+                Some(&customer.token),
+                None
+            ),
+        );
+        assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+        assert_eq!(b.0, StatusCode::OK, "{}", b.1);
+        assert_http_touched(&api, &customer.token, before).await;
+        assert_eq!(events(&api, &first).await, "request.completed");
+        assert_eq!(events(&api, &second).await, "request.completed");
+    }
+
+    #[tokio::test]
+    async fn password_reset_does_not_revive_in_flight_activity() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let request = authenticate(&api, &customer.token, now).await;
+        let before = stored(&api, &customer.token).await;
+        let hash = token_hash(&customer.token);
+        let phone: String = api
+            .state
+            .db
+            .run(move |s| {
+                s.query_row(
+                    &sql_stmt!("test.auth_deferred_phone", "sql/auth_deferred_phone.sql"),
+                    &[&hash],
+                )
+            })
+            .await
+            .unwrap();
+        let (status, body) = call(
+            &api.public,
+            "POST",
+            "/v2.0/ext/auth/password_reset/request",
+            &new_id(),
+            None,
+            Some(json!({"phone": phone})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, sms) = call(
+            &api.generator,
+            "GET",
+            &format!("/internal/v1/sms/{phone}"),
+            &new_id(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            &api.public,
+            "POST",
+            "/v2.0/ext/auth/password_reset/confirm",
+            &new_id(),
+            None,
+            Some(
+                json!({"phone": phone, "code": sms["code"], "new_password": "deferred-reset-pass"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let reset = stored(&api, &customer.token).await;
+        assert!(reset.2.is_some() && reset.3.is_some());
+        assert_eq!((reset.0, reset.1), (before.0, before.1));
+        finish(&api, &request, StatusCode::OK).await;
+        assert_eq!(stored(&api, &customer.token).await, reset);
+    }
+
+    #[tokio::test]
+    async fn timed_out_touch_rolls_back_completion_then_finish_retries() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(&api, &customer.token, now, "login inquiry transfer").await;
+        let before = stored(&api, &customer.token).await;
+        let request = authenticate(&api, &customer.token, now).await;
+        let db = api.state.db.clone();
+        let hash = token_hash(&customer.token);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = tokio::spawn(async move {
+            db.run(move |s| {
+                let _: String = s.query_row(&LOCK, &[&hash])?;
+                locked_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                    .unwrap();
+                s.rollback()
+            })
+            .await
+        });
+        locked_rx.await.unwrap();
+        let event = completion(&request);
+        let result = api
+            .state
+            .db
+            .run_in(&request.stats, move |s| {
+                outbox::record(s, &event)?;
+                s.commit()
+            })
+            .await;
+        release_tx.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+        assert!(matches!(result, Err(DbError::Busy)));
+        assert_eq!(stored(&api, &customer.token).await, before);
+        assert!(!request.stats.lock().unwrap().completion_committed);
+        assert!(request.stats.lock().unwrap().pending_touch.is_some());
+        assert!(
+            events(&api, &request.recorder.ctx.request_id)
+                .await
+                .is_empty()
+        );
+        finish(&api, &request, StatusCode::SERVICE_UNAVAILABLE).await;
+        assert_touched(stored(&api, &customer.token).await, now);
+    }
+}

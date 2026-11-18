@@ -24,7 +24,6 @@ use crate::sql_stmt;
 const SELECT_LOGIN: SqlStmt = sql_stmt!("auth.select_login", "sql/select_login.sql");
 const LOCK_CREDENTIAL: SqlStmt = sql_stmt!("auth.lock_credential", "sql/lock_credential.sql");
 const RECORD_FAILURE: SqlStmt = sql_stmt!("auth.record_failure", "sql/record_failure.sql");
-const SELECT_FAILURES: SqlStmt = sql_stmt!("auth.select_failures", "sql/select_failures.sql");
 const RESET_FAILURES: SqlStmt = sql_stmt!("auth.reset_failures", "sql/reset_failures.sql");
 const SELECT_DEVICE: SqlStmt = sql_stmt!("auth.select_device", "sql/select_device.sql");
 const INSERT_DEVICE: SqlStmt = sql_stmt!("auth.insert_device", "sql/insert_device.sql");
@@ -137,10 +136,8 @@ async fn login(
                 }
                 match outcome {
                     Outcome::WrongPassword => {
-                        s.execute(&RECORD_FAILURE, &[&(now + LOCK_FOR), id])?;
-                        let (count, _): (i64, Option<DateTime<FixedOffset>>) =
-                            s.query_row(&SELECT_FAILURES, &[id])?;
-                        failures = count;
+                        failures =
+                            s.insert_returning_id(&RECORD_FAILURE, &[&(now + LOCK_FOR), id])?;
                     }
                     Outcome::Success => {
                         // The password was verified before this transaction; if it changed

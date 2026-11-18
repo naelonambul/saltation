@@ -4,6 +4,9 @@
 use bank::shared::db::{Db, DbConfig, MIGRATIONS, SqlStmt};
 use bank::sql_stmt;
 
+#[path = "migrations_tuning/mod.rs"]
+mod tuning;
+
 const COUNT_MIGRATIONS: SqlStmt = sql_stmt!("test.count_migrations", "sql/count_migrations.sql");
 const OUTBOX_TABLESPACE: SqlStmt = sql_stmt!("test.outbox_tablespace", "sql/outbox_tablespace.sql");
 const COUNT_TABLES: SqlStmt = sql_stmt!("test.count_tables", "sql/count_tables.sql");
@@ -24,7 +27,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=17).collect::<Vec<_>>()
+        (1..=20).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -35,6 +38,36 @@ async fn migrations_apply_once_and_are_recorded() {
 
     let second = db.migrate().await.expect("second run");
     assert_eq!(second, 0, "a second run applies nothing");
+
+    db.run(|s| {
+        let columns = sql_stmt!("test.tune_index_columns", "sql/tune_index_columns.sql");
+        for (index, expected) in [
+            (
+                "PASSWORD_RESET_CUSTOMER_IX",
+                vec!["CUSTOMER_ID", "RESET_ID"],
+            ),
+            ("DAILY_CLOSE_PK", vec!["BUSINESS_DATE", "ACCOUNT_ID"]),
+        ] {
+            let actual: Vec<String> = s.query_all(&columns, &[&index])?;
+            assert_eq!(actual, expected, "{index}");
+        }
+        let compression: (String, i64, String) = s.query_row(
+            &sql_stmt!(
+                "test.tune_index_compression",
+                "sql/tune_index_compression.sql"
+            ),
+            &[],
+        )?;
+        assert_eq!(compression, ("ENABLED".into(), 1, "UNIQUE".into()));
+        let removed: i64 = s.query_row(
+            &sql_stmt!("test.tune_removed_indexes", "sql/tune_removed_indexes.sql"),
+            &[],
+        )?;
+        assert_eq!(removed, 0);
+        Ok(())
+    })
+    .await
+    .expect("tuned index definitions");
 
     let (recorded, outbox_ts, tables) = db
         .run(|s| {

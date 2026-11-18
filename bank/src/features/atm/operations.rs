@@ -176,19 +176,18 @@ fn reject(
     })
 }
 fn locked(s: &mut Session, p: &Plan, row: &SessionRow) -> Result<bool, DbError> {
-    let credential: Option<(String, i64, Option<At>)> = s.query_opt(&CREDENTIAL, &[&row.1])?;
-    Ok(credential.is_some_and(|(_, _, until)| until.is_some_and(|at| at > p.now)))
+    let until: Option<Option<At>> = s.query_opt(&SELECT_LOCK_STATUS, &[&row.1])?;
+    Ok(until.flatten().is_some_and(|at| at > p.now))
 }
 fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
     let unauthorized = || ResultRow::error(StatusCode::UNAUTHORIZED, codes::UNAUTHORIZED);
     let Some(hash) = &p.hash else {
         return Ok(unauthorized());
     };
-    let found: Option<String> = s.query_opt(&LOCK_SESSION, &[hash])?;
-    if found.is_none() {
+    let found: Option<SessionRow> = s.query_opt(&LOCK_SESSION, &[hash])?;
+    let Some(row) = found else {
         return Ok(unauthorized());
-    }
-    let row: SessionRow = s.query_row(&SESSION, &[hash])?;
+    };
     {
         let mut identity = p.identity.lock().unwrap_or_else(|e| e.into_inner());
         identity.terminal_id = Some(row.5.clone());
