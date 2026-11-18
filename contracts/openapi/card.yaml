@@ -1,0 +1,148 @@
+openapi: 3.1.0
+info:
+  title: Saltation card network interface
+  version: 0.1.0
+  description: >
+    Available on the generator listener. Obtain a card-scope bearer token
+    from POST /oauth/2.0/token using the client credentials grant.
+    Amounts and coordinates are JSON strings. Card numbers are synthetic.
+servers:
+  - url: http://localhost:8081
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    Envelope:
+      type: object
+      required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
+      properties:
+        api_tran_id: { type: string, maxLength: 40 }
+        api_tran_dtm: { type: string, pattern: '^[0-9]{17}$' }
+        rsp_code: { type: string, pattern: '^[A-Z][0-9]{4}$' }
+        rsp_message: { type: string }
+        request_id: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+    Coordinate:
+      type: string
+      pattern: '^-?[0-9]+(\.[0-9]{1,6})?$'
+    Authorization:
+      type: object
+      required: [idempotency_key, card_no, amount, currency, merchant_name, mcc, country, entry_mode]
+      properties:
+        idempotency_key: { type: string, pattern: '^[ -~]{1,40}$' }
+        card_no: { type: string, pattern: '^0000[0-9]{12}$', description: Synthetic card number with valid Luhn check digit. }
+        amount: { type: string, pattern: '^[0-9]*[1-9][0-9]*$', description: Positive whole currency units. JPY must be a multiple of 100. }
+        currency: { enum: [KRW, USD, EUR, JPY, CNY] }
+        merchant_name: { type: string, minLength: 1, maxLength: 60 }
+        mcc: { type: string, pattern: '^[0-9]{4}$' }
+        country: { type: string, pattern: '^[A-Z]{2}$', description: ISO 3166-1 alpha-2. }
+        entry_mode: { enum: [in_person, online] }
+        latitude: { $ref: '#/components/schemas/Coordinate', description: Inclusive range -90 to 90. }
+        longitude: { $ref: '#/components/schemas/Coordinate', description: Inclusive range -180 to 180. }
+      if:
+        properties:
+          entry_mode: { const: in_person }
+      then:
+        required: [latitude, longitude]
+      else:
+        properties: { latitude: false, longitude: false }
+    Decision:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [approved, decline_reason, krw_amount, bank_rsp_code, bank_rsp_message]
+          properties:
+            approved: { type: boolean }
+            decline_reason: { enum: [null, unknown_card, blocked_card, closed_account, insufficient_balance] }
+            krw_amount: { type: string, pattern: '^[1-9][0-9]{0,11}$' }
+            bank_rsp_code: { enum: ['000', '403', '404', '405'] }
+            bank_rsp_message: { type: string }
+    Approved:
+      allOf:
+        - $ref: '#/components/schemas/Decision'
+        - properties:
+            approved: { const: true }
+            decline_reason: { type: 'null' }
+            rsp_code: { const: A0000 }
+            bank_rsp_code: { const: '000' }
+    Declined:
+      allOf:
+        - $ref: '#/components/schemas/Decision'
+        - properties:
+            approved: { const: false }
+            decline_reason: { type: string }
+            rsp_code: { const: A0004 }
+            bank_rsp_code: { enum: ['403', '404', '405'] }
+    Busy:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - properties:
+            rsp_code: { const: A0013 }
+paths:
+  /card/v1/authorize:
+    post:
+      summary: Authorize and immediately debit a card payment
+      description: >
+        The key is scoped to the network client. Resend the same key and
+        authorization details to retrieve the original decision.
+      security: [{ bearer: [] }]
+      parameters:
+        - name: X-Request-Id
+          in: header
+          schema: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+        - name: X-Sim-Ip
+          in: header
+          schema: { type: string, maxLength: 45 }
+        - name: X-Sim-Region
+          in: header
+          schema: { type: string, maxLength: 10 }
+        - name: X-Sim-Device
+          in: header
+          schema: { type: string, maxLength: 64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Authorization' }
+      responses:
+        '200':
+          description: Approved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approved' }
+        '422':
+          description: Declined
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Declined' }
+        '400':
+          description: Malformed authorization message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '401':
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '403':
+          description: Token lacks card scope
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '409':
+          description: Conflicting idempotency key or request ID
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }
+        '503':
+          description: Temporarily unavailable. Retry with the same key and authorization details.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Busy' }
+        '500':
+          description: System error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope' }

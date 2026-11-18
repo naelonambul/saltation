@@ -1,4 +1,4 @@
-//! Synthetic debit card seeding; no payment or customer-facing routes.
+//! Synthetic debit card seeding and card network authorizations.
 use std::io::{self, Read};
 use std::sync::Arc;
 
@@ -15,9 +15,12 @@ use crate::shared::db::{DbError, SqlStmt};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
-// Pure preparation for the later authorization route; deliberately not wired yet.
-#[allow(dead_code)]
 mod fx;
+mod payment;
+
+pub fn payment_router() -> Router<AppState> {
+    Router::new().route("/card/v1/authorize", post(payment::authorize))
+}
 
 const PREFIX: &str = "0000";
 const MAX_BATCH: usize = 500;

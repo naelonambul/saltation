@@ -1,6 +1,8 @@
 //! Helpers shared by the integration tests.
 #![allow(dead_code)]
 
+pub mod card_network;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
