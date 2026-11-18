@@ -1,14 +1,17 @@
 //! Atomic daily ledger reconciliation under the clock's exclusive barrier.
 use crate::shared::clock::kst;
-use crate::shared::db::{Db, DbError, SqlStmt};
+use crate::shared::db::{Db, DbError, SqlStmt, ToSql};
 use crate::shared::rollover::{self, JobFuture, RolloverJob};
 use crate::sql_stmt;
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use std::collections::{BTreeMap, BTreeSet};
 const DELETE: SqlStmt = sql_stmt!("daily_close.delete", "sql/delete.sql");
 const INSERT: SqlStmt = sql_stmt!("daily_close.insert", "sql/insert.sql");
 const TRANSFERS: SqlStmt = sql_stmt!("daily_close.transfers", "sql/transfers.sql");
-const COUNT_TRANSFERS: SqlStmt =
-    sql_stmt!("daily_close.count_transfers", "sql/count_transfers.sql");
+const MARK_TRANSFER_VIOLATIONS: SqlStmt = sql_stmt!(
+    "daily_close.mark_transfer_violations",
+    "sql/mark_transfer_violations.sql"
+);
 const REPORT: SqlStmt = sql_stmt!("daily_close.report", "sql/report.sql");
 
 pub struct DailyCloseJob;
@@ -46,8 +49,30 @@ pub async fn close_date(
         .run(move |s| {
             s.execute(&DELETE, &[&date_text])?;
             s.execute(&INSERT, &[&date_text, &start, &end])?;
-            s.execute(&TRANSFERS, &[&start, &end, &date_text])?;
-            let transfer_violations: i64 = s.query_row(&COUNT_TRANSFERS, &[&start, &end])?;
+            let violations: Vec<(i64, String, Option<i64>)> =
+                s.query_all(&TRANSFERS, &[&start, &end])?;
+            let mut transfer_ids = BTreeSet::new();
+            let mut details = BTreeMap::<i64, String>::new();
+            for (id, kind, account) in violations {
+                transfer_ids.insert(id);
+                if let Some(account) = account {
+                    let detail = format!("transfer {id}: {kind} rows violate F-21");
+                    details
+                        .entry(account)
+                        .and_modify(|current| {
+                            if detail < *current {
+                                current.clone_from(&detail);
+                            }
+                        })
+                        .or_insert(detail);
+                }
+            }
+            let updates: Vec<Vec<&dyn ToSql>> = details
+                .iter()
+                .map(|(account, detail)| vec![detail as &dyn ToSql, detail, account, &date_text])
+                .collect();
+            s.execute_batch(&MARK_TRANSFER_VIOLATIONS, &updates)?;
+            let transfer_violations = transfer_ids.len() as i64;
             let (accounts, mismatches): (i64, i64) = s.query_row(&REPORT, &[&date_text])?;
             rollover::mark_finished(s, date, "daily_close", at)?;
             s.commit()?;

@@ -92,6 +92,7 @@ tune_reset_outbox() {
 
 tune_capture() (
   local output entry label run failed=0
+  python3 -B "$root/scripts/dev/oracle-tune/test_counters.py" || return
   output="$root/.evidence/oracle-tuning/$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$output"
   { uname -a; echo 'driver container: --cpus 2 --memory 4g';

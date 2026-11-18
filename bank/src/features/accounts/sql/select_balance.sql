@@ -1,6 +1,6 @@
 -- accounts.select_balance: one of the customer's accounts by fintech number.
 -- Access path: FINTECH_ACCOUNT and ACCOUNT primary keys; account_transaction_date_ix for latest date; detail primary keys for maturity.
-SELECT a.account_id, a.account_no, a.balance, a.subtype, p.name, a.opened_at, (SELECT TO_CHAR(MAX(tx.business_date), 'YYYYMMDD')
+SELECT a.account_id, a.account_no, a.balance, a.subtype, p.name, a.opened_at, (SELECT /*+ NO_UNNEST INDEX(tx account_transaction_date_ix) */ TO_CHAR(MAX(tx.business_date), 'YYYYMMDD')
        FROM account_transaction tx WHERE tx.account_id = a.account_id),
        TO_CHAR(COALESCE(d.maturity_date, l.maturity_date), 'YYYYMMDD')
 FROM fintech_account f

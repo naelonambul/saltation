@@ -40,6 +40,9 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(14, "0014_request_attempts"),
     migration!(15, "0015_reused_request_id"),
     migration!(16, "0016_atm"),
+    migration!(17, "0017_tune_predicates"),
+    migration!(18, "0018_tune_unused_index"),
+    migration!(19, "0019_tune_daily_close"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

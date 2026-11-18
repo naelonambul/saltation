@@ -1,5 +1,5 @@
 -- daily_close.insert: closes every account open during the date.
--- Access path: ACCOUNT scan; ACCOUNT_TRANSACTION_OCCURRED_IX; DAILY_CLOSE_DATE_IX; ACCOUNT_STATUS_HISTORY_IX.
+-- Access path: ACCOUNT scan; ACCOUNT_TRANSACTION_OCCURRED_IX; DAILY_CLOSE_PK date-leading range; ACCOUNT_STATUS_HISTORY_IX.
 INSERT INTO daily_close (account_id, business_date, opening_balance, closing_balance, verified, mismatch_detail)
 WITH bounds AS (SELECT TO_DATE(:business_date, 'YYYY-MM-DD') d, :start_at lo, :end_at hi FROM dual),
 rows_of_date AS (

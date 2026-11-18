@@ -5,6 +5,9 @@
 
 mod common;
 
+#[path = "transfers_tuning/mod.rs"]
+mod tuning;
+
 use std::sync::Arc;
 
 use axum::http::StatusCode;

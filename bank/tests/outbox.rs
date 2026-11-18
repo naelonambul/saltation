@@ -6,6 +6,9 @@
 
 mod common;
 
+#[path = "outbox_tuning/mod.rs"]
+mod tuning;
+
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;

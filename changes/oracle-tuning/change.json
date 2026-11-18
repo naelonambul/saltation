@@ -12,6 +12,7 @@
     "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
   },
   "write_scope": [
+    "bank/Dockerfile",
     "bank/migrations/**",
     "bank/src/**",
     "bank/tests/**",
@@ -21,11 +22,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:a983506af237220d1a9cd28028c61a9fd84f496a70fdd01f0ed74ec8a883bb17",
+      "sha256": "sha256:ae59a754c9abdd5adb5e6722ebdf5127a1b5f5c2d06b941c54ae8baa94578381",
       "by": "naelonambul",
-      "at": "2026-11-16T12:29:31Z",
-      "write_scope_sha256": "sha256:5be14c7203e6d99ac90ff450962dc8e29d06c02230a21e4f47bb646b96f0527e",
-      "note": "\ubcf4\ub0b4\ub3c4\ub418. \uc2b9\uc778\ud558\uace0 \uc9c4\ud589\ud558\uc790 (sha256 a983506a...)"
+      "at": "2026-11-17T04:40:56Z",
+      "write_scope_sha256": "sha256:100da64990506dbcc21c379073df37f34785da6642a086bd417bdfeb6ae68025",
+      "note": "\uc2b9\uc778\u3141 \u2014 current plan ae59a754c9abdd5adb5e6722ebdf5127a1b5f5c2d06b941c54ae8baa94578381 and bank/Dockerfile scope; delegated recording in reply to explicit approval request."
     }
   ]
 }

@@ -6,6 +6,7 @@
 #   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$root/scripts/dev/cargo-container.sh"
 project="saltation-it"
 
 # State lives outside the checkout (CI checkouts delete untracked files), so the
@@ -124,7 +125,8 @@ SQL
 dev_image_built=no
 dev_image() {
   if [ "$dev_image_built" = no ]; then
-    docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null
+    docker build -q --target dev -t saltation/bank-dev:local "$root/bank" >/dev/null || return
+    cargo_cache_capacity saltation/bank-dev:local "$root/scripts/dev" || return
     dev_image_built=yes
   fi
 }
@@ -139,18 +141,17 @@ cargo_test() {
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
+  [ -z "${TUNE_SEED_AT:-}" ] || extra_env+=(-e TUNE_SEED_AT)
   [ "${SALTATION_TEST_EXPECT_LIVE:-}" = 1 ] && extra_env+=(-e SALTATION_TEST_EXPECT_LIVE=1)
   if [ -n "${TUNE_COVERAGE_OUT:-}" ]; then
     extra_env+=(-e "TUNE_COVERAGE_OUT=/coverage/$(basename "$TUNE_COVERAGE_OUT")" -v "$(dirname "$TUNE_COVERAGE_OUT"):/coverage")
   fi
-  local deadline_command=()
-  [ -z "${CARGO_TEST_TIMEOUT:-}" ] || deadline_command=(timeout "$CARGO_TEST_TIMEOUT")
-  dev_image
-  ${deadline_command[@]+"${deadline_command[@]}"} docker run --rm --name saltation-it-cargo --network "${project}_data" \
+  dev_image || return
+  cargo_container --rm --name saltation-it-cargo --network "${project}_data" \
     -e SALTATION_DB_USER="${IT_DB_USER:-saltation}" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
     -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
-    -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
-    saltation/bank-dev:local cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
+    -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
+    saltation/bank-dev:local python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile debug -- cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
 }
 
 # Requests and acknowledgements delimit only the measured benchmark window.
@@ -235,7 +236,7 @@ LIMITS
   fi
   output="${BENCH_OUTPUT:-$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER}"
   mkdir -p "$output"
-  dev_image
+  dev_image || return
   for entry in "${entries[@]}"; do
     workload="${entry%:*}"; concurrency="${entry#*:}"
     if [ "${BENCH_RATE+x}" = x ]; then
@@ -256,7 +257,7 @@ LIMITS
         BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" &
         watcher=$!
       fi
-      if ! docker run --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
+      if ! cargo_container --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
         -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
         -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
         ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
@@ -264,8 +265,8 @@ LIMITS
         -e BENCH_CPUS=2 -e BENCH_MEMORY=4g -e BENCH_OUT="/out/${BENCH_RESULT_NAME:-bench.jsonl}" \
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$output":/out \
         -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts \
-        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target:/target \
-        saltation/bank-dev:local sh -c 'cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
+        -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
+        saltation/bank-dev:local sh -c 'python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile release -- cargo test --release --locked --test driver_bench -- --ignored --exact driver_bench --nocapture; status=$?; chown -R "$HOST_UID:$HOST_GID" /out; exit "$status"'; then
         failed=1
       fi
       if [ -n "$watcher" ]; then
@@ -443,6 +444,13 @@ run_target() {
       db_pool_isolated
       ;;
     migrations)  reset_schema; cargo_test migrations ;;
+    tune-migrations) cargo_test migrations -- --ignored --exact tuning::populated_migrations_preserve_data ;;
+    tune-coverage)
+      local output="$root/.evidence/oracle-tuning/$(date -u +%Y%m%dT%H%M%SZ)-coverage"
+      mkdir -p "$output"
+      TUNE_COVERAGE_OUT="$output/xplan-coverage.txt" IT_DB_USER=saltation_tune cargo_test driver_bench -- --ignored --exact tune_coverage --nocapture >"$output/coverage.txt" 2>&1
+      echo "tune-coverage evidence: $output"
+      ;;
     backfill)    reset_schema; cargo_test backfill ;;
     listeners)   cargo_test listeners ;;
     auth)        cargo_test auth ;;

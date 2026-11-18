@@ -109,15 +109,28 @@ pub async fn relay_once(
 /// Runs the relay until the process stops, backing off while MongoDB or
 /// Oracle is unavailable, and exporting the backlog gauges.
 pub async fn run(db: Db, mongo_uri: String) {
-    let mut backoff = Duration::from_millis(500);
-    let mut events: Option<Collection<Document>> = None;
+    // Both futures belong to this run: aborting it cancels the sampler too.
+    tokio::join!(sample_backlog(&db), deliver(&db, &mongo_uri));
+}
+
+async fn sample_backlog(db: &Db) {
+    let mut timer = tokio::time::interval(Duration::from_secs(3));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        if let Ok((count, age)) = outbox::backlog(&db).await {
+        timer.tick().await;
+        if let Ok((count, age)) = outbox::backlog(db).await {
             metrics::gauge!("bank_outbox_undelivered").set(count as f64);
             metrics::gauge!("bank_outbox_oldest_age_seconds").set(age);
         }
+    }
+}
+
+async fn deliver(db: &Db, mongo_uri: &str) {
+    let mut backoff = Duration::from_millis(500);
+    let mut events: Option<Collection<Document>> = None;
+    loop {
         if events.is_none() {
-            match events_collection(&mongo_uri).await {
+            match events_collection(mongo_uri).await {
                 Ok(c) => events = Some(c),
                 Err(e) => {
                     tracing::warn!(error = %e, "outbox relay: MongoDB client not ready");
@@ -130,7 +143,7 @@ pub async fn run(db: Db, mongo_uri: String) {
         let Some(collection) = events.as_ref() else {
             continue;
         };
-        match relay_once(&db, collection, true).await {
+        match relay_once(db, collection, true).await {
             Ok(0) => {
                 backoff = Duration::from_millis(500);
                 tokio::time::sleep(IDLE_POLL).await;

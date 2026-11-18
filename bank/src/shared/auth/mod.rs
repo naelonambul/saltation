@@ -24,8 +24,7 @@ use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
 const SELECT_TOKEN: SqlStmt = sql_stmt!("auth.select_token", "sql/select_token.sql");
-const EXTEND_TOKEN: SqlStmt = sql_stmt!("auth.extend_token", "sql/extend_token.sql");
-const TOUCH_SESSION: SqlStmt = sql_stmt!("auth.touch_session", "sql/touch_session.sql");
+const DEFERRED_TOUCH: SqlStmt = sql_stmt!("auth.deferred_touch", "sql/deferred_touch.sql");
 
 /// Session and token lifetime: 30 minutes of business-time inactivity.
 pub const SESSION_IDLE: Duration = Duration::minutes(30);
@@ -90,6 +89,42 @@ pub fn user_seq_no(customer_id: i64) -> String {
     format!("{customer_id:010}")
 }
 
+/// Request-local activity, applied only with its committed completion.
+#[derive(Clone)]
+pub struct PendingTouch {
+    pub token_hash: String,
+    pub session_id: String,
+    pub now: chrono::DateTime<chrono::FixedOffset>,
+}
+
+impl std::fmt::Debug for PendingTouch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingTouch { .. }")
+    }
+}
+
+impl PendingTouch {
+    pub(crate) fn apply(
+        &self,
+        session: &mut crate::shared::db::Session,
+    ) -> Result<(), crate::shared::db::DbError> {
+        session
+            .execute(
+                &DEFERRED_TOUCH,
+                &[&self.token_hash, &self.session_id, &self.now],
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                // execute/timed records the original Oracle failure before remapping.
+                if error.ora_code() == Some(30006) {
+                    crate::shared::db::DbError::Busy
+                } else {
+                    error
+                }
+            })
+    }
+}
+
 /// The authenticated customer of a request.
 #[derive(Debug, Clone)]
 pub struct AuthCustomer {
@@ -150,9 +185,6 @@ impl FromRequestParts<AppState> for AuthCustomer {
                 let Some((customer_id, customer_no, scope, session_id, device_id)) = row else {
                     return Ok(None);
                 };
-                s.execute(&EXTEND_TOKEN, &[&(now + SESSION_IDLE), &hash])?;
-                s.execute(&TOUCH_SESSION, &[&now, &session_id])?;
-                s.commit()?;
                 Ok(Some(AuthCustomer {
                     device_id,
                     customer_id,
@@ -172,6 +204,14 @@ impl FromRequestParts<AppState> for AuthCustomer {
                 }
             })?;
         let customer = found.ok_or_else(unauthorized)?;
+        stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_touch = Some(PendingTouch {
+            token_hash: customer.token_hash.clone(),
+            session_id: customer.session_id.clone(),
+            now,
+        });
         if let Some(slot) = parts
             .extensions
             .get::<crate::shared::outcome::IdentitySlot>()

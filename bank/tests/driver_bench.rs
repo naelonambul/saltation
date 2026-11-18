@@ -30,6 +30,10 @@ const HISTORY: SqlStmt = sql_stmt!("bench.history", "sql/driver_bench_history.sq
 const OUTBOX: SqlStmt = sql_stmt!("bench.outbox", "sql/driver_bench_outbox.sql");
 const BALANCES: SqlStmt = sql_stmt!("bench.balances", "sql/driver_bench_balances.sql");
 const COUNT: SqlStmt = sql_stmt!("bench.count", "sql/driver_bench_count.sql");
+const OBSERVE_BACKLOG: SqlStmt = sql_stmt!(
+    "bench.observe_backlog",
+    "sql/driver_bench_observe_backlog.sql"
+);
 const TRANSFER: &str = "/v2.0/transfer/withdraw/fin_num";
 const OPENING: i64 = 100_000_000;
 
@@ -167,9 +171,15 @@ async fn tune_prepare() {
     assert_eq!(env("SALTATION_DB_USER"), "saltation_tune");
     let db = Db::connect(&DbConfig::from_env().expect("config")).expect("connect");
     db.migrate().await.expect("migrate tune schema");
-    Clock::init(db.clone(), Registry::default())
+    let clock = Clock::init(db.clone(), Registry::default())
         .await
         .expect("clock");
+    if let Ok(at) = std::env::var("TUNE_SEED_AT") {
+        let at = DateTime::parse_from_rfc3339(&at).expect("TUNE_SEED_AT must be RFC 3339");
+        // The schema is still empty, so the clock permits a past reference date.
+        // Reusing that date keeps overnight captures on the same seed window.
+        clock.set(at).await.expect("set tune reference time");
+    }
 }
 
 #[tokio::test]
@@ -344,6 +354,13 @@ async fn queue_events(db: &Db, ids: Vec<String>, now: DateTime<FixedOffset>) {
     .expect("outbox fixture");
 }
 
+// Keep completion polling out of the production sampler's cursor counters.
+async fn observe_backlog(db: &Db) -> (i64, f64) {
+    db.run(|s| s.query_row(&OBSERVE_BACKLOG, &[]))
+        .await
+        .expect("relay backlog")
+}
+
 async fn drain_events(
     db: &Db,
     events: &mongodb::Collection<mongodb::bson::Document>,
@@ -354,7 +371,7 @@ async fn drain_events(
     let deadline = Instant::now() + Duration::from_secs(300 + ids.len() as u64 / 100);
     loop {
         assert!(Instant::now() < deadline, "relay did not drain fixture");
-        if outbox::backlog(db).await.expect("relay backlog").0 == 0 {
+        if observe_backlog(db).await.0 == 0 {
             let mut delivered = 0;
             // Bound the Mongo command size even for the default long fixture.
             for batch in ids.chunks(1000) {
@@ -813,6 +830,7 @@ async fn driver_bench() {
         }
         // Reparse the backlog cursor after reset and population, before snapshots.
         outbox::backlog(&db).await.expect("backlog warm-up");
+        observe_backlog(&db).await;
     }
     let duplicate_body = if workload == "duplicate" {
         let n = cursor.fetch_add(1, Ordering::Relaxed);

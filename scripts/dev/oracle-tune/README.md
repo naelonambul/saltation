@@ -6,6 +6,13 @@ only `SALTATION_TUNE`, using the existing test password and the reset script's
 V$ grants are retained. Capture runs as SYSDBA, so no extra diagnostic grants
 are required on the application user. SQL*Plus input uses AL32UTF8.
 
+For comparisons that cross a calendar date, set `TUNE_SEED_AT` to the same
+RFC 3339 business timestamp on every new seed, for example
+`TUNE_SEED_AT=2026-11-17T08:00:00+09:00 scripts/dev/it-oracle.sh tune-seed`.
+It sets the freshly initialized, still-empty schema's business clock through
+`Clock::set` before inserting customers. Without it the existing clock
+initialization is unchanged. Check the persisted seed dates before comparing.
+
 Defaults: `TUNE_CUSTOMERS=20000 TUNE_YEARS=3 TUNE_MAX_GB=25`. Start with
 `TUNE_CUSTOMERS=500 TUNE_YEARS=1`. Before dropping the tune user, the script checks
 free space on `/opt/oracle/oradata` inside the Oracle container (30 GiB minimum)
@@ -142,8 +149,21 @@ bytes; a zero Docker limit is reported as `unlimited`.
 `counters.txt` contains session counter deltas per successful request and the
 absolute logon delta for each captured entry and run, followed by per-cursor
 executions per successful request and buffer gets per execution. Session counters
-match SID and serial number; newly observed sessions contribute their end values.
-Zero denominators produce `n/a`; unknown cursor deltas produce `?`.
+match SID and serial number.
+If the session identity/statistic sets change or a counter decreases, session
+deltas are unknown (`?`): summing only end survivors loses the work of retired
+sessions and can make the old pool appear artificially cheaper. Stable endpoint
+identities alone cannot exclude connections opened and closed between snapshots.
+The report also shows database-lifetime counter deltas already present in the
+raw snapshots. These retain retired-session work in the snapshot container,
+but may include diagnostic and background activity. Compare them only across the same isolated capture protocol;
+do not attribute their raw totals or logon counts exclusively to the tune schema.
+The snapshot observer and window-bound writer can contribute round trips and
+commits; do not subtract an assumed observer logon count (SYS authenticates in
+the root before switching to the PDB). Diagnostic work is not silently treated
+as application work.
+Zero denominators produce `n/a`; unknown cursor deltas produce `?`. Counter
+regression tests run before every capture.
 
 Outbox drain and truncate happen before the benchmark process and its warm-up.
 After fixture population, the benchmark warms the backlog query before the start

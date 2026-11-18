@@ -1,7 +1,8 @@
 //! SQL coverage only: invoked by driver_bench's ignored tune_coverage wrapper.
 //! Requires an already migrated and populated SALTATION_TUNE schema. No commits or DDL.
-use bank::shared::db::{Db, DbConfig, DbError, Session, SqlStmt};
+use bank::shared::db::{Db, DbConfig, DbError, Session, SqlStmt, ToSql};
 use chrono::{DateTime, Duration, FixedOffset, TimeZone};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 type At = DateTime<FixedOffset>;
@@ -163,10 +164,14 @@ fn cover(s: &mut Session) -> Result<(), DbError> {
         sql: "INSERT INTO account (account_no, customer_id, terms_id, subtype, status, opened_at) VALUES (:account_no, :customer, 1, 'DEMAND', 'ACTIVE', :at) RETURNING account_id INTO :id",
     }, &[&account_no, &customer, &old])?;
 
-    // A deliberately malformed one-leg internal transfer exercises both daily
-    // reconciliation statements' violation branch, without touching live rows.
+    // Malformed one-leg and empty transfers exercise the single daily-close
+    // aggregation and account marking, without touching live rows.
     let transfer: i64 = s.insert_returning_id(&SqlStmt {
         name: "tune.coverage.transfer",
+        sql: "INSERT INTO transfer (kind, amount, occurred_at) VALUES ('transfer', 1, :at) RETURNING transfer_id INTO :id",
+    }, &[&now])?;
+    let empty_transfer: i64 = s.insert_returning_id(&SqlStmt {
+        name: "tune.coverage.empty_transfer",
         sql: "INSERT INTO transfer (kind, amount, occurred_at) VALUES ('transfer', 1, :at) RETURNING transfer_id INTO :id",
     }, &[&now])?;
     fixture(
@@ -184,7 +189,17 @@ fn cover(s: &mut Session) -> Result<(), DbError> {
         query_all,
         "accounts",
         "select_transactions_asc",
-        &[&account, &start, &end, &"A", &"A", &"A", &0i64, &26i64]
+        &[
+            &account,
+            &start,
+            &end,
+            &"A",
+            &"A",
+            &"A",
+            &0i64,
+            &i64::MAX,
+            &26i64
+        ]
     );
     assert_eq!(rows.len(), 1, "ascending history fixture");
 
@@ -193,17 +208,18 @@ fn cover(s: &mut Session) -> Result<(), DbError> {
         "UPDATE customer_credential SET failed_count = 4, locked_until = NULL WHERE customer_id = :id",
         &[&customer],
     )?;
-    production!(
+    let failures = production!(
         s,
-        execute,
+        insert_returning_id,
         "auth",
         "record_failure",
         &[&(now + Duration::minutes(30)), &customer]
     );
-    let (failures, locked): (i64, Option<At>) =
-        production!(s, query_row, "auth", "select_failures", &[&customer]);
     assert_eq!(failures, 5);
-    assert!(locked.is_some());
+    let (_, _, _, stored_failures, locked): (i64, String, String, i64, Option<At>) =
+        production!(s, query_row, "auth", "select_login", &[&phone]);
+    assert_eq!(stored_failures, failures);
+    assert_eq!(locked, Some(now + Duration::minutes(30)));
 
     fixture(
         s,
@@ -228,12 +244,19 @@ fn cover(s: &mut Session) -> Result<(), DbError> {
             &unique,
         ],
     )?;
-    let _: String = production!(s, query_row, "atm", "lock_session", &[&token_hash]);
-    let _: (String, String, At, Option<At>, String, String) =
-        production!(s, query_row, "atm", "session", &[&token_hash]);
-    let _: String = production!(s, query_row, "atm", "lock_credential", &[&account_no]);
-    let _: (String, i64, Option<At>) =
-        production!(s, query_row, "atm", "credential", &[&account_no]);
+    let session: (String, String, At, Option<At>, String, String) =
+        production!(s, query_row, "atm", "lock_session", &[&token_hash]);
+    assert_eq!(session.0, unique);
+    assert_eq!(session.1, account_no);
+    assert_eq!(session.2, expires);
+    assert!(session.3.is_none());
+    assert_eq!(session.4, unique);
+    assert_eq!(session.5, terminal);
+    let credential: (String, i64, Option<At>) =
+        production!(s, query_row, "atm", "lock_credential", &[&account_no]);
+    assert_eq!(credential, ("ACTIVE".into(), 0, None));
+    let locked: Option<At> = production!(s, query_row, "atm", "select_lock_status", &[&account_no]);
+    assert!(locked.is_none());
 
     let _: (i64, String) =
         production!(s, query_row, "password_reset", "select_customer", &[&phone]);
@@ -375,22 +398,67 @@ fn cover(s: &mut Session) -> Result<(), DbError> {
         production!(s, query_all, "deposits", "candidates", &[&date]);
     assert!(deposits.iter().any(|row| row.0 == deposit));
 
-    let violations: i64 = production!(
-        s,
-        query_row,
-        "daily_close",
-        "count_transfers",
-        &[&start, &end]
+    let violations: Vec<(i64, String, Option<i64>)> =
+        production!(s, query_all, "daily_close", "transfers", &[&start, &end]);
+    assert!(violations.iter().any(|row| row.0 == transfer));
+    assert_eq!(
+        violations
+            .iter()
+            .filter(|row| row.0 == empty_transfer)
+            .count(),
+        1,
+        "empty malformed transfer counted exactly once"
     );
-    assert!(violations >= 1);
-    let changed = production!(
-        s,
-        execute,
-        "daily_close",
-        "transfers",
-        &[&start, &end, &date.to_string()]
+    assert!(
+        violations
+            .iter()
+            .any(|row| row.0 == empty_transfer && row.2.is_none())
     );
+    let mut transfer_ids = BTreeSet::new();
+    let mut details = BTreeMap::<i64, String>::new();
+    for (id, kind, account) in violations {
+        transfer_ids.insert(id);
+        if let Some(account) = account {
+            let detail = format!("transfer {id}: {kind} rows violate F-21");
+            details
+                .entry(account)
+                .and_modify(|current| {
+                    if detail < *current {
+                        current.clone_from(&detail);
+                    }
+                })
+                .or_insert(detail);
+        }
+    }
+    assert!(transfer_ids.len() >= 2);
+    assert_eq!(
+        details.get(&account),
+        Some(&format!("transfer {transfer}: transfer rows violate F-21"))
+    );
+    let date_text = date.to_string();
+    let updates: Vec<Vec<&dyn ToSql>> = details
+        .iter()
+        .map(|(account, detail)| vec![detail as &dyn ToSql, detail, account, &date_text])
+        .collect();
+    production!(
+        s,
+        execute_batch,
+        "daily_close",
+        "mark_transfer_violations",
+        &updates
+    );
+    let (changed, detail): (i64, String) = s.query_row(
+        &SqlStmt {
+            name: "tune.coverage.marked",
+            sql: "SELECT COUNT(*), MIN(mismatch_detail) FROM daily_close WHERE account_id = :account AND business_date = :business_date AND verified = 'N'",
+        },
+        &[&account, &date],
+    )?;
     assert!(changed >= 1);
+    assert_eq!(
+        detail,
+        format!("transfer {transfer}: transfer rows violate F-21")
+    );
 
     // Match DormancyJob's UTC NaiveDateTime bind, including its inclusive date rule.
     let cutoff = (date - Duration::days(365) + Duration::days(1))
