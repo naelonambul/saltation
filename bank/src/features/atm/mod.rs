@@ -24,11 +24,11 @@ const PIN_HASH: SqlStmt = sql_stmt!("atm.pin_hash", "sql/pin_hash.sql");
 const LOCK_TERMINAL: SqlStmt = sql_stmt!("atm.lock_terminal", "sql/lock_terminal.sql");
 const TERMINAL: SqlStmt = sql_stmt!("atm.terminal", "sql/terminal.sql");
 const LOCK_CREDENTIAL: SqlStmt = sql_stmt!("atm.lock_credential", "sql/lock_credential.sql");
-const CREDENTIAL: SqlStmt = sql_stmt!("atm.credential", "sql/credential.sql");
+const SELECT_LOCK_STATUS: SqlStmt =
+    sql_stmt!("atm.select_lock_status", "sql/select_lock_status.sql");
 const UPDATE_CREDENTIAL: SqlStmt = sql_stmt!("atm.update_credential", "sql/update_credential.sql");
 const OPEN_SESSION: SqlStmt = sql_stmt!("atm.open_session", "sql/open_session.sql");
 const LOCK_SESSION: SqlStmt = sql_stmt!("atm.lock_session", "sql/lock_session.sql");
-const SESSION: SqlStmt = sql_stmt!("atm.session", "sql/session.sql");
 const END_SESSION: SqlStmt = sql_stmt!("atm.end_session", "sql/end_session.sql");
 const INSERT_SESSION: SqlStmt = sql_stmt!("atm.insert_session", "sql/insert_session.sql");
 type At = DateTime<FixedOffset>;
@@ -208,9 +208,8 @@ async fn start(
         .db
         .run_in(&stats, move |s| {
             let terminal: Option<Terminal> = s.query_opt(&LOCK_TERMINAL, &[&req.terminal_id])?;
-            let _: Option<String> = s.query_opt(&LOCK_CREDENTIAL, &[&req.account_no])?;
             let credential: Option<(String, i64, Option<At>)> =
-                s.query_opt(&CREDENTIAL, &[&req.account_no])?;
+                s.query_opt(&LOCK_CREDENTIAL, &[&req.account_no])?;
             let mut locked_attempt = false;
             let rejected = if terminal.is_none() {
                 Some(Rejection {
@@ -376,11 +375,10 @@ async fn end(
     let success = state
         .db
         .run_in(&stats, move |s| {
-            let found: Option<String> = s.query_opt(&LOCK_SESSION, &[&hash])?;
-            if found.is_none() {
+            let found: Option<SessionRow> = s.query_opt(&LOCK_SESSION, &[&hash])?;
+            let Some(row) = found else {
                 return Ok(false);
-            }
-            let row: SessionRow = s.query_row(&SESSION, &[&hash])?;
+            };
             {
                 let mut identity = identity.lock().unwrap_or_else(|e| e.into_inner());
                 identity.terminal_id = Some(row.5.clone());

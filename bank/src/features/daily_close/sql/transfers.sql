@@ -1,6 +1,5 @@
--- daily_close.transfers: marks accounts touched by malformed transfers.
--- Access path: TRANSFER_OCCURRED_IX; ACCOUNT_TRANSACTION_TRANSFER_IX; DAILY_CLOSE_PK.
-MERGE INTO daily_close c USING (
+-- daily_close.transfers: malformed transfers and their affected accounts, including empty transfers.
+-- Access path: TRANSFER_OCCURRED_IX; ACCOUNT_TRANSACTION_TRANSFER_IX.
 WITH shapes AS (
  SELECT t.transfer_id, t.kind, t.amount, COUNT(r.tran_id) n, COUNT(DISTINCT r.account_id) accounts, NVL(SUM(r.amount), 0) total,
  MIN(r.amount) minimum, MAX(r.amount) maximum,
@@ -19,7 +18,5 @@ WITH shapes AS (
  WHEN kind = 'loan_repay' AND n = 2 AND accounts = 2 AND minimum = -amount AND maximum = -amount THEN 0
  ELSE 1 END = 1
 )
- SELECT r.account_id, MIN('transfer ' || TO_CHAR(v.transfer_id) || ': ' || v.kind || ' rows violate F-21') detail
- FROM violations v JOIN account_transaction r ON r.transfer_id = v.transfer_id GROUP BY r.account_id
-) v ON (c.account_id = v.account_id AND c.business_date = TO_DATE(:business_date, 'YYYY-MM-DD'))
-WHEN MATCHED THEN UPDATE SET c.verified = 'N', c.mismatch_detail = SUBSTR(CASE WHEN c.mismatch_detail IS NULL THEN v.detail ELSE c.mismatch_detail || '; ' || v.detail END, 1, 400)
+SELECT v.transfer_id, v.kind, r.account_id
+FROM violations v LEFT JOIN account_transaction r ON r.transfer_id = v.transfer_id

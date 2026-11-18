@@ -7,14 +7,15 @@ mod oracle_conn;
 mod pool;
 mod values;
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oracle_conn::OracleConnector;
 use oracledb::Connection;
 use pool::{Connector, Lease, Pool, PoolError};
-use values::with_statement_binds;
 pub use values::{RowValue, ToSql};
+use values::{with_statement_binds, with_statement_binds_prefetch};
 
 use crate::shared::telemetry::RequestStats;
 
@@ -163,6 +164,9 @@ impl Db {
         let metadata = stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let (result, collected) = self
             .run_collect(move |session| {
+                if !metadata.completion_committed {
+                    session.pending_touch = metadata.pending_touch;
+                }
                 session.outcome_endpoint = metadata.outcome_endpoint;
                 session.outcome_method = metadata.outcome_method;
                 session.outcome_arrival = metadata.outcome_arrival;
@@ -195,8 +199,26 @@ impl Db {
             if let SessionConnection::Pooled(lease) = &mut session.conn {
                 lease.mark_blocking();
             }
-            let result = work_and_rollback(&mut session, work, Session::rollback);
-            let healthy = result.as_ref().is_ok_and(|(_, healthy)| *healthy);
+            let failed = Cell::new(false);
+            let result = work_and_rollback(
+                &mut session,
+                |session| {
+                    let result = work(session);
+                    failed.set(result.is_err());
+                    result
+                },
+                |session| {
+                    if failed.get() || session.error_seen || session.transaction_may_be_open {
+                        session.rollback()
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            let healthy = !session.call_timeout_seen
+                && !session.commit_failed
+                && !session.rollback_failed
+                && result.as_ref().is_ok_and(|(_, cleaned_up)| *cleaned_up);
             if let SessionConnection::Pooled(lease) = session.conn {
                 lease.release(healthy);
             }
@@ -248,6 +270,7 @@ impl Db {
 pub struct StatementStats {
     pub count: u32,
     pub completion_committed: bool,
+    pub pending_touch: Option<crate::shared::auth::PendingTouch>,
     pub outcome_endpoint: Option<String>,
     pub outcome_method: Option<String>,
     pub outcome_arrival: Option<Instant>,
@@ -258,6 +281,9 @@ impl StatementStats {
     pub fn merge(&mut self, other: &StatementStats) {
         self.count += other.count;
         self.completion_committed |= other.completion_committed;
+        if other.completion_committed {
+            self.pending_touch = None;
+        }
         if let Some((name, d)) = other.slowest
             && self.slowest.is_none_or(|(_, mine)| d > mine)
         {
@@ -271,6 +297,12 @@ pub struct Session {
     conn: SessionConnection,
     pub stats: StatementStats,
     pending_completion: bool,
+    pending_touch: Option<crate::shared::auth::PendingTouch>,
+    transaction_may_be_open: bool,
+    commit_failed: bool,
+    rollback_failed: bool,
+    error_seen: bool,
+    call_timeout_seen: bool,
     pub(crate) outcome_endpoint: Option<String>,
     pub(crate) outcome_method: Option<String>,
     pub(crate) outcome_arrival: Option<Instant>,
@@ -305,6 +337,12 @@ impl Session {
             conn,
             stats: StatementStats::default(),
             pending_completion: false,
+            pending_touch: None,
+            transaction_may_be_open: false,
+            commit_failed: false,
+            rollback_failed: false,
+            error_seen: false,
+            call_timeout_seen: false,
             outcome_endpoint: None,
             outcome_method: None,
             outcome_arrival: None,
@@ -331,14 +369,18 @@ impl Session {
             elapsed_ms = elapsed.as_millis() as u64,
             "sql"
         );
-        result.map_err(|source| DbError::Oracle {
-            statement: stmt.name,
-            source,
+        result.map_err(|source| {
+            self.record_error(&source);
+            DbError::Oracle {
+                statement: stmt.name,
+                source,
+            }
         })
     }
 
     /// Executes a statement that returns no rows; returns the affected row count.
     pub fn execute(&mut self, stmt: &SqlStmt, params: &[&dyn ToSql]) -> Result<u64, DbError> {
+        self.transaction_may_be_open = true;
         self.timed(stmt, |c| {
             with_statement_binds(
                 c,
@@ -357,6 +399,7 @@ impl Session {
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<i64, DbError> {
+        self.transaction_may_be_open = true;
         let ids = self.timed(stmt, |c| {
             let null_id = None::<i64>;
             let mut binds = params.to_vec();
@@ -389,6 +432,7 @@ impl Session {
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<T, DbError> {
+        self.transaction_may_be_open |= query_may_open_transaction(stmt.sql);
         self.timed(stmt, |c| {
             with_statement_binds(
                 c,
@@ -424,11 +468,34 @@ impl Session {
         stmt: &SqlStmt,
         params: &[&dyn ToSql],
     ) -> Result<Vec<T>, DbError> {
+        self.query_all_with_prefetch(stmt, params, None)
+    }
+
+    /// Executes a bounded query with an explicit execute-time row prefetch.
+    /// A limit plus one lets Oracle also signal the end of a full page without
+    /// resuming its index scan in a second fetch.
+    pub fn query_all_prefetched<T: RowValue>(
+        &mut self,
+        stmt: &SqlStmt,
+        params: &[&dyn ToSql],
+        prefetch_rows: u32,
+    ) -> Result<Vec<T>, DbError> {
+        self.query_all_with_prefetch(stmt, params, Some(prefetch_rows))
+    }
+
+    fn query_all_with_prefetch<T: RowValue>(
+        &mut self,
+        stmt: &SqlStmt,
+        params: &[&dyn ToSql],
+        prefetch_rows: Option<u32>,
+    ) -> Result<Vec<T>, DbError> {
+        self.transaction_may_be_open |= query_may_open_transaction(stmt.sql);
         self.timed(stmt, |c| {
-            with_statement_binds(
+            with_statement_binds_prefetch(
                 c,
                 stmt.sql,
                 params,
+                prefetch_rows,
                 |s, p| s.query(p),
                 |s, p| s.query_named(p),
             )?
@@ -443,6 +510,7 @@ impl Session {
         stmt: &SqlStmt,
         rows: &[Vec<&dyn ToSql>],
     ) -> Result<(), DbError> {
+        self.transaction_may_be_open = true;
         if rows.is_empty() {
             return Ok(());
         }
@@ -460,20 +528,50 @@ impl Session {
         })
     }
 
+    fn record_error(&mut self, source: &oracledb::Error) {
+        // An empty single-row fetch is how `query_opt` reports "no row"; it changes no
+        // transaction state, so it must not force a rollback.
+        if *source.kind() == oracledb::ErrorKind::NoDataFound {
+            return;
+        }
+        self.error_seen = true;
+        self.call_timeout_seen |= *source.kind() == oracledb::ErrorKind::CallTimeoutExceeded;
+    }
+
     pub fn note_completion(&mut self) {
         self.pending_completion = true;
     }
 
     pub fn commit(&mut self) -> Result<(), DbError> {
-        self.conn.as_mut().commit()?;
+        if self.pending_completion
+            && let Some(touch) = self.pending_touch.clone()
+        {
+            touch.apply(self)?;
+        }
+        // A failed commit is ambiguous even when no earlier method marked a transaction.
+        self.transaction_may_be_open = true;
+        if let Err(error) = self.conn.as_mut().commit() {
+            self.commit_failed = true;
+            self.record_error(&error);
+            return Err(error.into());
+        }
+        self.transaction_may_be_open = false;
         self.stats.completion_committed |= self.pending_completion;
+        if self.pending_completion {
+            self.pending_touch = None;
+        }
         self.pending_completion = false;
         Ok(())
     }
 
     pub fn rollback(&mut self) -> Result<(), DbError> {
+        if let Err(error) = self.conn.as_mut().rollback() {
+            self.rollback_failed = true;
+            self.record_error(&error);
+            return Err(error.into());
+        }
+        self.transaction_may_be_open = false;
         self.pending_completion = false;
-        self.conn.as_mut().rollback()?;
         Ok(())
     }
 }
@@ -496,7 +594,92 @@ fn work_and_rollback<S, T, E>(
 ) -> std::thread::Result<(Result<T, E>, bool)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let result = work(session);
-        let healthy = result.is_ok() && rollback(session).is_ok();
+        let healthy = rollback(session).is_ok();
         (result, healthy)
     }))
+}
+
+// Conservative classification: a false positive only adds a rollback.
+fn query_may_open_transaction(sql: &str) -> bool {
+    // Oracle alternative quotes can contain both apostrophes and comment markers.
+    // Treat these uncommon statements conservatively instead of parsing their
+    // arbitrary delimiters and risking a missed FOR UPDATE after the literal.
+    if sql
+        .as_bytes()
+        .windows(2)
+        .any(|pair| (pair[0] == b'q' || pair[0] == b'Q') && pair[1] == b'\'')
+    {
+        return true;
+    }
+    let mut text = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if let Some(delimiter) = quote {
+            text.push(c);
+            if c == delimiter {
+                quote = None;
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            text.push(c);
+        } else if c == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == '\n' || c == '\r' {
+                    break;
+                }
+            }
+            text.push(' ');
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            text.push(' ');
+        } else {
+            text.push(c);
+        }
+    }
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    normalized.contains("FOR UPDATE")
+        || !(normalized.starts_with("SELECT") || normalized.starts_with("WITH"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_may_open_transaction;
+
+    #[test]
+    fn detects_for_update_case_insensitively() {
+        for sql in [
+            "select id from account for update",
+            "SELECT id FROM account FOR UPDATE WAIT 1",
+            "SELECT id FROM account For Update Nowait",
+            "SELECT id FROM account FOR\nUPDATE",
+            "SELECT id FROM account FOR /* c */ UPDATE",
+            "SELECT id FROM account for\tupdate",
+            "SELECT q'[it's]' FROM account FOR /* c */ UPDATE",
+            "SELECT Q'{it's -- quoted}' FROM account FOR\nUPDATE",
+            "SELECT nq'<it's /* quoted */>' FROM account FOR /* c */ UPDATE",
+            "UPDATE account SET balance = 1",
+            "BEGIN NULL; END;",
+        ] {
+            assert!(query_may_open_transaction(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT id FROM account",
+            "-- comment\nSELECT id FROM account",
+            "WITH x AS (SELECT 1 FROM dual) SELECT * FROM x",
+        ] {
+            assert!(!query_may_open_transaction(sql), "{sql}");
+        }
+    }
 }

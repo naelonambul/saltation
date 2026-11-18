@@ -209,7 +209,14 @@ impl Recorder {
             .is_err()
         {
             self.unrecorded();
-            if response.status().as_u16() < 500 {
+            if response.status().as_u16() < 500
+                || self
+                    .stats
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending_touch
+                    .is_some()
+            {
                 response = ApiError::busy(&self.ctx).into_response();
             }
         }
