@@ -20,8 +20,8 @@ async fn populated_migrations_preserve_data() {
     );
     assert_eq!(
         db.migrate().await.unwrap(),
-        3,
-        "apply exactly groups A/B/C on the populated schema"
+        4,
+        "apply the three tuning migrations and the card migration on the populated schema"
     );
     let after: Snapshot = db.run(move |s| s.query_row(&snapshot, &[])).await.unwrap();
     assert_eq!(
