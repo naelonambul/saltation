@@ -18,15 +18,17 @@
     "bank/tests/sql/generator_bc_*.sql",
     "scripts/dev/it-oracle.sh",
     "bank/tests/generator_cards.rs",
-    "bank/tests/sql/generator_cards_*.sql"
+    "bank/tests/sql/generator_cards_*.sql",
+    "bank/tests/generator_behavior.rs",
+    "bank/tests/sql/generator_behavior_*.sql"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:4b6c1f41ae8b81eff9bb3ee624035eea3c65174cdee69e147649dbea8aec559a",
+      "sha256": "sha256:a609cc55f3b863b3b0595d991910425466c400ea9f92804575b4d635811eb911",
       "by": "naelonambul",
-      "at": "2026-11-19T02:42:06Z",
-      "write_scope_sha256": "sha256:c06ab4fefaa23809119dea3b6a94011f059198a6a82cb1a03712f7204dc0fa02",
+      "at": "2026-11-19T03:09:47Z",
+      "write_scope_sha256": "sha256:31d0bffe14d70db01a2d252fba3028e53aea9c5c00a75f0e7f03863c53be984c",
       "note": "\uc2b9\uc778"
     }
   ]
