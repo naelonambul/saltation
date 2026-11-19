@@ -24,15 +24,19 @@
     "bank/tests/generator_scenarios.rs",
     "bank/tests/generator_lifecycle.rs",
     "bank/tests/sql/generator_scenarios_*.sql",
-    "bank/tests/sql/generator_lifecycle_*.sql"
+    "bank/tests/sql/generator_lifecycle_*.sql",
+    "bank/src/app.rs",
+    "bank/src/features/deposits/mod.rs",
+    "bank/src/features/deposits/sql/identity.sql",
+    "contracts/openapi/internal.yaml"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:2290fe70b0f8c6c3ad3c659c0c3895caae949da88ba259e450b0b947e9c350dc",
+      "sha256": "sha256:5f8dce7300084e45e00ab1a180e6264c47f697267d8898fbd6f416ca23587d97",
       "by": "naelonambul",
-      "at": "2026-11-19T03:37:33Z",
-      "write_scope_sha256": "sha256:bbd5f3bbc4c5c0b251436cbe9710af8c2f65f2dbfe1408aa465c8fefaeaf96ef",
+      "at": "2026-11-19T03:54:00Z",
+      "write_scope_sha256": "sha256:06447d1c45e3f8f992096ee082e92c831ce51f94aac446993720bc663a21899e",
       "note": "\uc2b9\uc778"
     }
   ]
