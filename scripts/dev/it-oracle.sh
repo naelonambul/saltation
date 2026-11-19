@@ -14,6 +14,24 @@ case "$project" in
   *) echo "invalid isolated integration project: $project" >&2; exit 2 ;;
 esac
 cargo_name="${project}-cargo"
+target="${1:-all}"
+restored_outbox_mode="${TUNE_RESTORED_OUTBOX_STATS-0}"
+case "$restored_outbox_mode" in
+  0) ;;
+  control|1)
+    if [[ "$project" == saltation-it || "$target" != driver-bench || $# != 1 ||
+          "${BENCH_POPULATED:-}" != 1 || "${BENCH_ONLY:-}" != outbox:1 ||
+          "${BENCH_ORA_SNAP:-}" != 1 || "${BENCH_CAPTURE:-}" == 1 || "${BENCH_RUNS:-1}" != 1 ||
+          "${BENCH_RATE+x}" == x || "${BENCH_RESULT_NAME:-bench.jsonl}" != bench.jsonl ]]; then
+      echo 'restored outbox: use driver-bench with a dedicated project, populated outbox:1 and Oracle snapshots' >&2
+      exit 2
+    fi
+    BENCH_RUNS=1
+    ;;
+  *) echo 'restored outbox: expected TUNE_RESTORED_OUTBOX_STATS=0, control or 1' >&2; exit 2 ;;
+esac
+# shellcheck source=scripts/dev/oracle-tune/tooling.sh
+. "$root/scripts/dev/oracle-tune/tooling.sh"
 
 # State lives outside the checkout (CI checkouts delete untracked files), so the
 # test database is created once and reused across runs (plan oracle-ci-speed).
@@ -42,6 +60,10 @@ PY
 
 recreate=no
 if [ ! -f "$env_file" ]; then
+  if [[ "$restored_outbox_mode" != 0 ]]; then
+    echo 'restored outbox: prepared integration environment is missing' >&2
+    exit 1
+  fi
   recreate=yes
   umask 077
   gen() { python3 -c 'import secrets, string; a = string.ascii_letters + string.digits; print("".join(secrets.choice(a) for _ in range(20)))'; }
@@ -81,26 +103,29 @@ volumes_key() {
   docker volume inspect -f '{{.Name}} {{.CreatedAt}}' "${project}_oradata" "${project}_mongodata" 2>/dev/null | cksum | cut -d' ' -f1
 }
 
-target="${1:-all}"
-if [ "${2:-}" = "--fresh" ] || [ "$recreate" = yes ] || [ "${SETUP_KEY:-}" != "$setup_key" ] \
-  || [ "${VOLUMES_KEY:-}" != "$(volumes_key)" ]; then
-  echo "it-oracle: creating fresh test volumes"
-  "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-  set_env SETUP_KEY "$setup_key"
-else
-  echo "it-oracle: reusing the test database"
-fi
+if [[ "$restored_outbox_mode" == 0 ]]; then
+  if [ "${2:-}" = "--fresh" ] || [ "$recreate" = yes ] || [ "${SETUP_KEY:-}" != "$setup_key" ] \
+    || [ "${VOLUMES_KEY:-}" != "$(volumes_key)" ]; then
+    echo "it-oracle: creating fresh test volumes"
+    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+    set_env SETUP_KEY "$setup_key"
+  else
+    echo "it-oracle: reusing the test database"
+  fi
 
-# Leftovers from a cancelled run: the cargo container, a stopped MongoDB
-# (outbox-outage), and application containers whose relay would drain the
-# outbox under the database tests. Only observability and e2e run the bank.
-docker rm -f "$cargo_name" >/dev/null 2>&1 || true
-case "$target" in
-  observability|e2e) ;;
-  *) "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true ;;
-esac
-"${compose[@]}" up -d --wait --wait-timeout 3600 oracle mongo
-[ "${VOLUMES_KEY:-}" = "$(volumes_key)" ] || set_env VOLUMES_KEY "$(volumes_key)"
+  # Leftovers from a cancelled run: the cargo container, a stopped MongoDB
+  # (outbox-outage), and application containers whose relay would drain the
+  # outbox under the database tests. Only observability and e2e run the bank.
+  docker rm -f "$cargo_name" >/dev/null 2>&1 || true
+  case "$target" in
+    observability|e2e) ;;
+    *) "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true ;;
+  esac
+  "${compose[@]}" up -d --wait --wait-timeout 3600 oracle mongo
+  [ "${VOLUMES_KEY:-}" = "$(volumes_key)" ] || set_env VOLUMES_KEY "$(volumes_key)"
+else
+  restored_outbox_stack="$(tune_restored_outbox_stack)" || exit 1
+fi
 
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
@@ -163,15 +188,10 @@ cargo_test() {
     saltation/bank-dev:local python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile debug -- cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
 }
 
-# Requests and acknowledgements delimit only the measured benchmark window.
-bench_snapshot_watch() {
-  local directory="$1" request stem
-  while :; do
-    for request in "$directory"/snap-*-run*-start.req "$directory"/snap-*-run*-end.req; do
-      [ -f "$request" ] || continue
-      stem="${request%.req}"
-      [ ! -f "$stem.ack" ] || continue
-      if "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >"$stem.txt" <<SQL
+bench_snapshot() {
+  local stem="$1"
+  shift
+  "$@" "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >"$stem.txt" <<SQL
 WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR EXIT FAILURE
 SET VERIFY OFF
@@ -187,7 +207,17 @@ SELECT 'sysev '||REPLACE(event,' ','_')||' '||total_waits||' '||time_waited_micr
 SELECT 'sql|'||sql_id||'|'||child_number||'|'||executions||'|'||buffer_gets||'|'||disk_reads||'|'||rows_processed||'|'||cpu_time||'|'||elapsed_time||'|'||RAWTOHEX(child_address)||':'||last_load_time||':'||invalidations||'|'||REPLACE(REPLACE(REPLACE(SUBSTR(sql_text,1,60),CHR(10),' '),CHR(13),' '),'|',' ') FROM v\$sql WHERE parsing_schema_name='&bench_user';
 EXIT
 SQL
-      then
+}
+
+# Requests and acknowledgements delimit only the measured benchmark window.
+bench_snapshot_watch() {
+  local directory="$1" request stem
+  while :; do
+    for request in "$directory"/snap-*-run*-start.req "$directory"/snap-*-run*-end.req; do
+      [ -f "$request" ] || continue
+      stem="${request%.req}"
+      [ ! -f "$stem.ack" ] || continue
+      if bench_snapshot "$stem"; then
         if [ "${BENCH_CAPTURE:-}" = 1 ]; then
           tune_window "$stem" || continue
         fi
@@ -244,7 +274,13 @@ LIMITS
     entries=(lookup:8 balance:8 history:8 transfer:1 transfer:8 transfer:32 transfer:64)
   fi
   output="${BENCH_OUTPUT:-$root/.evidence/driver-bench/$(date -u +%Y%m%dT%H%M%SZ)-$BENCH_DRIVER}"
-  mkdir -p "$output"
+  if [[ "$restored_outbox_mode" == 0 ]]; then
+    mkdir -p "$output"
+  else
+    mkdir -p "$(dirname "$output")" || return
+    mkdir -m 700 -- "$output" || return
+    output="$(cd "$output" && pwd -P)" || return
+  fi
   dev_image || return
   for entry in "${entries[@]}"; do
     workload="${entry%:*}"; concurrency="${entry#*:}"
@@ -262,7 +298,10 @@ LIMITS
       if [ "${BENCH_POPULATED:-}" != 1 ]; then
         if ! reset_schema; then failed=1; continue; fi
       fi
-      if [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
+      if [[ "$restored_outbox_mode" != 0 ]]; then
+        BENCH_SNAPSHOT_USER=SALTATION_TUNE tune_restored_outbox_watch "$output/snap-outbox-1-run$run" "$$" 9>&- &
+        watcher=$!
+      elif [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
         BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" &
         watcher=$!
       fi
@@ -279,9 +318,16 @@ LIMITS
         failed=1
       fi
       if [ -n "$watcher" ]; then
-        kill "$watcher" 2>/dev/null || true
-        wait "$watcher" 2>/dev/null || true
+        if [[ "$restored_outbox_mode" != 0 && "$failed" == 0 ]]; then
+          tune_finish_outbox_watcher "$watcher" "$output/snap-outbox-1-run$run-end.ack" || failed=1
+        else
+          kill "$watcher" 2>/dev/null || true
+          wait "$watcher" 2>/dev/null || true
+        fi
         watcher=""
+      fi
+      if [[ "$restored_outbox_mode" != 0 && "$failed" != 0 ]]; then
+        break 2
       fi
     done
   done
@@ -636,8 +682,15 @@ run_target() {
   esac
 }
 
-# shellcheck source=scripts/dev/oracle-tune/tooling.sh
-. "$root/scripts/dev/oracle-tune/tooling.sh"
+if [[ "$restored_outbox_mode" != 0 ]]; then
+  rc=0
+  time_oracle_phase "$target" run_target "$target" || rc=$?
+  if [[ "$(tune_restored_outbox_stack)" != "$restored_outbox_stack" ]]; then
+    echo 'restored outbox: prepared stack changed during the capture; check identity before cleanup' >&2
+    exit 1
+  fi
+  exit "$rc"
+fi
 
 if [ "$target" = all ]; then
   host_load start
