@@ -20,15 +20,19 @@
     "bank/tests/generator_cards.rs",
     "bank/tests/sql/generator_cards_*.sql",
     "bank/tests/generator_behavior.rs",
-    "bank/tests/sql/generator_behavior_*.sql"
+    "bank/tests/sql/generator_behavior_*.sql",
+    "bank/tests/generator_scenarios.rs",
+    "bank/tests/generator_lifecycle.rs",
+    "bank/tests/sql/generator_scenarios_*.sql",
+    "bank/tests/sql/generator_lifecycle_*.sql"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:a609cc55f3b863b3b0595d991910425466c400ea9f92804575b4d635811eb911",
+      "sha256": "sha256:2290fe70b0f8c6c3ad3c659c0c3895caae949da88ba259e450b0b947e9c350dc",
       "by": "naelonambul",
-      "at": "2026-11-19T03:09:47Z",
-      "write_scope_sha256": "sha256:31d0bffe14d70db01a2d252fba3028e53aea9c5c00a75f0e7f03863c53be984c",
+      "at": "2026-11-19T03:37:33Z",
+      "write_scope_sha256": "sha256:bbd5f3bbc4c5c0b251436cbe9710af8c2f65f2dbfe1408aa465c8fefaeaf96ef",
       "note": "\uc2b9\uc778"
     }
   ]
