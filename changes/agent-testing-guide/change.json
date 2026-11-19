@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "agent-testing-guide",
+  "kind": "repository",
+  "title": "Document headless verification for agents",
+  "base": {
+    "ref": "main",
+    "commit": "bfffbae91b3c878ffb3b27929b2b735bc120608b"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/agent-testing.md",
+    "README.md",
+    "README.ko.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:3bb7455f99a1a55a8673693ccd47126bde1d578f85efedcfb3a2cdde7d07c926",
+      "by": "naelonambul",
+      "at": "2026-11-19T21:31:01Z",
+      "write_scope_sha256": "sha256:6f0ee8ac05c083aca708d619088dad46542090cc86ffcc7d8b7b2340284af2a9",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}

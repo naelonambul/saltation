@@ -331,6 +331,8 @@ docker compose -f infra/compose/compose.yml --env-file infra/compose/.env --prof
 
 ## 검증 및 체크
 
+새로 클론한 뒤 API와 생성기를 검증하려면 [에이전트용 테스트 가이드](docs/agent-testing.md)를 참고하세요.
+
 체크 목록은 [`checks.json`](checks.json)에 등록되어 있으며 변경된 파일 경로에 따라 라우팅됩니다. 전체 체크 실행:
 
 ```sh
