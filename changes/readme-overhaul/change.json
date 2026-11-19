@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "id": "readme-overhaul",
+  "kind": "repository",
+  "title": "Replace template README with bilingual Saltation README",
+  "base": {
+    "ref": "main",
+    "commit": "60e9d5cfb2b63a175097df9b185d96b115441dd6"
+  },
+  "baseline": {},
+  "write_scope": [
+    "README.md",
+    "README.ko.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:3435c7a562e35227a9cabdd82c30602227f06e35cbdc542c6c18dcbd869d6b88",
+      "by": "naelonambul",
+      "at": "2026-11-19T13:53:08Z",
+      "write_scope_sha256": "sha256:96a2678a79fde6180f9a201c1e6e84f77c16f84137ff461fd81c43ef07392f0d",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:3435c7a5)"
+    }
+  ]
+}
