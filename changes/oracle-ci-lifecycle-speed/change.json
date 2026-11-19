@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "oracle-ci-lifecycle-speed",
+  "kind": "repository",
+  "title": "Shorten the Oracle lifecycle CI fixture",
+  "base": {
+    "ref": "main",
+    "commit": "5651f8ad81a7a42daf28b699eeea8e4ceb03c4b5"
+  },
+  "baseline": {},
+  "write_scope": [
+    "generator/tests/stage6_lifecycle_harness.py",
+    "generator/tests/test_stage6_lifecycle_pacing.py",
+    "bank/tests/generator_lifecycle.rs",
+    "scripts/dev/it-oracle.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a51569d253e80ed784e30368cd605484936ec959b29bbeb1f5acdd6df0a7b3aa",
+      "by": "naelonambul",
+      "at": "2026-11-19T06:02:56Z",
+      "write_scope_sha256": "sha256:038b074eb822eec29de6a9d76e43f81985937e847683fc86aa0ec27cb17cc187",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
