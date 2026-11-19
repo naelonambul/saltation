@@ -99,6 +99,14 @@ class BankClient:
         _, body = await self._call("POST", "/internal/v1/seed/accounts", json={"accounts": accounts})
         return body["accounts"]
 
+    async def seed_cards(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        _, body = await self._call("POST", "/internal/v1/seed/cards", json={"cards": items})
+        return body["cards"]
+
+    async def seed_analysts(self, items: list[dict[str, Any]]) -> int:
+        _, body = await self._call("POST", "/internal/v1/seed/analysts", json={"analysts": items})
+        return int(body["created"])
+
     async def outbox_backlog(self) -> int:
         _, body = await self._call("GET", "/internal/v1/outbox")
         return int(body["undelivered"])
@@ -113,6 +121,30 @@ class BankClient:
         )
         return body["access_token"]
 
+    async def balance(
+        self,
+        request_id: str,
+        token: str,
+        ctx: Context,
+        fintech_use_num: str,
+        tran_dtime: str,
+        *,
+        transaction_key: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "GET",
+            "/v2.0/account/balance/fin_num",
+            request_id,
+            token,
+            ctx,
+            params={
+                "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
+                "fintech_use_num": fintech_use_num,
+                "tran_dtime": tran_dtime,
+            },
+            accept=(200, 404),
+        )
+
     async def transfer(
         self,
         request_id: str,
@@ -125,6 +157,8 @@ class BankClient:
         memo: str = "",
         tran_dtime: str | None = None,
         bank_code: str = "998",
+        *,
+        transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """Returns (status, body); 200 done, 422 rejected by the bank."""
         return await self._call(
@@ -134,7 +168,7 @@ class BankClient:
             token,
             ctx,
             json={
-                "bank_tran_id": bank_tran_id(),
+                "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                 "fintech_use_num": fintech_use_num,
                 "tran_amt": str(amount),
                 "tran_dtime": tran_dtime or time.strftime("%Y%m%d%H%M%S"),
@@ -173,22 +207,43 @@ class BankClient:
         _, body = await self._call("POST", "/internal/v1/mode/live")
         return body
 
-    async def sms(self, phone: str) -> dict[str, Any] | None:
-        status, body = await self._call("GET", f"/internal/v1/sms/{phone}", accept=(200, 404))
+    async def sms(
+        self, phone: str, *, request_id: str | None = None, ctx: Context | None = None
+    ) -> dict[str, Any] | None:
+        status, body = await self._call(
+            "GET", f"/internal/v1/sms/{phone}", request_id, ctx=ctx, accept=(200, 404)
+        )
         return None if status == 404 else body
 
-    async def client_token(self, client_id: str, client_secret: str) -> str:
+    async def client_token(
+        self,
+        client_id: str,
+        client_secret: str,
+        *,
+        scope: str = "oob",
+        request_id: str | None = None,
+        ctx: Context | None = None,
+    ) -> str:
         _, body = await self._call(
             "POST",
             "/oauth/2.0/token",
+            request_id,
+            ctx=ctx,
             data={
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "scope": "oob",
+                "scope": scope,
                 "grant_type": "client_credentials",
             },
         )
         return body["access_token"]
+
+    async def card_authorize(
+        self, request_id: str, token: str, ctx: Context, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST", "/card/v1/authorize", request_id, token, ctx, json=payload, accept=(200, 422)
+        )
 
     async def inbound_deposit(
         self,
@@ -201,6 +256,8 @@ class BankClient:
         sender_name: str,
         tran_dtime: str,
         memo: str = "",
+        *,
+        transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return await self._call(
             "POST",
@@ -218,7 +275,7 @@ class BankClient:
                 "req_list": [
                     {
                         "tran_no": "1",
-                        "bank_tran_id": bank_tran_id(),
+                        "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                         "fintech_use_num": fintech_use_num,
                         "print_content": memo[:20],
                         "tran_amt": str(amount),
@@ -315,6 +372,11 @@ class BankClient:
         _, body = await self._call("GET", f"/v2.0/ext/deposits/{deposit_id}", token=token)
         return body
 
+    async def deposit_identity(
+        self, request_id: str, token: str, ctx: Context, deposit_id: str
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call("GET", f"/internal/v1/deposits/{deposit_id}/identity", request_id, token, ctx)
+
     async def loan(self, token: str, loan_id: str):
         _, body = await self._call("GET", f"/v2.0/ext/loans/{loan_id}", token=token)
         return body
@@ -328,6 +390,8 @@ class BankClient:
         terms_id: str,
         amount: int,
         tran_dtime: str,
+        *,
+        transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return await self._call(
             "POST",
@@ -336,7 +400,7 @@ class BankClient:
             token,
             ctx,
             json={
-                "bank_tran_id": bank_tran_id(),
+                "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                 "tran_dtime": tran_dtime,
                 "fintech_use_num": fintech_use_num,
                 "terms_id": str(terms_id),
@@ -372,7 +436,14 @@ class BankClient:
         )
 
     async def close_deposit(
-        self, request_id: str, token: str, ctx: Context, deposit_id: str, tran_dtime: str
+        self,
+        request_id: str,
+        token: str,
+        ctx: Context,
+        deposit_id: str,
+        tran_dtime: str,
+        *,
+        transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return await self._call(
             "POST",
@@ -381,7 +452,7 @@ class BankClient:
             token,
             ctx,
             json={
-                "bank_tran_id": bank_tran_id(),
+                "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                 "tran_dtime": tran_dtime,
             },
             accept=(200, 404, 422),

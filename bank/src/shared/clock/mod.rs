@@ -34,6 +34,7 @@ pub enum ClockMode {
 pub struct ClockState {
     pub mode: ClockMode,
     pub business_time: DateTime<FixedOffset>,
+    pub live_started_at: Option<DateTime<FixedOffset>>,
     pub rolled_through: NaiveDate,
     #[serde(skip)]
     pub pending_rollover: bool,
@@ -88,7 +89,14 @@ impl Clock {
     }
 
     pub async fn state(&self) -> Result<ClockState, DbError> {
-        let (mode, stored, rolled, pending): (String, DateTime<FixedOffset>, String, i64) =
+        type ClockRow = (
+            String,
+            DateTime<FixedOffset>,
+            String,
+            i64,
+            DateTime<FixedOffset>,
+        );
+        let (mode, stored, rolled, pending, last_advanced): ClockRow =
             self.db.run(|s| s.query_row(&SELECT_CLOCK, &[])).await?;
         let mode = if mode == "BACKFILL" {
             ClockMode::Backfill
@@ -104,6 +112,8 @@ impl Clock {
         Ok(ClockState {
             mode,
             business_time,
+            // Once LIVE, the last advance is the committed switch, not wall time.
+            live_started_at: (mode == ClockMode::Live).then(|| last_advanced.with_timezone(&kst())),
             rolled_through,
             pending_rollover: pending > 0,
         })

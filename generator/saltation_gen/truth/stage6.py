@@ -1,0 +1,390 @@
+"""Journal for a stage 6 run against a standalone truth database."""
+
+import asyncio
+from collections import Counter
+from contextlib import suppress
+from typing import Any
+from uuid import uuid4
+
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+from pymongo.write_concern import WriteConcern
+
+from .recovery import RecoveryError
+from .store import TruthStore
+
+_BANK_LEASE = "bank"
+_TERMINAL = ("succeeded", "declined")
+_SECRET_FIELDS = {
+    "access_token",
+    "atm_pin",
+    "atm_session_token",
+    "auth",
+    "authorization",
+    "card_token",
+    "code",
+    "password",
+    "pin",
+    "refresh_token",
+    "reset_code",
+    "secret",
+    "session_token",
+    "sms_code",
+    "token",
+}
+_GENERATED_FIELDS = {"request_id", "request_ids", "request_key", "idempotency_key"}
+_ROW_FIELDS = {"_id", "run_id", "episode_id", "name", "owner", "state", "result"}
+
+
+def _check_safe(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower().replace("-", "_") in _SECRET_FIELDS:
+                raise RecoveryError("credential fields cannot be stored in the stage 6 journal")
+            _check_safe(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _check_safe(item)
+
+
+def _stable_shape(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _stable_shape(item) for key, item in value.items() if key not in _GENERATED_FIELDS}
+    if isinstance(value, (list, tuple)):
+        return [_stable_shape(item) for item in value]
+    return value
+
+
+class Stage6Journal:
+    def __init__(self, truth: TruthStore, run_id: str, owner: str):
+        if not owner:
+            raise ValueError("stage 6 requires a nonempty owner token")
+        self.truth = truth
+        self.run_id = run_id
+        self.owner = owner
+        durability = WriteConcern(w=1, j=True)
+        database = truth.runs.database
+        self._runs = truth.runs.with_options(write_concern=durability)
+        self._operations = database["stage6_operations"].with_options(write_concern=durability)
+        self._leases = database["stage6_leases"].with_options(write_concern=durability)
+        self._credit = database["stage6_credit"].with_options(write_concern=durability)
+        self._lock = asyncio.Lock()
+        self._claimed = False
+        self._claim_id = ""
+
+    def _run_key(self) -> dict:
+        return {"_id": self.run_id, "kind": "generator-stage6"}
+
+    def _lease_key(self) -> dict:
+        return {
+            "_id": _BANK_LEASE,
+            "run_id": self.run_id,
+            "owner": self.owner,
+            "claim_id": self._claim_id,
+        }
+
+    def _owned_run_key(self) -> dict:
+        return self._run_key() | {"owner": self.owner, "stage6_claim_id": self._claim_id}
+
+    def _operation_key(self, episode_id: str, name: str) -> dict:
+        return {
+            "_id": {"run_id": self.run_id, "episode_id": episode_id, "name": name},
+            "run_id": self.run_id,
+        }
+
+    async def claim(self, inputs: dict, exited_owner: str | None = None) -> dict:
+        """Resume a run, supplying an exact owner token only after confirming its process exited."""
+        _check_safe(inputs)
+        async with self._lock:
+            if self._claimed or exited_owner == self.owner:
+                raise RecoveryError("claim requires a fresh stage 6 owner token")
+
+            lease = await self._leases.find_one({"_id": _BANK_LEASE})
+            if lease is None:
+                if exited_owner is not None:
+                    raise RecoveryError("stage 6 bank lease no longer matches the exited owner")
+            elif exited_owner is None or lease["owner"] != exited_owner or lease["run_id"] != self.run_id:
+                raise RecoveryError("stage 6 bank lease belongs to another owner or run")
+
+            run = await self._runs.find_one({"_id": self.run_id})
+            if run is None:
+                with suppress(DuplicateKeyError):
+                    await self._runs.insert_one(self._run_key() | {"inputs": inputs})
+                run = await self._runs.find_one({"_id": self.run_id})
+            if run is None or run.get("kind") != "generator-stage6" or run.get("inputs") != inputs:
+                raise RecoveryError("stage 6 run kind or inputs differ")
+            prior_owner = run.get("owner")
+            if prior_owner is not None and (
+                lease is None or prior_owner not in (lease["owner"], lease.get("prior_owner"))
+            ):
+                raise RecoveryError("stage 6 run has an owner outside the bank lease")
+
+            # The lease records the run owner observed before changing the lease. If the
+            # claimant exits between those writes, its successor can still fence that owner.
+            self._claim_id = uuid4().hex
+            if lease is None:
+                try:
+                    await self._leases.insert_one(self._lease_key() | {"prior_owner": prior_owner})
+                except DuplicateKeyError:
+                    raise RecoveryError("stage 6 bank lease was acquired by another owner") from None
+            else:
+                acquired = await self._leases.update_one(
+                    {
+                        "_id": _BANK_LEASE,
+                        "run_id": self.run_id,
+                        "owner": exited_owner,
+                        "claim_id": lease["claim_id"],
+                    },
+                    {"$set": {"owner": self.owner, "claim_id": self._claim_id, "prior_owner": prior_owner}},
+                )
+                if acquired.matched_count != 1:
+                    raise RecoveryError("stage 6 bank lease changed during takeover")
+
+            claimed = await self._runs.find_one_and_update(
+                self._run_key()
+                | {
+                    "inputs": {"$eq": run["inputs"]},
+                    "owner": prior_owner,
+                    "stage6_claim_id": run.get("stage6_claim_id"),
+                },
+                {"$set": {"owner": self.owner, "stage6_claim_id": self._claim_id}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if claimed is None:
+                raise RecoveryError("stage 6 run changed during claim")
+
+            await self._operations.create_index(
+                [("run_id", 1), ("state", 1), ("episode_id", 1), ("name", 1)],
+                name="stage6_run_state_episode",
+            )
+            await self._credit.create_index([("run_id", 1), ("window", 1), ("kind", 1)])
+            self._claimed = True
+            return claimed
+
+    async def _require_owner(self) -> None:
+        if not self._claimed or await self._leases.find_one(self._lease_key()) is None:
+            raise RecoveryError("stage 6 bank lease is no longer held")
+        run = await self._runs.find_one(self._owned_run_key())
+        if run is None or run.get("completed"):
+            raise RecoveryError("stage 6 run is complete or its owner changed")
+
+    async def _update_run(self, update: dict) -> None:
+        changed = await self._runs.update_one(self._owned_run_key(), update)
+        if changed.matched_count != 1:
+            raise RecoveryError("stage 6 run owner changed")
+
+    async def release(self) -> None:
+        async with self._lock:
+            if not self._claimed or await self._leases.find_one(self._lease_key()) is None:
+                raise RecoveryError("stage 6 bank lease is no longer held")
+            # Free the run first, keeping the bank lease as a barrier until it is safe
+            # for another run to claim it. The null match also allows retrying release.
+            changed = await self._runs.update_one(
+                self._owned_run_key() | {"owner": {"$in": [self.owner, None]}},
+                {"$unset": {"owner": ""}},
+            )
+            if changed.matched_count != 1:
+                raise RecoveryError("stage 6 run owner changed")
+            released = await self._leases.delete_one(self._lease_key())
+            if released.deleted_count != 1:
+                raise RecoveryError("stage 6 bank lease changed during release")
+            self._claimed = False
+
+    async def save_progress(self, progress: dict) -> None:
+        _check_safe(progress)
+        async with self._lock:
+            await self._require_owner()
+            await self._update_run({"$set": {"progress": progress}})
+
+    async def get_operation(self, episode_id: str, name: str) -> dict | None:
+        return await self._operations.find_one(self._operation_key(episode_id, name))
+
+    async def prepare(self, episode_id: str, name: str, record: dict) -> dict:
+        if record.keys() & (_ROW_FIELDS - {"state"}) or record.get("state", "prepared") != "prepared":
+            raise RecoveryError("invalid stage 6 prepared operation")
+        _check_safe(record)
+        async with self._lock:
+            await self._require_owner()
+            row = await self.get_operation(episode_id, name)
+            if row is None:
+                row = (
+                    record
+                    | self._operation_key(episode_id, name)
+                    | {
+                        "episode_id": episode_id,
+                        "name": name,
+                        "owner": self.owner,
+                        "state": "prepared",
+                    }
+                )
+                try:
+                    await self._operations.insert_one(row)
+                except DuplicateKeyError:
+                    row = await self.get_operation(episode_id, name)
+                else:
+                    return row
+            if row is None or _stable_shape({k: v for k, v in row.items() if k not in _ROW_FIELDS}) != (
+                _stable_shape({k: v for k, v in record.items() if k != "state"})
+            ):
+                raise RecoveryError("stage 6 prepared operation differs from the journal")
+            return row
+
+    async def retime(self, episode_id: str, name: str, request_id: str, business_time: str) -> None:
+        async with self._lock:
+            await self._require_owner()
+            result = await self._operations.update_one(
+                self._operation_key(episode_id, name) | {"state": "prepared", "request_id": request_id},
+                {"$set": {"business_time": business_time}},
+            )
+            if result.matched_count != 1:
+                raise RecoveryError("only previously unsent operations can be retimed")
+
+    async def transition(
+        self,
+        episode_id: str,
+        name: str,
+        old: str,
+        new: str,
+        result: dict | None = None,
+    ) -> None:
+        """Persist a state change. Dispatch only after prepared -> unconfirmed succeeds."""
+        if old == new or old in _TERMINAL or new == "prepared":
+            raise RecoveryError("invalid stage 6 state transition")
+        _check_safe(result)
+        async with self._lock:
+            await self._require_owner()
+            row = await self.get_operation(episode_id, name)
+            if row is None:
+                raise RecoveryError("stage 6 operation is missing")
+            # The bank lease excludes live previous owners. Adopt their row only in
+            # the same CAS that changes state, including at the pre-dispatch boundary.
+            fields = {"owner": self.owner, "state": new}
+            if result is not None:
+                fields["result"] = result
+            changed = await self._operations.update_one(
+                self._operation_key(episode_id, name) | {"owner": row["owner"], "state": old},
+                {"$set": fields},
+            )
+            if changed.matched_count != 1:
+                raise RecoveryError("stage 6 operation owner or state changed")
+
+    async def unresolved(self) -> bool:
+        return (
+            await self._operations.find_one(
+                {"run_id": self.run_id, "state": {"$nin": ["prepared", *_TERMINAL]}},
+                {"_id": 1},
+            )
+            is not None
+        )
+
+    async def require_success(self, episode_id: str, names: list[str]) -> None:
+        successful = {
+            row["name"]
+            async for row in self._operations.find(
+                {
+                    "run_id": self.run_id,
+                    "episode_id": episode_id,
+                    "state": "succeeded",
+                    "name": {"$in": names},
+                },
+                {"name": 1},
+            )
+        }
+        if successful != set(names):
+            raise RecoveryError("scenario credit requires every scheduled operation to succeed")
+
+    async def credit(self, window: str, kind: str, identity: str, episode_id: str) -> None:
+        key = {"run_id": self.run_id, "window": window, "kind": kind, "identity": identity}
+        async with self._lock:
+            await self._require_owner()
+            terminal = await self._operations.find_one(
+                {"run_id": self.run_id, "state": "succeeded", "episode_id": episode_id},
+                {"_id": 1},
+            )
+            if terminal is None:
+                raise RecoveryError("stage 6 quota credit requires a terminal operation")
+            with suppress(DuplicateKeyError):
+                await self._credit.update_one(
+                    {"_id": key, "run_id": self.run_id},
+                    {"$setOnInsert": key | {"episode_id": episode_id}},
+                    upsert=True,
+                )
+
+    async def totals(self) -> dict:
+        """Count operation states and distinct credited identities by window and kind."""
+        states = Counter()
+        async for row in self._operations.find({"run_id": self.run_id}, {"state": 1}):
+            states[row["state"]] += 1
+        credit: dict[str, Counter] = {}
+        async for row in self._credit.find({"run_id": self.run_id}, {"window": 1, "kind": 1}):
+            credit.setdefault(row["window"], Counter())[row["kind"]] += 1
+        return {"states": dict(states), "credit": {window: dict(counts) for window, counts in credit.items()}}
+
+    async def scenario_outcomes(self) -> tuple[dict[tuple[str, str], set[str]], set[tuple[str, str, str]]]:
+        cursor = await self._operations.aggregate(
+            [
+                {"$match": {"run_id": self.run_id, "episode_kind": {"$not": {"$regex": "^normal_"}}}},
+                {
+                    "$group": {
+                        "_id": {"episode": "$episode_id", "actor": "$actor"},
+                        "states": {"$addToSet": "$state"},
+                    }
+                },
+            ]
+        )
+        states = {(row["_id"]["episode"], row["_id"]["actor"]): set(row["states"]) async for row in cursor}
+        credits = {
+            (row["window"], row["kind"], row["identity"])
+            async for row in self._credit.find(
+                {"run_id": self.run_id}, {"window": 1, "kind": 1, "identity": 1}
+            )
+        }
+        return states, credits
+
+    async def operation_breakdown(self) -> dict:
+        rows = await self._operations.aggregate(
+            [
+                {"$match": {"run_id": self.run_id}},
+                {
+                    "$group": {
+                        "_id": {
+                            "class": "$scenario_class",
+                            "persona": "$persona",
+                            "state": "$state",
+                            "carry_in": "$prior_to_live",
+                        },
+                        "count": {"$sum": 1},
+                    }
+                },
+            ]
+        )
+        breakdown = {}
+        async for row in rows:
+            key = row["_id"]
+            cls = key.get("class", "unclassified")
+            persona = key.get("persona", "unclassified")
+            counts = breakdown.setdefault(cls, {}).setdefault(
+                persona,
+                dict.fromkeys(
+                    ("prepared", "attempted", "completed", "rejected", "unresolved", "carried_in"), 0
+                ),
+            )
+            count = row["count"]
+            state = key["state"]
+            if state == "prepared":
+                counts["prepared"] += count
+                continue
+            counts["attempted"] += count
+            if key.get("carry_in"):
+                counts["carried_in"] += count
+            outcome = {"succeeded": "completed", "declined": "rejected"}.get(state, "unresolved")
+            counts[outcome] += count
+        return breakdown
+
+    async def finish(self, summary: dict) -> None:
+        _check_safe(summary)
+        async with self._lock:
+            await self._require_owner()
+            if await self.unresolved():
+                raise RecoveryError("stage 6 run has unresolved operations")
+            await self._update_run({"$set": {"completed": True, "summary": summary}})
