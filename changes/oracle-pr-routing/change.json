@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "oracle-pr-routing",
+  "kind": "repository",
+  "title": "Avoid OCI queuing for documentation-only pull requests",
+  "base": {
+    "ref": "main",
+    "commit": "bf43cb5f84f37c3c4ef4bfdf63cd8ecd860a8774"
+  },
+  "baseline": {},
+  "write_scope": [
+    ".github/workflows/repository.yml",
+    "scripts/oracle_pr_route.py",
+    "scripts/tests/test_oracle_pr_route.py",
+    "scripts/tests/test_workflow.py",
+    "docs/host-setup.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:9e6ac6dce840cc11872f32836c8ce82b511461ec15d73886e1de70203d968c71",
+      "by": "naelonambul",
+      "at": "2026-11-19T22:58:38Z",
+      "write_scope_sha256": "sha256:579b91433c4c2c9edc0b46d49b7a0c156b3d0a8dbe6a2535cfc0fbabf66f6482",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
