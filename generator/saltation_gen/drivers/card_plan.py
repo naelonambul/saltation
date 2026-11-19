@@ -2,13 +2,13 @@
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time
 from random import Random
 from typing import Any
 
 from saltation_gen.config.card import NORMAL_CARD_ANNUAL_CAP, card_amount_krw, sample_domestic_amount
+from saltation_gen.drivers.backfill_clock import KST
 
-KST = timezone(timedelta(hours=9))
 SUBJECTS = ("g", "trip", "online", "normal")
 VERSION = 1
 

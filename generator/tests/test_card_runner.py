@@ -14,7 +14,7 @@ from saltation_gen.config.card import (
     card_amount_krw,
     sample_domestic_amount,
 )
-from saltation_gen.drivers import cards
+from saltation_gen.drivers import backfill_clock, cards
 from saltation_gen.drivers.card_plan import enforce_normal_card_cap, fixture_plan, proof_time
 from saltation_gen.drivers.seed import CARD_FIXTURE_START, make_customers
 from saltation_gen.truth.recovery import RecoveryError
@@ -239,7 +239,7 @@ async def test_backpressure_hysteresis_is_durable_across_restart(monkeypatch):
         naps.append(fixture.backlog)
         raise RecoveryError("interrupted during pause")
 
-    monkeypatch.setattr(cards.asyncio, "sleep", interrupted)
+    monkeypatch.setattr(backfill_clock.asyncio, "sleep", interrupted)
     fixture.backlog = 50_001
     with pytest.raises(RecoveryError, match="during pause"):
         await fixture.run()
@@ -289,7 +289,7 @@ async def test_interrupted_backlog_observation_requires_draining_before_resume(m
     async def interrupted(_):
         raise RecoveryError("still waiting for drain")
 
-    monkeypatch.setattr(cards.asyncio, "sleep", interrupted)
+    monkeypatch.setattr(backfill_clock.asyncio, "sleep", interrupted)
     with pytest.raises(RecoveryError, match="still waiting"):
         await fixture.run()
     assert not fixture.calls and not fixture.moves

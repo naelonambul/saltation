@@ -1,6 +1,5 @@
 """Execute the short synthetic card checkpoint against a dedicated backfill bank."""
 
-import asyncio
 import hashlib
 import json
 from dataclasses import asdict, replace
@@ -10,10 +9,10 @@ from typing import Any
 import httpx
 
 from saltation_gen.client.bank import BankClient, BankError, Context, atm_idempotency_key, new_ulid
-from saltation_gen.config import ATM_TERMINALS, BACKPRESSURE_PAUSE, BACKPRESSURE_RESUME
+from saltation_gen.config import ATM_TERMINALS
 from saltation_gen.config.card import HOLDER_ACTIVITY_WINDOW_HOURS, NORMAL_CARD_ANNUAL_CAP, card_amount_krw
+from saltation_gen.drivers.backfill_clock import BackfillClock
 from saltation_gen.drivers.card_plan import (
-    KST,
     SUBJECTS,
     VERSION,
     Action,
@@ -106,68 +105,17 @@ def _roster_binding(people: dict[str, dict[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(mapping, sort_keys=True).encode()).hexdigest()
 
 
-class _CardRun:
+class _CardRun(BackfillClock):
     def __init__(self, bank, truth, journal, people, operations, progress):
-        self.bank = bank
+        super().__init__(bank, journal, progress)
         self.truth = truth
-        self.journal = journal
         self.people = people
         self.operations = operations
-        self.progress = progress
         self.atm_token: str | None = None
         self.card_token: str | None = None
 
     def state(self, name: str) -> str | None:
         return self.operations.get(name, {}).get("state")
-
-    async def save(self, **fields) -> None:
-        progress = self.progress | fields
-        await self.journal.save_progress(progress)
-        self.progress = progress
-
-    async def gate(self) -> None:
-        if self.progress.get("observing_backlog"):
-            await self.save(paused=True, observing_backlog=False)
-        while True:
-            paused = self.progress["paused"]
-            if not paused:
-                await self.save(observing_backlog=True)
-            backlog = await self.bank.outbox_backlog()
-            if paused and backlog < BACKPRESSURE_RESUME:
-                await self.save(paused=False)
-                return
-            if not paused:
-                paused = backlog > BACKPRESSURE_PAUSE
-                await self.save(paused=paused, observing_backlog=False)
-                if not paused:
-                    return
-            await asyncio.sleep(1)
-
-    async def clock(self) -> datetime:
-        clock = await self.bank.clock()
-        if clock["mode"] != "BACKFILL":
-            raise RecoveryError("card proof requires a bank in BACKFILL")
-        return datetime.fromisoformat(clock["business_time"]).astimezone(KST)
-
-    async def move_clock(self, target: datetime) -> None:
-        current = datetime.fromisoformat(self.progress["current"])
-        intended = self.progress["intended"]
-        if target < current or (intended and datetime.fromisoformat(intended) != target):
-            raise RecoveryError("clock checkpoint does not match the next planned action")
-        await self.gate()
-        observed = await self.clock()
-        if intended is None and observed != current:
-            raise RecoveryError("bank clock changed outside the fixture")
-        if observed not in {current, target}:
-            raise RecoveryError("bank clock drifted or overshot the intended instant")
-        if target != current:
-            if intended is None:
-                await self.save(intended=target.isoformat())
-            if observed != target:
-                await self.bank.clock_set(target.isoformat())
-                if await self.clock() != target:
-                    raise RecoveryError("bank clock advance does not match the intended instant")
-            await self.save(current=target.isoformat(), intended=None)
 
     async def execute(self, action: Action) -> None:
         await self.move_clock(action.at)

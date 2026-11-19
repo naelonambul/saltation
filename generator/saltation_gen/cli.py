@@ -9,12 +9,12 @@ from datetime import date
 
 from saltation_gen.client import BankClient, new_ulid
 from saltation_gen.config import Settings
-from saltation_gen.drivers import atm, bc, cards, live_normal
+from saltation_gen.drivers import atm, bc, behavior, cards, live_normal
 from saltation_gen.drivers import seed as seeding
 from saltation_gen.truth import TruthStore
 from saltation_gen.truth.recovery import RecoveryError
 
-TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc", "generator-cards")
+TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc", "generator-cards", "generator-behavior")
 
 
 async def _main(args: argparse.Namespace) -> None:
@@ -53,9 +53,10 @@ async def _main(args: argparse.Namespace) -> None:
             except RecoveryError as error:
                 raise SystemExit(str(error)) from None
             print(json.dumps(result))
-        elif args.command == "generator-cards":
+        elif args.command in ("generator-cards", "generator-behavior"):
+            driver = cards if args.command == "generator-cards" else behavior
             try:
-                result = await cards.run(
+                result = await driver.run(
                     bank,
                     truth,
                     args.run_id,
@@ -126,14 +127,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="OWNER",
         help="replace this exact stale owner only after verifying its process has exited",
     )
-    p = sub.add_parser("generator-cards", help="run a seeded card proof on a dedicated backfill bank")
-    p.add_argument("--run-id", required=True)
-    p.add_argument("--date", type=date.fromisoformat, required=True, help="fixture KST business date")
-    p.add_argument(
-        "--recover-exited-owner",
-        metavar="OWNER",
-        help="replace this exact stale owner only after verifying its process has exited",
-    )
+    for command in ("generator-cards", "generator-behavior"):
+        p = sub.add_parser(command, help="run a seeded fixture on a dedicated backfill bank")
+        p.add_argument("--run-id", required=True)
+        p.add_argument("--date", type=date.fromisoformat, required=True, help="fixture KST business date")
+        p.add_argument(
+            "--recover-exited-owner",
+            metavar="OWNER",
+            help="replace this exact stale owner only after verifying its process has exited",
+        )
     p = sub.add_parser("clock")
     clocks = p.add_subparsers(dest="clock_command", required=True)
     clocks.add_parser("show")

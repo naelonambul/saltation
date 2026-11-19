@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates, generator-bc, generator-cards
+#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates, generator-bc, generator-cards, generator-behavior
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$root/scripts/dev/cargo-container.sh"
@@ -138,6 +138,7 @@ cargo_test() {
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
   if [ -n "${GENERATOR_BC_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_BC_FIXTURE -e MONGO_TRUTH_URI); fi
   if [ -n "${GENERATOR_CARDS_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_CARDS_FIXTURE -e MONGO_TRUTH_URI); fi
+  if [ -n "${GENERATOR_BEHAVIOR_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_BEHAVIOR_FIXTURE -e MONGO_TRUTH_URI); fi
   [ -z "${CARGO_BUILD_JOBS:-}" ] || extra_env+=(-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
   [ -z "${TUNE_SEED_AT:-}" ] || extra_env+=(-e TUNE_SEED_AT)
@@ -377,6 +378,21 @@ generator_cards() (
   grep -Fxq 'test generator_cards_proof ... ok' "$verifier"
 )
 
+generator_behavior() (
+  verifier=$(mktemp)
+  trap 'rm -f "$verifier"' EXIT
+  "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
+  reset_schema
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
+  "${compose[@]}" --profile tools build generator >/dev/null
+  fixture=$("${compose[@]}" --profile tools run --rm -T \
+    -v "$root/generator/tests/behavior_harness.py:/proof.py:ro" --entrypoint python generator /proof.py)
+  printf '%s\n' "$fixture"
+  GENERATOR_BEHAVIOR_FIXTURE="$fixture" MONGO_TRUTH_URI="mongodb://generator:${MONGO_GENERATOR_PASSWORD}@mongo:27017/truth" \
+    cargo_test generator_behavior -- --ignored --exact generator_behavior_proof 2>&1 | tee "$verifier"
+  grep -Fxq 'test generator_behavior_proof ... ok' "$verifier"
+)
+
 # Plan step 10: the whole stack, 1,000 seeded customers, 10 minutes of normal
 # transfers from the generator, the Rust end-to-end checks, Prometheus data,
 # then a person's flow in the mobile web app with Playwright.
@@ -514,6 +530,7 @@ run_target() {
     e2e)         e2e ;;
     generator-bc) generator_bc ;;
     generator-cards) generator_cards ;;
+    generator-behavior) generator_behavior ;;
     browser-dates) browser_dates ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
@@ -534,6 +551,7 @@ if [ "$target" = all ]; then
   run_target observability
   run_target generator-bc
   run_target generator-cards
+  run_target generator-behavior
   host_load end
 else
   run_target "$target"
