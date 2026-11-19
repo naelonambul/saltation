@@ -26,6 +26,7 @@ const DORMANCY: SqlStmt = sql_stmt!(
 );
 const COUNT_OUTBOX: SqlStmt = sql_stmt!("test.count_outbox", "sql/count_outbox.sql");
 const MODE: &str = "/internal/v1/mode/live";
+const FIXTURE_LIVE_SECONDS: i64 = 150;
 
 type Stamp = DateTime<FixedOffset>;
 type Counts = BTreeMap<String, usize>;
@@ -117,7 +118,7 @@ async fn assert_manifest(db: &Db, manifest: &Value, fixture: &Fixture) -> Cutove
     assert_eq!(config["live"], expected["live"]);
     assert_eq!(run["start"], 73_000_000);
     assert_eq!(run["days"], 7);
-    assert_eq!(run["live_seconds"], 420);
+    assert_eq!(run["live_seconds"], FIXTURE_LIVE_SECONDS);
     assert_eq!(summary["run_id"], fixture.run_id);
     assert_eq!(summary["status"], "completed");
     assert_eq!(summary["progress"], *progress);
@@ -140,7 +141,7 @@ async fn assert_manifest(db: &Db, manifest: &Value, fixture: &Fixture) -> Cutove
     let planned = time(&run["live_at"]);
     let committed = switched.parse::<Stamp>().expect("Oracle switch timestamp");
     let observed = time(&progress["live_started"]);
-    let end = observed + TimeDelta::seconds(420);
+    let end = committed + TimeDelta::seconds(FIXTURE_LIVE_SECONDS);
     assert_eq!(mode, "LIVE");
     assert_eq!(
         backfill.parse::<Stamp>().expect("Oracle BACKFILL boundary"),
@@ -154,6 +155,11 @@ async fn assert_manifest(db: &Db, manifest: &Value, fixture: &Fixture) -> Cutove
     );
     assert_eq!(planned.date_naive(), observed.date_naive());
     assert!(observed <= time(&progress["live_observed_at"]));
+    assert_eq!(
+        time(&progress["live_end"]),
+        end,
+        "LIVE end uses the committed start"
+    );
     assert!(
         fixture.finished_at >= end,
         "generator ran through the live measurement window"
@@ -748,6 +754,12 @@ async fn assert_bc(
                 assert!(
                     at >= cutover.observed && at < cutover.end && recorded >= cutover.committed
                 );
+                if op.operation == "atm_withdraw" {
+                    assert!(
+                        recorded < cutover.end,
+                        "B/C cash-out posted inside the original LIVE window"
+                    );
+                }
             } else {
                 assert_eq!(op.window, "annual");
                 assert!(at < cutover.planned && recorded < cutover.committed);
@@ -767,12 +779,22 @@ async fn assert_credit(
     let mut expected = BTreeSet::new();
     let mut mules = BTreeSet::new();
     let mut victims = BTreeSet::new();
+    let mut last_live_bc_cashout = None;
     for (&id, ops) in episodes {
         let window = &ops[0].window;
         let kind = ops[0].episode_kind.as_str();
         match kind {
             "BC" => {
                 assert_bc(db, ops, postings, cutover).await;
+                for op in ops
+                    .iter()
+                    .filter(|op| op.window == "live" && op.operation == "atm_withdraw")
+                {
+                    let recorded = time(&postings[&op.request_id][0]["recorded_at"]);
+                    last_live_bc_cashout = Some(
+                        last_live_bc_cashout.map_or(recorded, |last: Stamp| last.max(recorded)),
+                    );
+                }
                 let transfer = named(ops, "victim_1_transfer");
                 let mule = demand(transfer.peer.as_deref().expect("mule"));
                 assert!(
@@ -814,6 +836,12 @@ async fn assert_credit(
         let kind = row["kind"].as_str().expect("credited scenario");
         count(totals.entry(window.to_owned()).or_default(), kind);
     }
+    let final_cashout = last_live_bc_cashout.expect("recorded LIVE B/C cash-out");
+    eprintln!(
+        "lifecycle timing: last_live_bc_cashout_offset_ms={} remaining_live_margin_ms={}",
+        (final_cashout - cutover.committed).num_milliseconds(),
+        (cutover.end - final_cashout).num_milliseconds()
+    );
     assert_eq!(mules.len(), 4);
     assert_eq!(victims.len(), 4);
     assert_eq!(actual.len(), 20);

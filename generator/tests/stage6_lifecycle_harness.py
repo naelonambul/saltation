@@ -4,23 +4,33 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from time import monotonic
+from unittest.mock import patch
 
 import httpx
 
 from saltation_gen.client.bank import BankClient, new_ulid
 from saltation_gen.config import Settings
 from saltation_gen.config.stage6 import ScheduleConfig
+from saltation_gen.drivers import stage6, stage6_schedule
 from saltation_gen.drivers.backfill_clock import KST
 from saltation_gen.drivers.stage6 import RunConfig, run_stage6
-from saltation_gen.drivers.stage6_schedule import build_schedule
+from saltation_gen.drivers.stage6_schedule import LIVE_START_OFFSET, build_schedule
 from saltation_gen.drivers.stage6_seed import world_customer_numbers
+from saltation_gen.drivers.stage6_steps import steps as standard_steps
+from saltation_gen.drivers.stage6_types import Episode, Step
 from saltation_gen.truth import TruthStore
 
 START = 73_000_000
 POPULATION = 40
 DAYS = 7
-LIVE_SECONDS = 420
+LIVE_SECONDS = 150
+FIRST_LATE_BC_STEP = 290
+BC_DWELL_REDUCTION = 245
 ANNUAL = {"A": 1, "B": 2, "C": 2, "E": 1, "F": 1, "G": 1, "lookalike": 6}
 LIVE = {"B": 2, "C": 2, "D": 2}
 MODE_PATH = "/internal/v1/mode/live"
@@ -31,6 +41,33 @@ CONTROL_PATHS = {
     "/internal/v1/outbox",
     "/oauth/2.0/token",  # Counterparty credentials have no customer or account subject.
 }
+
+
+def fixture_steps(episode: Episode) -> list[Step]:
+    actions = standard_steps(episode)
+    if episode.window != "live" or episode.kind != "BC":
+        return actions
+    # Keep the opening and all later gaps. Only shorten the idle dwell.
+    paced = [
+        replace(step, offset=step.offset - BC_DWELL_REDUCTION) if step.offset >= FIRST_LATE_BC_STEP else step
+        for step in actions
+    ]
+    offsets = [step.offset for step in paced]
+    if (
+        not offsets
+        or offsets != sorted(offsets)
+        or offsets[0] < 0
+        or LIVE_START_OFFSET + timedelta(seconds=offsets[-1]) >= timedelta(seconds=LIVE_SECONDS)
+    ):
+        raise ValueError("fixture B/C pacing exceeds the LIVE window or changes action order")
+    return paced
+
+
+@contextmanager
+def fixture_pacing() -> Iterator[None]:
+    # Both modules import the step expander directly. Restore both after the proof.
+    with patch.object(stage6, "steps", fixture_steps), patch.object(stage6_schedule, "steps", fixture_steps):
+        yield
 
 
 class ProofTransport(httpx.AsyncHTTPTransport):
@@ -88,12 +125,18 @@ class ProofBank(BankClient):
 
 
 async def run(run_id: str) -> dict:
+    with fixture_pacing():
+        return await run_fixture(run_id)
+
+
+async def run_fixture(run_id: str) -> dict:
     settings = Settings.from_env()
     truth = TruthStore(settings.truth_uri)
     transport = ProofTransport(truth, run_id)
     bank = ProofBank(settings.bank_url, transport)
     try:
         await truth.setup()
+        timer = monotonic()
         started = datetime.now(UTC)
         planned = (started.astimezone(KST) + timedelta(seconds=60)).replace(microsecond=0)
         end = planned + timedelta(seconds=LIVE_SECONDS)
@@ -121,7 +164,15 @@ async def run(run_id: str) -> dict:
         print("Preparing Stage 6 backfill and carried-in D operations", file=sys.stderr, flush=True)
         prepared = await run_stage6(*args, "backfill", stop)
         assert prepared["status"] == "backfill_ready"
-        if datetime.now(KST) >= planned:
+        ready_at = monotonic()
+        seconds_until_cutover = (planned - datetime.now(KST)).total_seconds()
+        print(
+            f"lifecycle timing: preparation_s={ready_at - timer:.3f} "
+            f"ready_before_planned_cutover_s={seconds_until_cutover:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if seconds_until_cutover <= 0:
             print("Preparation passed the planned cutover instant", file=sys.stderr, flush=True)
         assert datetime.now(KST) < end, "preparation exhausted the planned live window"
         before_switch = await bank.clock()
@@ -147,7 +198,19 @@ async def run(run_id: str) -> dict:
         first_observation = datetime.fromisoformat(bank.original_business_time)
         assert datetime.fromisoformat(after_loss["business_time"]) > first_observation + timedelta(seconds=2)
 
+        resumed_at = monotonic()
+        print(
+            f"lifecycle timing: ready_to_recovery_s={resumed_at - ready_at:.3f}",
+            file=sys.stderr,
+            flush=True,
+        )
         result = await run_stage6(*args, "live", stop, resume=True)
+        print(
+            f"lifecycle timing: resume_to_completion_s={monotonic() - resumed_at:.3f} "
+            f"live_window_s={LIVE_SECONDS}",
+            file=sys.stderr,
+            flush=True,
+        )
         assert result["status"] == "completed"
         assert result["credit"] == {"annual": ANNUAL, "live": LIVE}
         assert len(transport.switch_ids) == 1, "a second mode request reached the transport"
