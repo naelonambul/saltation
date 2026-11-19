@@ -44,6 +44,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(18, "0018_tune_unused_index"),
     migration!(19, "0019_tune_daily_close"),
     migration!(20, "0020_cards"),
+    migration!(21, "0021_admin_api"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

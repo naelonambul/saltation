@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "id": "admin-api",
+  "kind": "implementation",
+  "title": "Add read-only analyst API and authentication",
+  "base": {
+    "ref": "main",
+    "commit": "a519b6646e41d919e60abb533998dc12649b2f42"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "bank/src/features/admin/**",
+    "bank/src/features/mod.rs",
+    "bank/src/app.rs",
+    "bank/src/shared/auth/**",
+    "bank/src/shared/db/migrations.rs",
+    "bank/migrations/0021_admin_api.sql",
+    "bank/tests/**",
+    "contracts/openapi/admin.yaml",
+    "contracts/openapi/internal.yaml",
+    "scripts/dev/it-oracle.sh",
+    "bank/src/shared/outcome/mod.rs",
+    "contracts/codes/event-types.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:37672bf9e22da5b6209c4901b50419d3ee1bf862f01f878ba3a2e6edce8a0a3e",
+      "by": "naelonambul",
+      "at": "2026-11-19T00:08:39Z",
+      "write_scope_sha256": "sha256:03b8dc93469554b65e21de3ce908ef0beb8266f8e18050af5a78bcde11042de4",
+      "note": "Owner in originating chat: \uc2b9\uc778 (reviewed plan 37672bf9)"
+    }
+  ]
+}

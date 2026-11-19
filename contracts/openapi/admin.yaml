@@ -1,0 +1,632 @@
+openapi: 3.1.0
+info:
+  title: Saltation analyst API
+  version: 0.1.0
+  description: >
+    Read-only analysis of synthetic bank data. Deployment of the public
+    listener requires Cloudflare Access on the admin path.
+servers:
+  - url: http://localhost:8080
+security:
+  - analystBearer: []
+components:
+  securitySchemes:
+    analystBearer:
+      type: http
+      scheme: bearer
+      description: Analyst token issued by the login operation with analyst:read scope.
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, minLength: 1, maxLength: 1024 }
+      description: Reuse with the same collection, parent and filters.
+  responses:
+    Invalid:
+      description: Invalid request, filter or continuation
+      content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } }
+    Unauthorized:
+      description: Credentials missing, invalid, expired, revoked or outside analyst scope
+      content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } }
+    NotFound:
+      description: Parent or requested resource does not exist
+      content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } }
+    Busy:
+      description: Temporarily unavailable. Retry the request.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Envelope' } } }
+  schemas:
+    Envelope:
+      type: object
+      required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
+      properties:
+        api_tran_id: { type: string }
+        api_tran_dtm: { type: string, pattern: '^[0-9]{17}$' }
+        rsp_code: { type: string, pattern: '^[A-Z][0-9]{4}$' }
+        rsp_message: { type: string }
+        request_id: { type: string }
+    Login:
+      type: object
+      required: [analyst_no, password]
+      properties:
+        analyst_no: { type: string, pattern: '^[A-Za-z0-9._-]{1,40}$' }
+        password: { type: string, minLength: 8, maxLength: 128, writeOnly: true }
+    LoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [access_token, token_type, scope, expires_in]
+          properties:
+            access_token: { type: string, minLength: 1 }
+            token_type: { const: Bearer }
+            scope: { const: 'analyst:read' }
+            expires_in: { const: 1800 }
+    Timestamp: { type: string, format: date-time }
+    Date: { type: string, format: date }
+    Integer: { type: string, pattern: '^-?[0-9]+$' }
+    Decimal: { type: string, pattern: '^-?[0-9]+(\.[0-9]+)?$' }
+    Customer:
+      type: object
+      required: [customer_no, name, phone, address, customer_type, created_at]
+      properties:
+        customer_no: { type: string }
+        name: { type: string }
+        phone: { type: string }
+        address: { anyOf: [{ type: string }, { type: 'null' }] }
+        customer_type: { type: string }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+    Account:
+      type: object
+      required: [account_no, subtype, status, balance, opened_at, last_activity_at, product_id, product_name, terms_id, terms_version, term_months, min_amount, max_amount, early_close_ok]
+      properties:
+        account_no: { type: string }
+        subtype: { type: string }
+        status: { type: string }
+        balance: { $ref: '#/components/schemas/Integer' }
+        opened_at: { $ref: '#/components/schemas/Timestamp' }
+        last_activity_at: { anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        product_id: { $ref: '#/components/schemas/Integer' }
+        product_name: { type: string }
+        terms_id: { $ref: '#/components/schemas/Integer' }
+        terms_version: { type: integer }
+        term_months: { anyOf: [{ type: integer }, { type: 'null' }] }
+        min_amount: { anyOf: [{ $ref: '#/components/schemas/Integer' }, { type: 'null' }] }
+        max_amount: { anyOf: [{ $ref: '#/components/schemas/Integer' }, { type: 'null' }] }
+        early_close_ok: { anyOf: [{ type: string }, { type: 'null' }] }
+    Card:
+      type: object
+      required: [account_no, card_id, card_no, status, issued_at]
+      properties:
+        account_no: { type: string }
+        card_id: { $ref: '#/components/schemas/Integer' }
+        card_no: { type: string }
+        status: { type: string }
+        issued_at: { $ref: '#/components/schemas/Timestamp' }
+    Deposit:
+      type: object
+      required: [account_no, linked_account_no, product_name, status, balance, principal, opened_at, maturity_date, closed_at, close_type]
+      properties:
+        account_no: { type: string }
+        linked_account_no: { type: string }
+        product_name: { type: string }
+        status: { type: string }
+        balance: { $ref: '#/components/schemas/Integer' }
+        principal: { $ref: '#/components/schemas/Integer' }
+        opened_at: { $ref: '#/components/schemas/Timestamp' }
+        maturity_date: { $ref: '#/components/schemas/Date' }
+        closed_at: { anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        close_type: { anyOf: [{ type: string }, { type: 'null' }] }
+    Loan:
+      type: object
+      required: [account_no, linked_account_no, product_name, status, balance, principal, opened_at, disbursed_at, maturity_date]
+      properties:
+        account_no: { type: string }
+        linked_account_no: { type: string }
+        product_name: { type: string }
+        status: { type: string }
+        balance: { $ref: '#/components/schemas/Integer' }
+        principal: { $ref: '#/components/schemas/Integer' }
+        opened_at: { $ref: '#/components/schemas/Timestamp' }
+        disbursed_at: { $ref: '#/components/schemas/Timestamp' }
+        maturity_date: { anyOf: [{ $ref: '#/components/schemas/Date' }, { type: 'null' }] }
+    Payee:
+      type: object
+      required: [payee_id, bank_code, bank_name, account_no, holder_name, alias, registered_at, channel, session_id]
+      properties:
+        payee_id: { $ref: '#/components/schemas/Integer' }
+        bank_code: { type: string }
+        bank_name: { type: string }
+        account_no: { type: string }
+        holder_name: { type: string }
+        alias: { anyOf: [{ type: string }, { type: 'null' }] }
+        registered_at: { $ref: '#/components/schemas/Timestamp' }
+        channel: { type: string }
+        session_id: { anyOf: [{ type: string }, { type: 'null' }] }
+    Device:
+      type: object
+      required: [device_id, first_seen, last_seen]
+      properties:
+        device_id: { type: string }
+        first_seen: { $ref: '#/components/schemas/Timestamp' }
+        last_seen: { $ref: '#/components/schemas/Timestamp' }
+    Session:
+      type: object
+      required: [session_id, device_id, started_at, last_seen, ended_at, end_reason, listener]
+      properties:
+        session_id: { type: string }
+        device_id: { anyOf: [{ type: string }, { type: 'null' }] }
+        started_at: { $ref: '#/components/schemas/Timestamp' }
+        last_seen: { $ref: '#/components/schemas/Timestamp' }
+        ended_at: { anyOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        end_reason: { anyOf: [{ type: string }, { type: 'null' }] }
+        listener: { type: string }
+    LoginAttempt:
+      type: object
+      required: [attempt_id, outcome, occurred_at, recorded_at, request_id]
+      properties:
+        attempt_id: { $ref: '#/components/schemas/Integer' }
+        outcome: { type: string }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        recorded_at: { $ref: '#/components/schemas/Timestamp' }
+        request_id: { type: string }
+    LedgerLeg:
+      type: object
+      required: [tran_id, account_no, account_sequence, amount, balance_after, business_date, occurred_at, channel, transfer_id, request_id, inout_type, tran_type, print_content, counterparty_bank_code, counterparty_account_no, counterparty_name]
+      properties:
+        tran_id: { $ref: '#/components/schemas/Integer' }
+        account_no: { type: string }
+        account_sequence: { $ref: '#/components/schemas/Integer' }
+        amount: { $ref: '#/components/schemas/Integer' }
+        balance_after: { $ref: '#/components/schemas/Integer' }
+        business_date: { $ref: '#/components/schemas/Date' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        channel: { type: string }
+        transfer_id: { anyOf: [{ $ref: '#/components/schemas/Integer' }, { type: 'null' }] }
+        request_id: { type: string }
+        inout_type: { type: string }
+        tran_type: { type: string }
+        print_content: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_bank_code: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_account_no: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_name: { anyOf: [{ type: string }, { type: 'null' }] }
+    Transaction:
+      type: object
+      required: [tran_id, account_no, account_sequence, amount, balance_after, business_date, occurred_at, channel, transfer_id, request_id, inout_type, tran_type, print_content, counterparty_bank_code, counterparty_account_no, counterparty_name, merchant_name, mcc]
+      properties:
+        tran_id: { $ref: '#/components/schemas/Integer' }
+        account_no: { type: string }
+        account_sequence: { $ref: '#/components/schemas/Integer' }
+        amount: { $ref: '#/components/schemas/Integer' }
+        balance_after: { $ref: '#/components/schemas/Integer' }
+        business_date: { $ref: '#/components/schemas/Date' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        channel: { type: string }
+        transfer_id: { anyOf: [{ $ref: '#/components/schemas/Integer' }, { type: 'null' }] }
+        request_id: { type: string }
+        inout_type: { type: string }
+        tran_type: { type: string }
+        print_content: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_bank_code: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_account_no: { anyOf: [{ type: string }, { type: 'null' }] }
+        counterparty_name: { anyOf: [{ type: string }, { type: 'null' }] }
+        merchant_name: { anyOf: [{ type: string }, { type: 'null' }] }
+        mcc: { anyOf: [{ type: string }, { type: 'null' }] }
+    RequestOutcome:
+      type: object
+      required: [request_id, request_type, channel, status, rsp_code, bank_rsp_code, occurred_at]
+      properties:
+        request_id: { type: string }
+        request_type: { type: string }
+        channel: { type: string }
+        status: { type: string }
+        rsp_code: { type: string }
+        bank_rsp_code: { anyOf: [{ type: string }, { type: 'null' }] }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+    CardPayment:
+      type: object
+      required: [request_id, card_no, status, rsp_code, bank_rsp_code, occurred_at, merchant_name, mcc, country, currency, original_amount, krw_amount, entry_mode, latitude, longitude]
+      properties:
+        request_id: { type: string }
+        card_no: { type: string }
+        status: { type: string }
+        rsp_code: { type: string }
+        bank_rsp_code: { anyOf: [{ type: string }, { type: 'null' }] }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        merchant_name: { type: string }
+        mcc: { type: string }
+        country: { type: string }
+        currency: { type: string }
+        original_amount: { $ref: '#/components/schemas/Integer' }
+        krw_amount: { $ref: '#/components/schemas/Integer' }
+        entry_mode: { type: string }
+        latitude: { anyOf: [{ $ref: '#/components/schemas/Decimal' }, { type: 'null' }] }
+        longitude: { anyOf: [{ $ref: '#/components/schemas/Decimal' }, { type: 'null' }] }
+    Terminal:
+      type: object
+      required: [terminal_id, region, location, latitude, longitude]
+      properties:
+        terminal_id: { type: string }
+        region: { type: string }
+        location: { type: string }
+        latitude: { $ref: '#/components/schemas/Decimal' }
+        longitude: { $ref: '#/components/schemas/Decimal' }
+    Close:
+      type: object
+      required: [account_no, business_date, opening_balance, closing_balance, verified, mismatch_detail]
+      properties:
+        account_no: { type: string }
+        business_date: { $ref: '#/components/schemas/Date' }
+        opening_balance: { $ref: '#/components/schemas/Integer' }
+        closing_balance: { $ref: '#/components/schemas/Integer' }
+        verified: { type: boolean }
+        mismatch_detail: { anyOf: [{ type: string }, { type: 'null' }] }
+    Transfer:
+      type: object
+      required: [transfer_id, kind, amount, occurred_at, request, legs]
+      properties:
+        transfer_id: { $ref: '#/components/schemas/Integer' }
+        kind: { type: string }
+        amount: { $ref: '#/components/schemas/Integer' }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        request: { $ref: '#/components/schemas/RequestOutcome' }
+        legs:
+          type: array
+          items: { $ref: '#/components/schemas/LedgerLeg' }
+    CustomerPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Customer' }
+            next_cursor: { type: [string, 'null'] }
+    AccountPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Account' }
+            next_cursor: { type: [string, 'null'] }
+    CardPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Card' }
+            next_cursor: { type: [string, 'null'] }
+    DepositPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Deposit' }
+            next_cursor: { type: [string, 'null'] }
+    LoanPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Loan' }
+            next_cursor: { type: [string, 'null'] }
+    PayeePage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Payee' }
+            next_cursor: { type: [string, 'null'] }
+    DevicePage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Device' }
+            next_cursor: { type: [string, 'null'] }
+    SessionPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Session' }
+            next_cursor: { type: [string, 'null'] }
+    LoginAttemptPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/LoginAttempt' }
+            next_cursor: { type: [string, 'null'] }
+    TransactionPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Transaction' }
+            next_cursor: { type: [string, 'null'] }
+    CardPaymentPage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/CardPayment' }
+            next_cursor: { type: [string, 'null'] }
+    ClosePage:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          required: [items, next_cursor]
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items: { $ref: '#/components/schemas/Close' }
+            next_cursor: { type: [string, 'null'] }
+    CustomerResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - $ref: '#/components/schemas/Customer'
+    TransferResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - $ref: '#/components/schemas/Transfer'
+    TerminalResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - $ref: '#/components/schemas/Terminal'
+paths:
+  /admin/v1/login:
+    post:
+      summary: Sign in as an analyst
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Login' } } }
+      responses:
+        '200': { description: Signed in, content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers:
+    get:
+      summary: Search customers
+      description: Supply exactly one of name, phone or customer_no. Name is a literal case-sensitive prefix.
+      parameters:
+        - { name: name, in: query, schema: { type: string } }
+        - { name: phone, in: query, schema: { type: string } }
+        - { name: customer_no, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CustomerPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}:
+    get:
+      summary: Read the customer profile
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CustomerResponse' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/accounts:
+    get:
+      summary: List accounts and balances
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AccountPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/cards:
+    get:
+      summary: List debit cards
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CardPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/deposits:
+    get:
+      summary: List term deposits
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DepositPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/loans:
+    get:
+      summary: List loans
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LoanPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/payees:
+    get:
+      summary: List payees
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/PayeePage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/devices:
+    get:
+      summary: List devices
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/DevicePage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/sessions:
+    get:
+      summary: List recent sessions
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SessionPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/customers/{customer_no}/login-attempts:
+    get:
+      summary: List recent customer login attempts
+      parameters:
+        - { name: customer_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/LoginAttemptPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/accounts/{account_no}/transactions:
+    get:
+      summary: List ledger transactions
+      description: Each optional date and absolute amount bound is inclusive. Debit amounts remain negative in the response.
+      parameters:
+        - { name: account_no, in: path, required: true, schema: { type: string } }
+        - { name: from_date, in: query, schema: { $ref: '#/components/schemas/Date' } }
+        - { name: to_date, in: query, schema: { $ref: '#/components/schemas/Date' } }
+        - { name: channel, in: query, schema: { enum: [MOBILE, ATM, CARD, EXTERNAL, SYSTEM] } }
+        - { name: direction, in: query, schema: { enum: [debit, credit] } }
+        - { name: min_amount, in: query, schema: { type: integer, minimum: 0 } }
+        - { name: max_amount, in: query, schema: { type: integer, minimum: 0 } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TransactionPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/transfers/{transfer_id}:
+    get:
+      summary: Read the transfer and request outcome
+      parameters:
+        - { name: transfer_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TransferResponse' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/accounts/{account_no}/card-payments:
+    get:
+      summary: List approved and declined card payments
+      parameters:
+        - { name: account_no, in: path, required: true, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CardPaymentPage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/transactions/{tran_id}/terminal:
+    get:
+      summary: Read the transaction's ATM terminal
+      parameters:
+        - { name: tran_id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TerminalResponse' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Busy' }
+  /admin/v1/daily-close:
+    get:
+      summary: List stored daily-close results
+      parameters:
+        - { name: business_date, in: query, required: true, schema: { $ref: '#/components/schemas/Date' } }
+        - { name: account_no, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ClosePage' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Busy' }
