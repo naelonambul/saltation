@@ -170,3 +170,38 @@ After fixture population, the benchmark warms the backlog query before the start
 snapshot, so a cursor invalidated by truncate is reparsed outside the timed window.
 No truncate or statistics gathering runs between the start and end snapshots.
 The final counters summary runs after segment capture; summary failures fail capture.
+
+## Restored ordinary outbox
+
+Use a running, disposable integration Compose project with its own prepared
+Oracle and MongoDB volumes. Restore the verified tuning dump into
+`SALTATION_TUNE` in that project's `ORCLPDB1`, with the integration password
+and normal session statistics. Leave the bank service stopped. Prepare a fresh
+clone and the same MongoDB starting state for each run. Each invocation runs once.
+Retain the
+volume identity records and confirm the same mounts before disposing of it.
+
+```sh
+SALTATION_IT_PROJECT=saltation-it-outbox-arm-1 \
+  TUNE_RESTORED_OUTBOX_STATS=control BENCH_DRIVER=restored-control \
+  BENCH_POPULATED=1 BENCH_ONLY=outbox:1 BENCH_ORA_SNAP=1 BENCH_RUNS=1 \
+  scripts/dev/it-oracle.sh driver-bench
+```
+
+Use `TUNE_RESTORED_OUTBOX_STATS=1` on a separate clone for the treatment. Both
+modes check the prepared volume keys and actual mounts without reconciling or
+starting the stack. Unset the setting or use `0` for standard benchmarks.
+
+Both restored modes verify the committed fixture before the timer. The
+treatment gathers only the outbox table and index statistics and immediately
+invalidates dependent cursors. The timer starts after the start snapshot and
+ACK. Results stay in a fresh private directory under `.evidence/driver-bench/`,
+or a new private path passed as `BENCH_OUTPUT`. Existing snapshot files keep
+their format. The `.stats.txt`, `.cursor.txt`, and `.attribution.txt` sidecars
+record the table statistics and executing child cursor evidence.
+
+A failed handshake withholds its ACK and leaves a `.restored-outbox.log` file
+at the failing boundary. Discard that clone. After a timeout, confirm that the
+Oracle session or disposable stack has stopped before cleanup. Keep the
+original dump outside the experiment volumes and keep measured performance
+in local evidence.
