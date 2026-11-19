@@ -71,13 +71,20 @@ compose=(docker compose -p "$project" -f infra/compose/compose.yml --env-file "$
 "${compose[@]}" exec -T bank curl -fsS http://localhost:8080/healthz
 ```
 
-After testing finishes, confirm both core volumes belong to this run before removing the disposable stack. Keep the local evidence.
+After testing finishes, verify ownership of every volume with this project's name prefix. Stop the stack, then remove just the verified volumes. Keep the local evidence.
 
 ```bash
 [[ $project == "${SALTATION_IT_PROJECT:-}" && $project == "$(cat "$evidence/project.txt")" ]] || exit 1
-for volume in "${project}_oradata" "${project}_mongodata"; do
+volumes=$(docker volume ls -q) || exit 1
+owned=()
+while IFS= read -r volume; do
+  [[ $volume == "${project}_"* ]] || continue
   owner=$(docker volume inspect -f '{{index .Labels "com.docker.compose.project"}}' "$volume") || exit 1
   [[ $owner == "$project" ]] || exit 1
+  owned+=("$volume")
+done <<< "$volumes"
+"${compose[@]}" down || exit 1
+for volume in ${owned[@]+"${owned[@]}"}; do
+  docker volume rm "$volume" || exit 1
 done
-"${compose[@]}" down -v
 ```
