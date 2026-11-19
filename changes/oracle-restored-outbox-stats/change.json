@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "oracle-restored-outbox-stats",
+  "kind": "implementation",
+  "title": "Gather outbox statistics after loading a restored tuning fixture",
+  "base": {
+    "ref": "main",
+    "commit": "254ad7455d4cfd9ff7bd13113358c230eccced7a"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "scripts/dev/it-oracle.sh",
+    "scripts/dev/oracle-tune/tooling.sh",
+    "scripts/dev/oracle-tune/README.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:db23acb828c7c8046259be5c375e7534c587d0734d0bd80e6683457892d00592",
+      "by": "naelonambul",
+      "at": "2026-11-19T10:00:54Z",
+      "write_scope_sha256": "sha256:e0fe07f8db2b65e2201fd0e29fb31a43810166f166f342f417193d18202d6a3e",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
