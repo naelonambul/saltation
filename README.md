@@ -331,6 +331,8 @@ docker compose -f infra/compose/compose.yml --env-file infra/compose/.env --prof
 
 ## Verification & Checks
 
+For an API-first walkthrough from a fresh clone, see the [agent testing guide](docs/agent-testing.md).
+
 Checks are registered in [`checks.json`](checks.json) and routed by changed paths. Run all checks with:
 
 ```sh
