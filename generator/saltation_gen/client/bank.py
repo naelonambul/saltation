@@ -99,6 +99,10 @@ class BankClient:
         _, body = await self._call("POST", "/internal/v1/seed/accounts", json={"accounts": accounts})
         return body["accounts"]
 
+    async def seed_cards(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        _, body = await self._call("POST", "/internal/v1/seed/cards", json={"cards": items})
+        return body["cards"]
+
     async def outbox_backlog(self) -> int:
         _, body = await self._call("GET", "/internal/v1/outbox")
         return int(body["undelivered"])
@@ -179,18 +183,35 @@ class BankClient:
         status, body = await self._call("GET", f"/internal/v1/sms/{phone}", accept=(200, 404))
         return None if status == 404 else body
 
-    async def client_token(self, client_id: str, client_secret: str) -> str:
+    async def client_token(
+        self,
+        client_id: str,
+        client_secret: str,
+        *,
+        scope: str = "oob",
+        request_id: str | None = None,
+        ctx: Context | None = None,
+    ) -> str:
         _, body = await self._call(
             "POST",
             "/oauth/2.0/token",
+            request_id,
+            ctx=ctx,
             data={
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "scope": "oob",
+                "scope": scope,
                 "grant_type": "client_credentials",
             },
         )
         return body["access_token"]
+
+    async def card_authorize(
+        self, request_id: str, token: str, ctx: Context, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        return await self._call(
+            "POST", "/card/v1/authorize", request_id, token, ctx, json=payload, accept=(200, 422)
+        )
 
     async def inbound_deposit(
         self,

@@ -5,15 +5,16 @@ import asyncio
 import json
 import os
 from dataclasses import asdict
+from datetime import date
 
 from saltation_gen.client import BankClient, new_ulid
 from saltation_gen.config import Settings
-from saltation_gen.drivers import atm, bc, live_normal
+from saltation_gen.drivers import atm, bc, cards, live_normal
 from saltation_gen.drivers import seed as seeding
 from saltation_gen.truth import TruthStore
 from saltation_gen.truth.recovery import RecoveryError
 
-TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc")
+TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc", "generator-cards")
 
 
 async def _main(args: argparse.Namespace) -> None:
@@ -47,6 +48,19 @@ async def _main(args: argparse.Namespace) -> None:
                     args.receiver_account,
                     args.transfer_amount,
                     args.withdraw_amount,
+                    exited_owner=args.recover_exited_owner,
+                )
+            except RecoveryError as error:
+                raise SystemExit(str(error)) from None
+            print(json.dumps(result))
+        elif args.command == "generator-cards":
+            try:
+                result = await cards.run(
+                    bank,
+                    truth,
+                    args.run_id,
+                    settings.seed,
+                    args.date,
                     exited_owner=args.recover_exited_owner,
                 )
             except RecoveryError as error:
@@ -107,6 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--receiver-account", required=True)
     p.add_argument("--transfer-amount", type=int, required=True)
     p.add_argument("--withdraw-amount", type=int, required=True)
+    p.add_argument(
+        "--recover-exited-owner",
+        metavar="OWNER",
+        help="replace this exact stale owner only after verifying its process has exited",
+    )
+    p = sub.add_parser("generator-cards", help="run a seeded card proof on a dedicated backfill bank")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--date", type=date.fromisoformat, required=True, help="fixture KST business date")
     p.add_argument(
         "--recover-exited-owner",
         metavar="OWNER",

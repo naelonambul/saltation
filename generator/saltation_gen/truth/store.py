@@ -4,7 +4,7 @@ from typing import Any
 
 from pymongo import AsyncMongoClient
 
-LABELS = {"normal", "lookalike", "A", "B", "C", "D", "E", "F"}
+LABELS = {"normal", "lookalike", "A", "B", "C", "D", "E", "F", "G"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class TruthStore:
         self.labels = db["labels"]
         self.runs = db["runs"]
         self.roster = db["roster"]
+        self.card_networks = db["card_networks"]
 
     async def setup(self) -> None:
         await self.labels.create_index(
