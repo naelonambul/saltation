@@ -199,6 +199,21 @@ components:
                 required: [terminal_id]
                 properties:
                   terminal_id: { type: string, maxLength: 20 }
+    SeedAnalystsRequest:
+      type: object
+      required: [analysts]
+      properties:
+        analysts:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [analyst_no, name, password]
+            properties:
+              analyst_no: { type: string, pattern: '^[A-Za-z0-9._-]{1,40}$' }
+              name: { type: string, minLength: 1, maxLength: 60 }
+              password: { type: string, minLength: 8, maxLength: 128, writeOnly: true }
     CreatedResponse:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -302,3 +317,15 @@ paths:
         "409": { description: Synthetic number collision retries exhausted, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "500": { description: Internal error, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "503": { description: Busy, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /internal/v1/seed/analysts:
+    post:
+      summary: Seed a batch of analyst accounts
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SeedAnalystsRequest" } } }
+      responses:
+        "200": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/CreatedResponse" } } } }
+        "400": { description: Invalid batch, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: Duplicate analyst, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "503": { description: Temporarily unavailable, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }

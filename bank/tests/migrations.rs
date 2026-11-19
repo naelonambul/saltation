@@ -27,7 +27,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=20).collect::<Vec<_>>()
+        (1..=21).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -35,6 +35,9 @@ async fn migrations_apply_once_and_are_recorded() {
         MIGRATIONS.len(),
         "an empty schema applies every migration"
     );
+
+    let objects: (i64, i64) = db.run(|s| s.query_row(&ADMIN_SCHEMA, &[])).await.unwrap();
+    assert_eq!(objects, (1, 2), "analyst table and customer name index");
 
     let second = db.migrate().await.expect("second run");
     assert_eq!(second, 0, "a second run applies nothing");
@@ -282,4 +285,45 @@ async fn migrations_apply_once_and_are_recorded() {
         tables >= 32,
         "expected the stage-1 and stage-2 tables, found {tables}"
     );
+}
+
+const ADMIN_SCHEMA: SqlStmt =
+    sql_stmt!("test.admin_schema_objects", "sql/admin_schema_objects.sql");
+const ADMIN_SNAPSHOT: SqlStmt = sql_stmt!(
+    "test.admin_upgrade_snapshot",
+    "sql/admin_upgrade_snapshot.sql"
+);
+const ADMIN_TOKENS: SqlStmt =
+    sql_stmt!("test.admin_upgrade_tokens", "sql/admin_upgrade_tokens.sql");
+
+#[tokio::test]
+#[ignore = "requires a populated, isolated backfill schema at migration v20"]
+async fn populated_admin_upgrade() {
+    use chrono::{DateTime, FixedOffset};
+
+    type Token = (
+        String,
+        String,
+        i64,
+        String,
+        Option<String>,
+        DateTime<FixedOffset>,
+        Option<DateTime<FixedOffset>>,
+    );
+    type Snapshot = (i64, i64, i64, i64, i64);
+    let db = Db::connect(&DbConfig::from_env().expect("config")).unwrap();
+    let before: Snapshot = db.run(|s| s.query_row(&ADMIN_SNAPSHOT, &[])).await.unwrap();
+    let tokens: Vec<Token> = db.run(|s| s.query_all(&ADMIN_TOKENS, &[])).await.unwrap();
+    assert_eq!(before.4, 20);
+    assert!(before.0 > 0 && before.1 > 0 && before.3 > 0);
+
+    assert_eq!(db.migrate().await.unwrap(), 1);
+    let after: Snapshot = db.run(|s| s.query_row(&ADMIN_SNAPSHOT, &[])).await.unwrap();
+    assert_eq!(after, (before.0, before.1, before.2, before.3, 21));
+    let current: Vec<Token> = db.run(|s| s.query_all(&ADMIN_TOKENS, &[])).await.unwrap();
+    assert!(current == tokens, "existing access tokens changed");
+    let objects: (i64, i64) = db.run(|s| s.query_row(&ADMIN_SCHEMA, &[])).await.unwrap();
+    assert_eq!(objects, (1, 2), "analyst table and customer name index");
+    assert_eq!(db.migrate().await.unwrap(), 0);
+    db.close().unwrap();
 }

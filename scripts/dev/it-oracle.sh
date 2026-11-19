@@ -444,6 +444,8 @@ run_target() {
       db_pool_isolated
       ;;
     migrations)  reset_schema; cargo_test migrations ;;
+    admin-migrations) cargo_test migrations -- --ignored --exact populated_admin_upgrade ;;
+    admin)       cargo_test admin ;;
     tune-migrations) cargo_test migrations -- --ignored --exact tuning::populated_migrations_preserve_data ;;
     tune-coverage)
       local output="$root/.evidence/oracle-tuning/$(date -u +%Y%m%dT%H%M%SZ)-coverage"
@@ -482,9 +484,9 @@ if [ "$target" = all ]; then
   host_load start
   run_target mongo-users
   run_target migrations
-  cargo_test listeners auth accounts transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes
+  cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes
   run_target backfill
-  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   db_pool_isolated
   run_target observability
   host_load end

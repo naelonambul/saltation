@@ -4,6 +4,8 @@
     "request.completed": "every API request of the public and generator listeners (not /healthz, /metrics or /internal/**), exactly one per HTTP arrival; payload: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; money-moving completions also retain tran_amt, transfer_id, reason, counterparty_bank_code, counterparty_account_no",
     "login.succeeded": "customer login",
     "login.failed": "rejected login",
+    "analyst.login.succeeded": "analyst token issued",
+    "analyst.login.failed": "analyst login refused",
     "logout": "customer logout",
     "device.new": "first login from a device",
     "password_reset.requested": "reset code issued, or a request for an unknown phone",

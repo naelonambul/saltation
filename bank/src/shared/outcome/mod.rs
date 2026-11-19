@@ -94,6 +94,8 @@ impl Recorder {
         }
         let channel = if path.starts_with("/atm/v1/") {
             "ATM"
+        } else if path.starts_with("/admin/v1/") {
+            "ADMIN"
         } else if path == "/card/v1/authorize"
             && ctx.listener == crate::shared::context::Listener::Generator
         {

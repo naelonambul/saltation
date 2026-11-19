@@ -323,3 +323,52 @@ impl FromRequestParts<AppState> for AuthClient {
         Ok(client)
     }
 }
+
+pub(crate) const ANALYST_SCOPE: &str = "analyst:read";
+const SELECT_ANALYST_TOKEN: SqlStmt =
+    sql_stmt!("auth.select_analyst_token", "sql/select_analyst_token.sql");
+
+/// An independent analyst identity. Validating it performs no session writes.
+pub struct AuthAnalyst;
+
+impl FromRequestParts<AppState> for AuthAnalyst {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let ctx = RequestContext::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|e| match e {});
+        let unauthorized = || {
+            ApiError::new(
+                &ctx,
+                StatusCode::UNAUTHORIZED,
+                codes::UNAUTHORIZED,
+                "인증이 필요합니다",
+            )
+        };
+        let hash = token_hash(bearer(parts).ok_or_else(unauthorized)?);
+        let stats = parts
+            .extensions
+            .get::<RequestStats>()
+            .cloned()
+            .unwrap_or_default();
+        let analyst: Option<i64> = state
+            .db
+            .run_in(&stats, move |s| {
+                // Sample after acquiring the session so waiting for the pool cannot extend a token.
+                let now = chrono::Utc::now().with_timezone(&crate::shared::clock::kst());
+                s.query_opt(&SELECT_ANALYST_TOKEN, &[&hash, &ANALYST_SCOPE, &now])
+            })
+            .await
+            .map_err(|error| if matches!(error, crate::shared::db::DbError::Busy) {
+                ApiError::busy(&ctx)
+            } else {
+                tracing::warn!(request_id = %ctx.request_id, %error, "analyst credential lookup failed");
+                ApiError::internal(&ctx)
+            })?;
+        analyst.map(|_| Self).ok_or_else(unauthorized)
+    }
+}
