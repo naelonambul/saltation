@@ -38,6 +38,8 @@ Where the plan allows it (public repositories, or private repositories on GitHub
 
 The `summary` job of the `repository` workflow fails unless every other job succeeded.
 
+For a documentation-only pull request, the `oracle` job runs on a GitHub-hosted runner and logs `Oracle integration: not applicable (documentation-only)` with the base, head, and candidate commits. The eligible changes are the root READMEs and ordinary Markdown under `docs/`, optionally accompanied by the active change packet's plan and metadata. Other pull requests and pushes to `main` run the full Oracle group on OCI. The weekly fresh run also uses OCI.
+
 Import-ready ruleset (`main-protection.json`):
 
 ```json

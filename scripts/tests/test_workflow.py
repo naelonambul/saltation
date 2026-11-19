@@ -75,6 +75,29 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertEqual({n.strip() for n in needs.split(",")}, set(self.jobs) - {"summary"})
         self.assertIn('v["result"] == "success"', self.text)
 
+    def test_oracle_routes_only_proven_documentation_prs_to_hosted(self):
+        status = job_block(self.text, "status")
+        oracle = job_block(self.text, "oracle")
+        self.assertIn("id: oracle-route", status)
+        self.assertIn("steps.oracle-route.outputs.mode", status)
+        self.assertIn("needs: [status]", oracle)
+        docs_pr = "github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only'"
+        self.assertIn(docs_pr + """ && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]'""", oracle)
+        self.assertIn(docs_pr + " && 'docs-only' || 'full'", oracle)
+        archive = 'git archive "$PR_BASE_SHA" scripts/oracle_pr_route.py scripts/repo.py'
+        for block in (status, oracle):
+            self.assertIn(archive, block)
+            self.assertIn('python3 -Es "$route_dir/scripts/oracle_pr_route.py"', block)
+            self.assertIn('--head "$PR_HEAD_SHA" --candidate "$GITHUB_SHA"', block)
+        self.assertLess(status.index(archive), status.index("python3 scripts/repo.py status"))
+        self.assertIn("mode=full", status)
+        self.assertIn('test "$mode" = docs-only', oracle)
+        self.assertIn("Oracle integration: not applicable (documentation-only)", oracle)
+        self.assertRegex(
+            oracle,
+            r"if: env\.ORACLE_MODE == 'full'\s+run: python3 scripts/repo\.py verify \$REPO_ARGS --full --group oracle",
+        )
+
     def test_identity_job_compares_the_author_with_the_variable(self):
         self.assertIn("identity", self.jobs)
         self.assertIn("AGENT_LOGIN: ${{ vars.AGENT_LOGIN }}", self.text)
