@@ -24,6 +24,8 @@ env:
   REPO_ARGS: >-
     --ci --branch=
     ${{ github.event_name == 'pull_request' && format('--pr-body /tmp/pr-body.md --base {0} --head HEAD', github.event.pull_request.base.sha) || '' }}
+  PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
 jobs:
   # Runs the control-plane check directly, so its verdict does not depend on repo.py.
@@ -43,6 +45,8 @@ jobs:
   status:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      oracle_mode: ${{ steps.oracle-route.outputs.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,6 +60,21 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
+      - name: Select Oracle runner
+        id: oracle-route
+        if: github.event_name == 'pull_request'
+        run: |
+          set -o pipefail
+          route_dir=$(mktemp -d)
+          trap 'rm -rf "$route_dir"' EXIT
+          mode=full
+          if git archive "$PR_BASE_SHA" scripts/oracle_pr_route.py scripts/repo.py | tar -xf - -C "$route_dir"; then
+            mode=$(python3 -Es "$route_dir/scripts/oracle_pr_route.py" --event "$GITHUB_EVENT_NAME" \
+              --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --candidate "$GITHUB_SHA" --pr-body /tmp/pr-body.md)
+          else
+            echo 'Oracle routing: full. Base classifier is unavailable.'
+          fi
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
       - run: python3 scripts/repo.py status $REPO_ARGS
 
   # Fails a pull request not authored by the agent identity. An unset
@@ -140,10 +159,13 @@ jobs:
         run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
       - run: python3 scripts/repo.py verify $REPO_ARGS --full --group python
 
-  # Check group `oracle` (checks.json); each check runs in a container.
+  # Allocate OCI only when the Oracle check group applies.
   oracle:
-    runs-on: [self-hosted, linux, ARM64, saltation-oracle]
+    needs: [status]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only' && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]') }}
     timeout-minutes: 120
+    env:
+      ORACLE_MODE: ${{ github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only' && 'docs-only' || 'full' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,7 +179,19 @@ jobs:
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
-      - run: python3 scripts/repo.py verify $REPO_ARGS --full --group oracle
+      - name: Confirm documentation-only decision
+        if: env.ORACLE_MODE == 'docs-only'
+        run: |
+          set -o pipefail
+          route_dir=$(mktemp -d)
+          trap 'rm -rf "$route_dir"' EXIT
+          git archive "$PR_BASE_SHA" scripts/oracle_pr_route.py scripts/repo.py | tar -xf - -C "$route_dir"
+          mode=$(python3 -Es "$route_dir/scripts/oracle_pr_route.py" --event "$GITHUB_EVENT_NAME" \
+            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --candidate "$GITHUB_SHA" --pr-body /tmp/pr-body.md)
+          test "$mode" = docs-only
+          echo 'Oracle integration: not applicable (documentation-only)'
+      - if: env.ORACLE_MODE == 'full'
+        run: python3 scripts/repo.py verify $REPO_ARGS --full --group oracle
 
   # The one status check to require. Every job above must end in success;
   # skipped, cancelled, or failed jobs all fail the summary.
