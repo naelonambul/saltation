@@ -14,7 +14,7 @@
 ![Python](https://img.shields.io/badge/Python_3-Synthetic_Generator-D97706?style=for-the-badge&logo=python&logoColor=1E293B)
 ![TypeScript](https://img.shields.io/badge/TypeScript-React_SPA-1E293B?style=for-the-badge&logo=typescript&logoColor=F59E0B)
 ![OpenAPI](https://img.shields.io/badge/OpenAPI_3.1-KFTC_v3.3.6_%7C_MyData-334155?style=for-the-badge&logo=openapiinitiative&logoColor=F59E0B)
-![Docker Compose](https://img.shields.io/badge/Docker_Compose-ARM64_%7C_AMD64-1E3A8A?style=for-the-badge&logo=docker&logoColor=EFF6FF)
+![Docker Compose](https://img.shields.io/badge/Docker_Compose-ARM64-1E3A8A?style=for-the-badge&logo=docker&logoColor=EFF6FF)
 ![Observability](https://img.shields.io/badge/Observability-Grafana_%7C_Loki_%7C_Prometheus-475569?style=for-the-badge&logo=grafana&logoColor=F59E0B)
 ![License](https://img.shields.io/badge/License-MIT-CA8A04?style=for-the-badge)
 
@@ -54,8 +54,8 @@
 
 Saltation은 실시간 금융 이상거래 탐지(FDS) MLOps 파이프라인의 데이터 소스를 제공하기 위해 구축한 시뮬레이션 은행 서버이자 합성 트래픽 생성기입니다.
 
-1. **은행 서버 (`bank/`)**: [금융결제원 오픈뱅킹공동업무 이용기관 API 명세서 v3.3.6](spec.md)과 금융 마이데이터(MyData) 은행권 논리 데이터 모델을 기반으로 **Oracle Database 19c Enterprise Edition**의 29개 테이블 위에 구현한 Rust API 서버입니다. 입출금 계좌, 이체, 수취인, 무이자 정기예금 및 대출, 체크카드 결제, 인증, 기기/세션 추적을 3개 채널(모바일 웹 API, 시뮬레이션 ATM, 시뮬레이션 카드망)과 분석가용 읽기 전용 어드민 API로 제공합니다.
-2. **합성 활동 생성기 (`generator/`)**: 내부 시딩 인터페이스로 20,000명의 고객을 생성하고, 시뮬레이션 영업일 시계를 전진시키며 365영업일 분량의 과거 이력(Backfill)을 HTTP로 생성한 뒤 실시간(Live) 모드로 전환합니다. 일반 고객 페르소나(직장인, 학생, 자영업자, 고령층)와 사기 시나리오 **A~G**, 정상 유사 거래(Lookalikes)를 함께 구동하며, 정답 라벨은 은행 서버가 접근할 수 없는 별도 데이터베이스(`truth`)에 기록합니다.
+1. **은행 서버 (`bank/`)**: [금융결제원 오픈뱅킹공동업무 이용기관 API 명세서 v3.3.6](spec.md)과 금융 마이데이터(MyData) 은행권 논리 데이터 모델을 기반으로 **Oracle Database 19c Enterprise Edition**를 사용하는 Rust API 서버입니다. 입출금 계좌, 이체, 수취인, 무이자 정기예금 및 대출, 체크카드 결제, 인증, 기기/세션 추적을 3개 채널(모바일 웹 API, 시뮬레이션 ATM, 시뮬레이션 카드망)과 분석가용 읽기 전용 어드민 API로 제공합니다.
+2. **합성 활동 생성기 (`generator/`)**: 내부 시딩 인터페이스와 시뮬레이션 영업일 시계를 사용해 HTTP로 과거 이력(백필)을 생성한 뒤 실시간 모드로 전환합니다. 기본 목표는 고객 20,000명과 365영업일이며, 전체 규모의 실행 검증은 Stage 8에 포함됩니다. 일반 고객 페르소나(직장인, 학생, 자영업자, 고령층)와 사기 시나리오 **A~G**, 정상 유사 거래(Lookalikes)를 함께 구동하며, 정답 라벨은 은행 서버가 접근할 수 없는 별도 데이터베이스(`truth`)에 기록합니다.
 3. **정형 원장 및 비정형 이벤트 스트림**: 관계형 원장 데이터는 Oracle Database에 저장하고, 비즈니스 이벤트(`saltation.log/1`)는 트랜잭셔널 아웃박스를 통해 MongoDB(`bank_logs`)로 전달하며, 운영 JSON 로그(`app.log`)와 Prometheus 메트릭은 Loki와 Grafana로 수집합니다.
 
 ---
@@ -113,19 +113,19 @@ flowchart LR
   PubL --> Oracle
   GenL --> Oracle
   Oracle -->|500건 단위 배치| Relay
-  Relay -->|Bulk Upsert| MongoLogs
+  Relay -->|배치 삽입| MongoLogs
   Core -->|JSON 라인 로그| Alloy --> Loki --> Grafana
   MetL --> Prom --> Grafana
 ```
 
 ### 리스너 및 네트워크 경계
 
-은행 서버는 분리된 Docker 네트워크(`edge`, `internal`, `data`, `obs`)에 세 개의 HTTP 리스너를 둡니다.
+은행 컨테이너는 `edge`, `internal`, `data`, `obs`에 연결되며, 세 리스너는 컨테이너 안의 모든 인터페이스에서 수신합니다. 아래 표는 포트별 호출 용도의 네트워크를 보여줍니다. Compose는 은행 포트 중 퍼블릭 리스너만 호스트에 공개합니다.
 
-| 리스너 | 포트 / 네트워크 | 라우트 | 컨텍스트 처리 |
+| 리스너 | 포트 / 호출 용도 네트워크 | 라우트 | 컨텍스트 처리 |
 |---|---|---|---|
 | **Public** | `:8080` (`edge`) | `/oauth/2.0/revoke`, 고객용 `/v2.0/**` (외부 타행 입금 제외), `/admin/v1/**` | `X-Sim-*` 헤더를 무시하고 (Stage 8 Cloudflare 연동 시) `CF-Connecting-IP` / `CF-IPCountry`에서 클라이언트 IP와 국가를 읽으며, 세션을 `human = true`로 기록합니다. |
-| **Generator** | `:8081` (`internal`) | 퍼블릭 라우트 + `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/card/v1/**`, `/internal/v1/**` | 호스트 외부로 노출되지 않는 내부 포트이며, `X-Request-Id`(ULID), `X-Sim-Ip`, `X-Sim-Region`, `X-Sim-Device` 헤더를 신뢰하고 `human = false`로 기록합니다. |
+| **Generator** | `:8081` (`internal`) | 퍼블릭 라우트 + `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/card/v1/**`, `/internal/v1/**` | 호스트에 공개하지 않는 포트이며, `X-Request-Id`(ULID), `X-Sim-Ip`, `X-Sim-Region`, `X-Sim-Device` 헤더를 신뢰하고 `human = false`로 기록합니다. |
 | **Metrics** | `:9100` (`obs`) | `/metrics` | `obs` 네트워크의 Prometheus가 요청 지연시간, SQL 구문별 실행 시간, 행 잠금 대기, 세션 풀 사용량, 아웃박스 지연, 일마감 불일치 지표를 수집합니다. |
 
 ---
@@ -166,7 +166,7 @@ sequenceDiagram
     end
   end
   R->>O: 미전달 OUTBOX 행을 event_id 순으로 최대 500건 조회
-  R->>M: _id = event_id 기준 Bulk Upsert (저널 쓰기 확인)
+  R->>M: _id = event_id 기준 배치 삽입 (저널 쓰기 확인)
   R->>O: 전달된 행을 OUTBOX에서 DELETE 후 COMMIT
 ```
 
@@ -190,7 +190,7 @@ sequenceDiagram
 ### 3. 트랜잭셔널 아웃박스 및 백프레셔
 
 - **4 GB 상한 전용 테이블스페이스 (F-36a)**: `OUTBOX` 테이블은 자동 확장이 4 GB로 제한된 전용 테이블스페이스에 위치하여 이벤트 적체가 원장 저장 공간을 침범하지 않습니다. 테이블스페이스가 가득 차면 이벤트를 기록해야 하는 트랜잭션은 이벤트를 건너뛰지 않고 재시도 가능한 에러로 롤백됩니다.
-- **배치 릴레이**: [`bank/src/features/outbox_relay/`](bank/src/features/outbox_relay)가 `event_id` 순서로 500건씩 읽어 MongoDB `bank_logs.events`(`_id = event_id`)에 Bulk Upsert(저널 확인)한 뒤 전달된 행을 Oracle에서 삭제합니다.
+- **배치 릴레이**: [`bank/src/features/outbox_relay/`](bank/src/features/outbox_relay)가 `event_id` 순서로 최대 500건을 읽어 MongoDB `bank_logs.events`에 삽입하고 저널 쓰기를 확인한 뒤 전달된 행을 Oracle에서 삭제합니다. 재시도에는 동일한 `_id = event_id`를 사용하므로 중복 키 오류는 무시합니다.
 - **백프레셔 워터마크**: 백필 중 미전달 이벤트가 **50,000건**을 넘으면 생성기는 요청 전송과 시계 전진을 멈추고, **10,000건** 아래로 내려가면 재개합니다. `scripts/dev/it-oracle.sh outbox-outage`가 부하 상태에서 MongoDB를 120초간 중단시켜 이를 검증합니다.
 
 ### 4. 시뮬레이션 영업일 시계 및 일마감
@@ -210,8 +210,8 @@ sequenceDiagram
 
 ### 6. API 요청 결과 및 거절된 거래 시도 기록
 
-- **`request.completed` 이벤트**: 퍼블릭 및 생성기 리스너의 모든 API 요청은 라우트 템플릿, HTTP 상태, 응답 코드, 소요 시간을 담은 `request.completed` 아웃박스 이벤트를 1건 남깁니다(상태 변경 시 핸들러 트랜잭션 내부에서, 조회 및 사전 거절 시 미들웨어에서 기록).
-- **거절된 자금 이동 시도**: `401`, `403`, 인증 잠금, 잘못된 PIN, 잔액 부족, 한도 초과, 정지/미등록 카드, 멱등 충돌, 중복 요청 ID로 거절된 자금 이동 요청은 `TRANSACTION_REQUEST`에 `status = REJECTED`(멱등 키 없음)로 저장됩니다.
+- **`request.completed` 이벤트**: 퍼블릭 및 생성기 리스너의 결과 기록 대상 API 요청은 라우트 템플릿, HTTP 상태, 응답 코드, 소요 시간을 담은 `request.completed` 아웃박스 이벤트를 1건 남깁니다(상태 변경 시 핸들러 트랜잭션 내부에서, 조회 및 사전 거절 시 미들웨어에서 기록). `OPTIONS`, `/healthz`, `/metrics`, `/internal/**`는 기록 대상에서 제외됩니다.
+- **거절된 자금 이동 시도**: `401`, `403`, 인증 잠금, 잘못된 PIN, 잔액 부족, 한도 초과, 정지/미등록 카드, 멱등 충돌, 중복 요청 ID로 거절된 자금 이동 요청은 `TRANSACTION_REQUEST`에 거절 시도로 기록됩니다. 잔액 부족처럼 이체 요청이 멱등 키를 확보한 뒤 거절된 경우, 재요청에 같은 결과를 반환하도록 키와 응답을 보존합니다.
 
 ---
 
@@ -237,7 +237,7 @@ sequenceDiagram
 ### 정답 라벨(Ground Truth) 분리
 
 - **DB 계정 분리**: 생성기는 `generator` MongoDB 계정으로 `truth` 데이터베이스에 라벨과 실행 매니페스트를 기록합니다. 은행 서버의 `bank` 계정은 `bank_logs`만 접근하며, 생성기는 Oracle 접속 정보를 갖지 않습니다.
-- **요청 전 저널링**: 생성기는 HTTP 요청을 전송하기 전에 복구 저널과 관련 주체(`account` 또는 `customer`)별 라벨을 `(request_id, subject_type, subject_id)` 키로 먼저 저장합니다.
+- **요청 전 저널링**: 시나리오 드라이버는 요청 전에 복구 저널과 계좌 또는 고객별 라벨을 저장합니다. 라벨의 키는 `(request_id, subject_type, subject_id)`입니다. 빠른 시작의 `run-normal`도 요청 전에 라벨을 기록합니다.
 - **양방향 계좌 라벨**: **B** 피해자 계좌에서 **C** 대포통장으로 이체할 때는 동일한 `request_id` 아래 송금 계좌에 `B`, 수취 계좌에 `C` 라벨을 각각 기록합니다.
 
 ---
@@ -307,7 +307,7 @@ docker compose -f infra/compose/compose.yml --env-file infra/compose/.env --prof
 
 | 서비스 | 호스트 루프백 주소 | 비고 |
 |---|---|---|
-| **모바일 웹 앱** | `http://127.0.0.1:8088` | 고객용 모바일 웹 SPA |
+| **모바일 웹 앱** | `http://localhost:8088` | 고객용 모바일 웹 SPA |
 | **은행 퍼블릭 리스너** | `http://127.0.0.1:8080/healthz` | 오픈뱅킹(`/v2.0/**`) 및 어드민(`/admin/v1/**`) API |
 | **Grafana** | `http://127.0.0.1:3000` | `Saltation bank` 대시보드, Loki 로그, Prometheus 메트릭 |
 | **Oracle Database 19c EE** | `127.0.0.1:1521` | `ORACLE_PUBLISH`로 설정 (기본값 `127.0.0.1:1521`) |

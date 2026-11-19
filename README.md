@@ -14,7 +14,7 @@
 ![Python](https://img.shields.io/badge/Python_3-Synthetic_Generator-D97706?style=for-the-badge&logo=python&logoColor=1E293B)
 ![TypeScript](https://img.shields.io/badge/TypeScript-React_SPA-1E293B?style=for-the-badge&logo=typescript&logoColor=F59E0B)
 ![OpenAPI](https://img.shields.io/badge/OpenAPI_3.1-KFTC_v3.3.6_%7C_MyData-334155?style=for-the-badge&logo=openapiinitiative&logoColor=F59E0B)
-![Docker Compose](https://img.shields.io/badge/Docker_Compose-ARM64_%7C_AMD64-1E3A8A?style=for-the-badge&logo=docker&logoColor=EFF6FF)
+![Docker Compose](https://img.shields.io/badge/Docker_Compose-ARM64-1E3A8A?style=for-the-badge&logo=docker&logoColor=EFF6FF)
 ![Observability](https://img.shields.io/badge/Observability-Grafana_%7C_Loki_%7C_Prometheus-475569?style=for-the-badge&logo=grafana&logoColor=F59E0B)
 ![License](https://img.shields.io/badge/License-MIT-CA8A04?style=for-the-badge)
 
@@ -54,8 +54,8 @@ Public fraud datasets are static tables. They provide no live event stream, no l
 
 Saltation is a self-contained banking server and synthetic traffic generator built to serve as the data source for a real-time financial fraud anomaly detection MLOps pipeline:
 
-1. **Banking Server (`bank/`)**: A Rust API server following the [KFTC Open Banking v3.3.6](spec.md) user-institution specification and the Korean financial MyData bank-sector logical data model across 29 tables in **Oracle Database 19c Enterprise Edition**. It provides demand deposit accounts, transfers, payees, zero-interest term deposits and loans, debit card payments, authentication, and device/session tracking across three channels (mobile web API, simulated ATM, simulated card network) plus a read-only analyst admin API.
-2. **Synthetic Activity Generator (`generator/`)**: Seeds 20,000 customers via an internal seeding interface, advances a simulated business clock through 365 business days of historical backfill over HTTP, and switches to real-time live traffic. Customer personas (office worker, student, self-employed, elderly) run alongside fraud scenarios **A–G** and benign lookalikes. Ground-truth labels are written to an isolated database (`truth`) that the bank cannot access.
+1. **Banking Server (`bank/`)**: A Rust API server following the [KFTC Open Banking v3.3.6](spec.md) user-institution specification and the Korean financial MyData bank-sector logical data model in **Oracle Database 19c Enterprise Edition**. It provides demand deposit accounts, transfers, payees, zero-interest term deposits and loans, debit card payments, authentication, and device/session tracking across three channels (mobile web API, simulated ATM, simulated card network) plus a read-only analyst admin API.
+2. **Synthetic Activity Generator (`generator/`)**: Uses an internal seeding interface and a simulated business clock to backfill activity over HTTP before switching to live traffic. The default workload targets 20,000 customers and 365 business days. The full-scale run is part of Stage 8. Customer personas (office worker, student, self-employed, elderly) run alongside fraud scenarios **A–G** and benign lookalikes. Ground-truth labels are written to an isolated database (`truth`) that the bank cannot access.
 3. **Structured Ledger & Event Stream**: Relational state lives in Oracle Database; business events (`saltation.log/1`) are delivered to MongoDB (`bank_logs`) through a transactional outbox; operational JSON logs (`app.log`) and Prometheus metrics feed Loki and Grafana.
 
 ---
@@ -113,19 +113,19 @@ flowchart LR
   PubL --> Oracle
   GenL --> Oracle
   Oracle -->|Batches of 500| Relay
-  Relay -->|Bulk upsert| MongoLogs
+  Relay -->|Batch insert| MongoLogs
   Core -->|JSON lines| Alloy --> Loki --> Grafana
   MetL --> Prom --> Grafana
 ```
 
 ### Listeners & Network Boundaries
 
-The bank runs three HTTP listeners across separate Docker networks (`edge`, `internal`, `data`, `obs`):
+The bank container joins `edge`, `internal`, `data`, and `obs`. All three listeners bind inside the container on every interface. The table shows the intended caller network for each port. Compose publishes only the public bank listener to the host.
 
-| Listener | Port / Network | Routes | Context Handling |
+| Listener | Port / Intended caller network | Routes | Context Handling |
 |---|---|---|---|
 | **Public** | `:8080` (`edge`) | `/oauth/2.0/revoke`, customer `/v2.0/**` (except inbound deposit), `/admin/v1/**` | Ignores `X-Sim-*` headers; reads client IP and country from `CF-Connecting-IP` / `CF-IPCountry` (when behind Cloudflare in Stage 8); sets `human = true` on sessions. |
-| **Generator** | `:8081` (`internal`) | Public routes plus `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/card/v1/**`, `/internal/v1/**` | Internal-only port; trusts `X-Request-Id` (ULID), `X-Sim-Ip`, `X-Sim-Region`, and `X-Sim-Device`; sets `human = false`. |
+| **Generator** | `:8081` (`internal`) | Public routes plus `/v2.0/transfer/deposit/fin_num`, `/atm/v1/**`, `/card/v1/**`, `/internal/v1/**` | Port unpublished on the host; trusts `X-Request-Id` (ULID), `X-Sim-Ip`, `X-Sim-Region`, and `X-Sim-Device`; sets `human = false`. |
 | **Metrics** | `:9100` (`obs`) | `/metrics` | Scraped by Prometheus on `obs` for request latency, per-statement SQL execution time, lock waits, pool utilization, outbox lag, and daily-close mismatches. |
 
 ---
@@ -166,7 +166,7 @@ sequenceDiagram
     end
   end
   R->>O: Read up to 500 undelivered OUTBOX rows in event_id order
-  R->>M: Bulk upsert on _id = event_id (journaled write ack)
+  R->>M: Batch insert on _id = event_id (journaled write ack)
   R->>O: DELETE delivered rows from OUTBOX; COMMIT
 ```
 
@@ -190,7 +190,7 @@ sequenceDiagram
 ### 3. Transactional Outbox & Backpressure
 
 - **Dedicated 4 GB Tablespace (F-36a)**: `OUTBOX` is stored in a dedicated Oracle tablespace with `autoextend` capped at 4 GB so an event backlog cannot consume ledger storage. If the tablespace is full, transactions that must emit an event fail and roll back with a retryable error rather than dropping events.
-- **Batched Relay**: [`bank/src/features/outbox_relay/`](bank/src/features/outbox_relay) reads up to 500 rows in `event_id` order, bulk-upserts them into MongoDB `bank_logs.events` (`_id = event_id`) with journaled acknowledgement, and deletes the delivered rows from Oracle.
+- **Batched Relay**: [`bank/src/features/outbox_relay/`](bank/src/features/outbox_relay) reads up to 500 rows in `event_id` order, inserts them in batches into MongoDB `bank_logs.events` with journaled acknowledgment. Retries use the same `_id = event_id`, so duplicate-key errors can be ignored before deleting delivered rows from Oracle.
 - **Backpressure Watermarks**: During backfill, the generator pauses request dispatch and clock advance when undelivered events exceed **50,000** and resumes when the backlog drops below **10,000**. `scripts/dev/it-oracle.sh outbox-outage` tests this by stopping MongoDB for 120 seconds under load.
 
 ### 4. Simulated Business Clock & Day Rollover
@@ -210,8 +210,8 @@ sequenceDiagram
 
 ### 6. Request Outcomes & Rejected Attempts
 
-- **`request.completed` Events**: Every API request on the public or generator listener writes one `request.completed` outbox event with route template, HTTP status, response codes, and duration (committed in the handler's transaction on state changes, or by middleware for reads and early rejections).
-- **Rejected Money-Moving Attempts**: Rejected money-moving requests (`401`, `403`, locked credentials, wrong PIN, insufficient balance, limit exceeded, blocked/unknown card, idempotency conflict, or reused request ID) are stored in `TRANSACTION_REQUEST` with `status = REJECTED` and no idempotency key.
+- **`request.completed` Events**: Eligible API requests on the public or generator listener write one `request.completed` outbox event with route template, HTTP status, response codes, and duration (recorded in the handler transaction for state changes or by middleware for reads and early rejections). Outcome recording excludes `OPTIONS`, `/healthz`, `/metrics`, and `/internal/**`.
+- **Rejected Money-Moving Attempts**: Rejected money-moving requests (`401`, `403`, locked credentials, wrong PIN, insufficient balance, limit exceeded, blocked/unknown card, idempotency conflict, or reused request ID) are recorded as rejected attempts in `TRANSACTION_REQUEST`. Rejections after a transfer claims its idempotency key, such as insufficient balance, keep the key and the response for replay.
 
 ---
 
@@ -237,7 +237,7 @@ sequenceDiagram
 ### Ground-Truth Isolation
 
 - **Separate Database Users**: The generator writes labels and run manifests to the MongoDB `truth` database using the `generator` user. The bank's MongoDB user (`bank`) is granted access only to `bank_logs`, and the generator has no Oracle credentials.
-- **Pre-Request Journaling**: Before sending an HTTP request, the generator persists a recovery journal entry and one label per involved subject (`account` or `customer`), keyed by `(request_id, subject_type, subject_id)`.
+- **Pre-Request Journaling**: The scenario drivers persist recovery journal entries and one label per involved account or customer before dispatch. Labels are keyed by `(request_id, subject_type, subject_id)`. The quick-start `run-normal` command records labels before dispatch.
 - **Dual-Account Labels**: A transfer from a **B** victim to a **C** mule account records label `B` on the sender's account and label `C` on the receiver's account under the same `request_id`.
 
 ---
@@ -307,7 +307,7 @@ Default host loopback bindings in [`infra/compose/compose.yml`](infra/compose/co
 
 | Service | Host Loopback Address | Notes |
 |---|---|---|
-| **Mobile Web App** | `http://127.0.0.1:8088` | Customer mobile web SPA |
+| **Mobile Web App** | `http://localhost:8088` | Customer mobile web SPA |
 | **Bank Public Listener** | `http://127.0.0.1:8080/healthz` | Open Banking (`/v2.0/**`) & Admin (`/admin/v1/**`) API |
 | **Grafana** | `http://127.0.0.1:3000` | `Saltation bank` dashboard, Loki logs, Prometheus metrics |
 | **Oracle Database 19c EE** | `127.0.0.1:1521` | Configured via `ORACLE_PUBLISH` (default `127.0.0.1:1521`) |
