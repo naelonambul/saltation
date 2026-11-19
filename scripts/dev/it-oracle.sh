@@ -3,7 +3,7 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates, generator-bc, generator-cards, generator-behavior
+#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates, generator-bc, generator-cards, generator-behavior, generator-scenarios, generator-lifecycle
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$root/scripts/dev/cargo-container.sh"
@@ -139,6 +139,15 @@ cargo_test() {
   if [ -n "${GENERATOR_BC_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_BC_FIXTURE -e MONGO_TRUTH_URI); fi
   if [ -n "${GENERATOR_CARDS_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_CARDS_FIXTURE -e MONGO_TRUTH_URI); fi
   if [ -n "${GENERATOR_BEHAVIOR_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_BEHAVIOR_FIXTURE -e MONGO_TRUTH_URI); fi
+  if [ -n "${GENERATOR_SCENARIOS_FIXTURE:-}" ]; then
+    extra_env+=(-e GENERATOR_SCENARIOS_FIXTURE -e MONGO_TRUTH_URI -e SALTATION_LOG_DIR=/var/log/saltation
+      -e SALTATION_PUBLIC_URL=http://bank:8080 -e SALTATION_GENERATOR_URL=http://bank:8081
+      -v "${project}_applogs:/var/log/saltation:ro")
+  fi
+  if [ -n "${GENERATOR_LIFECYCLE_FIXTURE:-}" ]; then
+    extra_env+=(-e GENERATOR_LIFECYCLE_FIXTURE -e MONGO_TRUTH_URI -e SALTATION_LOG_DIR=/var/log/saltation
+      -v "${project}_applogs:/var/log/saltation:ro")
+  fi
   [ -z "${CARGO_BUILD_JOBS:-}" ] || extra_env+=(-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
   [ -z "${TUNE_SEED_AT:-}" ] || extra_env+=(-e TUNE_SEED_AT)
@@ -149,7 +158,7 @@ cargo_test() {
   dev_image || return
   cargo_container --rm --name "$cargo_name" --network "${project}_data" \
     -e SALTATION_DB_USER="${IT_DB_USER:-saltation}" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
-    -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
+    -e MONGO_URI="${IT_MONGO_URI:-mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs}" ${extra_env[@]+"${extra_env[@]}"} \
     -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
     saltation/bank-dev:local python3 /repo-scripts/rust-cache.py --bank /src --contracts /contracts --profile debug -- cargo test --locked "${tests[@]}" -- --test-threads=1 ${args[@]+"${args[@]}"}
 }
@@ -393,6 +402,83 @@ generator_behavior() (
   grep -Fxq 'test generator_behavior_proof ... ok' "$verifier"
 )
 
+# Remove only the protected world owned by this proof, after a successful verifier.
+# The fixture prefixes and exact roster ranges are reserved for these CI targets.
+cleanup_stage6_proof() {
+  "${compose[@]}" exec -T -e STAGE6_PROOF_RUN="$1" mongo mongosh --quiet \
+    -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth --eval '
+const t = db.getSiblingDB("truth");
+const id = process.env.STAGE6_PROOF_RUN;
+const run = t.runs.findOne({_id:id, kind:"generator-stage6", completed:true});
+if (!run || !/^stage6-ci-[0-9A-Z]{26}$/.test(id)) quit(2);
+const start = run.inputs.run.start;
+const population = run.inputs.config.population;
+if (!((start === 71000000 && population === 16) || (start === 73000000 && population === 40))) quit(2);
+try {
+  t.stage6_leases.insertOne({_id:"bank",run_id:id,owner:"fixture-cleanup"});
+} catch (e) { quit(2); }
+try {
+const slots = Array.from({length:population}, (_, i) => "C" + String(start + i));
+t.roster.deleteMany({world_run_id:id,protected:true,customer_no:{$in:slots}});
+t.card_networks.deleteMany({_id:{$in:["stage6-card","stage6-oob"]}, world_run_id:id});
+t.labels.deleteMany({run_id:id});
+t.stage6_operations.deleteMany({run_id:id});
+t.stage6_credit.deleteMany({run_id:id});
+t.runs.deleteOne({_id:id});
+} finally {
+  t.stage6_leases.deleteOne({_id:"bank",run_id:id,owner:"fixture-cleanup"});
+}
+' >/dev/null
+}
+
+generator_stage6() (
+  local target="$1" run_id fixture verifier verify_user="" verify_password=""
+  verifier=$(mktemp)
+  cleanup_verifier() {
+    rm -f "$verifier"
+    if [ -n "$verify_user" ]; then
+      "${compose[@]}" exec -T -e STAGE6_VERIFY_USER="$verify_user" mongo mongosh --quiet -u root \
+        -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval \
+        'for (const name of ["truth","bank_logs"]) db.getSiblingDB(name).dropUser(process.env.STAGE6_VERIFY_USER);' \
+        >/dev/null
+    fi
+  }
+  trap cleanup_verifier EXIT
+  "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
+  reset_schema
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
+  "${compose[@]}" --profile tools build generator >/dev/null
+  run_id="stage6-ci-$("${compose[@]}" --profile tools run --rm -T --entrypoint python generator -c \
+    'from saltation_gen.client.bank import new_ulid; print(new_ulid())')"
+  verify_user="stage6_verifier_${run_id#stage6-ci-}"
+  verify_password=$(python3 -c 'import secrets; print(secrets.token_hex(24))')
+  "${compose[@]}" exec -T -e STAGE6_VERIFY_USER="$verify_user" -e STAGE6_VERIFY_PASSWORD="$verify_password" \
+    mongo mongosh --quiet -u root -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval '
+for (const name of ["truth","bank_logs"]) {
+  db.getSiblingDB(name).createUser({user:process.env.STAGE6_VERIFY_USER,pwd:process.env.STAGE6_VERIFY_PASSWORD,
+                                  roles:[{role:"read",db:name}]});
+}' >/dev/null
+  export MONGO_TRUTH_URI="mongodb://$verify_user:$verify_password@mongo:27017/truth"
+  export IT_MONGO_URI="mongodb://$verify_user:$verify_password@mongo:27017/bank_logs"
+  if [ "$target" = scenarios ]; then
+    fixture=$("${compose[@]}" --profile tools run --rm -T generator run-backfill --run-id "$run_id" \
+      --first 2025-10-18 --days 4 --customers 16 --start 71000000 --no-normal --workers 4 \
+      --annual-quotas '{"A":1,"B":2,"C":2,"D":1}')
+    printf '%s\n' "$fixture"
+    GENERATOR_SCENARIOS_FIXTURE="$fixture" \
+      cargo_test generator_scenarios -- --ignored --exact generator_scenarios_proof 2>&1 | tee "$verifier"
+  else
+    fixture=$("${compose[@]}" --profile tools run --rm -T \
+      -v "$root/generator/tests/stage6_lifecycle_harness.py:/proof.py:ro" \
+      --entrypoint python generator /proof.py "$run_id")
+    printf '%s\n' "$fixture"
+    GENERATOR_LIFECYCLE_FIXTURE="$fixture" \
+      cargo_test generator_lifecycle -- --ignored --exact generator_lifecycle_proof 2>&1 | tee "$verifier"
+  fi
+  grep -Fxq "test generator_${target}_proof ... ok" "$verifier"
+  cleanup_stage6_proof "$run_id"
+)
+
 # Plan step 10: the whole stack, 1,000 seeded customers, 10 minutes of normal
 # transfers from the generator, the Rust end-to-end checks, Prometheus data,
 # then a person's flow in the mobile web app with Playwright.
@@ -531,6 +617,8 @@ run_target() {
     generator-bc) generator_bc ;;
     generator-cards) generator_cards ;;
     generator-behavior) generator_behavior ;;
+    generator-scenarios) generator_stage6 scenarios ;;
+    generator-lifecycle) generator_stage6 lifecycle ;;
     browser-dates) browser_dates ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
@@ -552,6 +640,8 @@ if [ "$target" = all ]; then
   run_target generator-bc
   run_target generator-cards
   run_target generator-behavior
+  run_target generator-scenarios
+  run_target generator-lifecycle
   host_load end
 else
   run_target "$target"

@@ -46,12 +46,13 @@ class BackfillClock:
             raise RecoveryError("fixture requires a bank in BACKFILL")
         return datetime.fromisoformat(clock["business_time"]).astimezone(KST)
 
-    async def move_clock(self, target: datetime) -> None:
+    async def move_clock(self, target: datetime, *, gated: bool = False) -> None:
         current = datetime.fromisoformat(self.progress["current"])
         intended = self.progress["intended"]
         if target < current or (intended and datetime.fromisoformat(intended) != target):
             raise RecoveryError("clock checkpoint does not match the next planned action")
-        await self.gate()
+        if not gated:
+            await self.gate()
         observed = await self.clock()
         if intended is None and observed != current:
             raise RecoveryError("bank clock changed outside the fixture")

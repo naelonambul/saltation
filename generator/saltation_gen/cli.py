@@ -4,17 +4,75 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 
 from saltation_gen.client import BankClient, new_ulid
 from saltation_gen.config import Settings
-from saltation_gen.drivers import atm, bc, behavior, cards, live_normal
+from saltation_gen.config.stage6 import ScheduleConfig
+from saltation_gen.drivers import atm, bc, behavior, cards, live_normal, stage6
 from saltation_gen.drivers import seed as seeding
 from saltation_gen.truth import TruthStore
 from saltation_gen.truth.recovery import RecoveryError
 
-TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc", "generator-cards", "generator-behavior")
+STAGE6_COMMANDS = ("run-backfill", "run-live", "run-backfill-live")
+TRUTH_COMMANDS = (
+    "seed",
+    "run-normal",
+    "atm-smoke",
+    "generator-bc",
+    "generator-cards",
+    "generator-behavior",
+    *STAGE6_COMMANDS,
+)
+
+
+def _quota_map(value: str) -> dict[str, int]:
+    try:
+        parsed = json.loads(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("quotas must be a JSON object") from error
+    if not isinstance(parsed, dict) or any(type(count) is not int or count < 0 for count in parsed.values()):
+        raise argparse.ArgumentTypeError("quotas must be a JSON object with nonnegative integer counts")
+    return parsed
+
+
+async def _stage6(args: argparse.Namespace, bank: BankClient, truth: TruthStore, seed: int) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    signals = (signal.SIGINT, signal.SIGTERM)
+    for signum in signals:
+        loop.add_signal_handler(signum, stop.set)
+    try:
+        result = await stage6.run_stage6(
+            bank,
+            truth,
+            args.run_id,
+            seed,
+            ScheduleConfig(
+                args.customers, args.amplification, args.annual_quotas, args.live_quotas, args.normal
+            ),
+            stage6.RunConfig(
+                first=args.first,
+                days=args.days,
+                live_at=args.live_at,
+                live_seconds=args.live_seconds,
+                workers=args.workers,
+                bucket_seconds=args.bucket_seconds,
+                start=args.start,
+            ),
+            args.command.removeprefix("run-"),
+            stop,
+            resume=args.resume,
+            exited_owner=args.recover_exited_owner,
+        )
+    except (RecoveryError, ValueError) as error:
+        raise SystemExit(str(error)) from None
+    finally:
+        for signum in signals:
+            loop.remove_signal_handler(signum)
+    print(json.dumps(result))
 
 
 async def _main(args: argparse.Namespace) -> None:
@@ -34,7 +92,9 @@ async def _main(args: argparse.Namespace) -> None:
             truth = TruthStore(settings.truth_uri)
             if args.command != "atm-smoke":
                 await truth.setup()
-        if args.command == "seed-parties":
+        if args.command in STAGE6_COMMANDS:
+            await _stage6(args, bank, truth, settings.seed)
+        elif args.command == "seed-parties":
             print(json.dumps(await seeding.seed_parties(bank, settings.seed, args.counterparties)))
         elif args.command == "atm-smoke":
             print(json.dumps(await atm.smoke(bank, truth)))
@@ -136,6 +196,25 @@ def build_parser() -> argparse.ArgumentParser:
             metavar="OWNER",
             help="replace this exact stale owner only after verifying its process has exited",
         )
+    for command in STAGE6_COMMANDS:
+        p = sub.add_parser(command, help="drive a journaled workload on a dedicated Stage 6 bank")
+        p.add_argument("--run-id", required=True)
+        p.add_argument("--first", required=True, type=date.fromisoformat, help="first KST workload date")
+        p.add_argument("--days", type=int, default=365)
+        p.add_argument(
+            "--live-at", type=datetime.fromisoformat, help="planned cutover with explicit timezone"
+        )
+        p.add_argument("--live-seconds", type=int, default=86_400)
+        p.add_argument("--customers", type=int, default=20_000)
+        p.add_argument("--start", type=int, default=0, help="first synthetic customer slot")
+        p.add_argument("--amplification", type=int, default=20)
+        p.add_argument("--annual-quotas", type=_quota_map, help="JSON object for scaled proof quotas")
+        p.add_argument("--live-quotas", type=_quota_map, help="JSON object for scaled proof quotas")
+        p.add_argument("--normal", action=argparse.BooleanOptionalAction, default=True)
+        p.add_argument("--workers", type=int, default=8)
+        p.add_argument("--bucket-seconds", type=int, default=60)
+        p.add_argument("--resume", action="store_true")
+        p.add_argument("--recover-exited-owner", metavar="OWNER")
     p = sub.add_parser("clock")
     clocks = p.add_subparsers(dest="clock_command", required=True)
     clocks.add_parser("show")

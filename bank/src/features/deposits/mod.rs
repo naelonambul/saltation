@@ -1,6 +1,6 @@
 //! Term deposit products, atomic opening/closure and daily maturity settlement.
 use axum::extract::{State, rejection::JsonRejection};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header::CACHE_CONTROL};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -24,6 +24,7 @@ const CANDIDATES: SqlStmt = sql_stmt!("deposits.candidates", "sql/candidates.sql
 const CLOSE_DETAIL: SqlStmt = sql_stmt!("deposits.close_detail", "sql/close_detail.sql");
 const CLOSE_INFO: SqlStmt = sql_stmt!("deposits.close_info", "sql/close_info.sql");
 const DETAIL: SqlStmt = sql_stmt!("deposits.detail", "sql/detail.sql");
+const IDENTITY: SqlStmt = sql_stmt!("deposits.identity", "sql/identity.sql");
 const FINISH_REQUEST: SqlStmt = sql_stmt!("deposits.finish_request", "sql/finish_request.sql");
 const INSERT_ACCOUNT: SqlStmt = sql_stmt!("deposits.insert_account", "sql/insert_account.sql");
 const INSERT_DETAIL: SqlStmt = sql_stmt!("deposits.insert_detail", "sql/insert_detail.sql");
@@ -45,6 +46,53 @@ pub fn router() -> Router<AppState> {
         .route(ENDPOINT, post(open))
         .route("/v2.0/ext/deposits/{id}", get(read))
         .route("/v2.0/ext/deposits/{id}/close", post(close))
+}
+
+pub fn identity_router() -> Router<AppState> {
+    Router::new().route("/internal/v1/deposits/{id}/identity", get(identity))
+}
+
+async fn identity(
+    State(state): State<AppState>,
+    ctx: RequestContext,
+    Extension(stats): Extension<RequestStats>,
+    who: AuthCustomer,
+    crate::shared::api::Path(id): crate::shared::api::Path<String>,
+) -> Result<Response, ApiError> {
+    require_scope(&ctx, &who, "inquiry")?;
+    let deposit_id = id
+        .parse::<i64>()
+        .ok()
+        .filter(|_| numeric(&id))
+        .unwrap_or(-1);
+    let pair: Option<(String, String)> = state
+        .db
+        .run_in(&stats, move |s| {
+            s.query_opt(&IDENTITY, &[&deposit_id, &who.customer_id])
+        })
+        .await
+        .map_err(|e| db_error(&ctx, &e))?;
+    let Some((term, linked)) = pair else {
+        return Err(ApiError::new(
+            &ctx,
+            StatusCode::NOT_FOUND,
+            codes::NOT_FOUND,
+            "대상 없음",
+        ));
+    };
+    // Unlike public account reads, this response carries no telemetry annotation.
+    let mut response = api::ok(
+        &ctx,
+        json!({
+            "deposit_id": deposit_id.to_string(),
+            "term_account_no": term,
+            "linked_account_no": linked,
+        }),
+    );
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 fn invalid(ctx: &RequestContext) -> ApiError {

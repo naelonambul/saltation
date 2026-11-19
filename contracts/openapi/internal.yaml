@@ -3,14 +3,28 @@ info:
   title: Saltation internal interface (generator only)
   version: 0.1.0
   description: >
-    Served on the generator listener only, without authentication: seeding,
-    the simulated SMS outbox, the simulated clock and the outbox backlog.
+    Served on the generator listener only. Seeding, the simulated SMS outbox,
+    the simulated clock and the outbox backlog are unauthenticated. Deposit
+    identity lookup requires a customer session with the inquiry scope.
     Every response carries the common envelope of public.yaml. Amounts here
     are JSON integers.
 servers:
   - url: http://localhost:8081
 components:
+  securitySchemes:
+    CustomerSession:
+      type: http
+      scheme: bearer
   schemas:
+    DepositIdentity:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [deposit_id, term_account_no, linked_account_no]
+          properties:
+            deposit_id: { type: string, pattern: "^[0-9]{1,12}$" }
+            term_account_no: { type: string, pattern: "^[0-9]{4,16}$" }
+            linked_account_no: { type: string, pattern: "^[0-9]{4,16}$" }
     Envelope:
       type: object
       required: [api_tran_id, api_tran_dtm, rsp_code, rsp_message, request_id]
@@ -30,10 +44,13 @@ components:
       allOf:
         - $ref: "#/components/schemas/Envelope"
         - type: object
-          required: [mode, business_time, rolled_through]
+          required: [mode, business_time, rolled_through, live_started_at]
           properties:
             mode: { enum: [BACKFILL, LIVE] }
             business_time: { type: string, format: date-time }
+            live_started_at:
+              description: The committed LIVE transition instant in KST. Null in BACKFILL.
+              anyOf: [{ type: string, format: date-time }, { type: "null" }]
             rolled_through:
               description: The last business date whose rollover finished; null before the first.
               anyOf: [{ type: string, format: date }, { type: "null" }]
@@ -222,6 +239,53 @@ components:
           properties:
             created: { type: integer, minimum: 0 }
 paths:
+  /internal/v1/deposits/{deposit_id}/identity:
+    get:
+      operationId: internalDepositIdentity
+      summary: Resolve the exact accounts for an owned term deposit
+      description: The authenticated owner can resolve an owned term deposit in any state.
+      security:
+        - CustomerSession: []
+      parameters:
+        - name: deposit_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Exact term and linked demand account numbers
+          headers:
+            Cache-Control:
+              required: true
+              schema: { const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositIdentity" }
+        "401":
+          description: Missing or invalid customer session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Customer session without inquiry scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Malformed, unknown, or non-owned term deposit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Internal database error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Database unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /internal/v1/clock:
     get:
       summary: The simulated clock
