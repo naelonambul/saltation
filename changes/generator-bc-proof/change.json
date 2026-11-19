@@ -28,15 +28,17 @@
     "bank/src/app.rs",
     "bank/src/features/deposits/mod.rs",
     "bank/src/features/deposits/sql/identity.sql",
-    "contracts/openapi/internal.yaml"
+    "contracts/openapi/internal.yaml",
+    "bank/src/shared/clock/mod.rs",
+    "bank/src/shared/clock/sql/select_clock.sql"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:5f8dce7300084e45e00ab1a180e6264c47f697267d8898fbd6f416ca23587d97",
+      "sha256": "sha256:b2b561bbec970d0f29c3214dd55020d655d824eb466c231a7736be5f022a32f4",
       "by": "naelonambul",
-      "at": "2026-11-19T03:54:00Z",
-      "write_scope_sha256": "sha256:06447d1c45e3f8f992096ee082e92c831ce51f94aac446993720bc663a21899e",
+      "at": "2026-11-19T04:47:56Z",
+      "write_scope_sha256": "sha256:21be07aae5bf7c12daa81af017ef81149ebd055dc8de98db61975d7c12e1458f",
       "note": "\uc2b9\uc778"
     }
   ]
