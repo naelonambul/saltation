@@ -431,6 +431,14 @@ t.runs.deleteOne({_id:id});
 ' >/dev/null
 }
 
+time_oracle_phase() {
+  local phase="$1"
+  shift
+  local TIMEFORMAT="it-oracle timing: ${phase} wall_seconds=%3R"
+  printf 'it-oracle phase: %s\n' "$phase" >&2
+  time "$@"
+}
+
 generator_stage6() (
   local target="$1" run_id fixture verifier verify_user="" verify_password=""
   verifier=$(mktemp)
@@ -445,9 +453,9 @@ generator_stage6() (
   }
   trap cleanup_verifier EXIT
   "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
-  reset_schema
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
-  "${compose[@]}" --profile tools build generator >/dev/null
+  time_oracle_phase "generator-$target reset" reset_schema
+  time_oracle_phase "generator-$target bank startup" "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
+  time_oracle_phase "generator-$target build generator" "${compose[@]}" --profile tools build generator >/dev/null
   run_id="stage6-ci-$("${compose[@]}" --profile tools run --rm -T --entrypoint python generator -c \
     'from saltation_gen.client.bank import new_ulid; print(new_ulid())')"
   verify_user="stage6_verifier_${run_id#stage6-ci-}"
@@ -461,19 +469,22 @@ for (const name of ["truth","bank_logs"]) {
   export MONGO_TRUTH_URI="mongodb://$verify_user:$verify_password@mongo:27017/truth"
   export IT_MONGO_URI="mongodb://$verify_user:$verify_password@mongo:27017/bank_logs"
   if [ "$target" = scenarios ]; then
-    fixture=$("${compose[@]}" --profile tools run --rm -T generator run-backfill --run-id "$run_id" \
+    fixture=$(time_oracle_phase "generator-scenarios fixture" "${compose[@]}" --profile tools run --rm -T \
+      generator run-backfill --run-id "$run_id" \
       --first 2025-10-18 --days 4 --customers 16 --start 71000000 --no-normal --workers 4 \
       --annual-quotas '{"A":1,"B":2,"C":2,"D":1}')
     printf '%s\n' "$fixture"
     GENERATOR_SCENARIOS_FIXTURE="$fixture" \
-      cargo_test generator_scenarios -- --ignored --exact generator_scenarios_proof 2>&1 | tee "$verifier"
+      time_oracle_phase "generator-scenarios verifier" cargo_test generator_scenarios -- --ignored \
+        --exact generator_scenarios_proof 2>&1 | tee "$verifier"
   else
-    fixture=$("${compose[@]}" --profile tools run --rm -T \
+    fixture=$(time_oracle_phase "generator-lifecycle fixture" "${compose[@]}" --profile tools run --rm -T \
       -v "$root/generator/tests/stage6_lifecycle_harness.py:/proof.py:ro" \
       --entrypoint python generator /proof.py "$run_id")
     printf '%s\n' "$fixture"
     GENERATOR_LIFECYCLE_FIXTURE="$fixture" \
-      cargo_test generator_lifecycle -- --ignored --exact generator_lifecycle_proof 2>&1 | tee "$verifier"
+      time_oracle_phase "generator-lifecycle verifier" cargo_test generator_lifecycle -- --ignored \
+      --exact generator_lifecycle_proof --show-output 2>&1 | tee "$verifier"
   fi
   grep -Fxq "test generator_${target}_proof ... ok" "$verifier"
   cleanup_stage6_proof "$run_id"
@@ -630,19 +641,19 @@ run_target() {
 
 if [ "$target" = all ]; then
   host_load start
-  run_target mongo-users
-  run_target migrations
-  cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes
-  run_target backfill
-  SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
-  db_pool_isolated
-  run_target observability
-  run_target generator-bc
-  run_target generator-cards
-  run_target generator-behavior
-  run_target generator-scenarios
-  run_target generator-lifecycle
+  time_oracle_phase mongo-users run_target mongo-users
+  time_oracle_phase migrations run_target migrations
+  time_oracle_phase backfill-contracts cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes
+  time_oracle_phase backfill run_target backfill
+  SALTATION_TEST_EXPECT_LIVE=1 time_oracle_phase live-contracts cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
+  time_oracle_phase db-pool-isolated db_pool_isolated
+  time_oracle_phase observability run_target observability
+  time_oracle_phase generator-bc run_target generator-bc
+  time_oracle_phase generator-cards run_target generator-cards
+  time_oracle_phase generator-behavior run_target generator-behavior
+  time_oracle_phase generator-scenarios run_target generator-scenarios
+  time_oracle_phase generator-lifecycle run_target generator-lifecycle
   host_load end
 else
-  run_target "$target"
+  time_oracle_phase "$target" run_target "$target"
 fi
