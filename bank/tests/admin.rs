@@ -496,6 +496,7 @@ async fn customer_collections_are_private_bounded_and_attributed() {
     let (no, phone) = customer_ids(&api, &a.account).await;
     let (b_no, _) = customer_ids(&api, &b.account).await;
     let (c_no, _) = customer_ids(&api, &c.account).await;
+    common::register_payee(&api, &a.token, "998", &b.account).await;
     let seed = format!("P{}", common::unique_digits(8));
     let padding = "\u{0001}".repeat(48);
     let name = format!("{seed}%_\\{padding}");
@@ -619,7 +620,6 @@ async fn customer_collections_are_private_bounded_and_attributed() {
         .unwrap();
 
     let card = card_network::card(&api, &a.account, "ACTIVE").await;
-    common::register_payee(&api, &a.token, "998", &b.account).await;
     common::deposits::request(
         &api,
         &a.token,
