@@ -3,33 +3,29 @@
 # project, resets the test schema, and runs the named test target in the bank
 # dev image on the project's data network.
 # Usage: scripts/dev/it-oracle.sh <target>|all [--fresh]
-#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates
+#   targets: tune-seed, tune-capture, driver-bench, driver-parity, db-pool, mongo-users, migrations, backfill, listeners, auth, accounts, transfers, payees, inbound, password_reset, deposits, loans, outbox, outbox-outage, observability, e2e, browser-dates, generator-bc
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$root/scripts/dev/cargo-container.sh"
-project="saltation-it"
+project="${SALTATION_IT_PROJECT:-saltation-it}"
+case "$project" in
+  *[!a-z0-9_-]*) echo "invalid isolated integration project: $project" >&2; exit 2 ;;
+  saltation-it|saltation-it-[a-z0-9]*) ;;
+  *) echo "invalid isolated integration project: $project" >&2; exit 2 ;;
+esac
+cargo_name="${project}-cargo"
 
 # State lives outside the checkout (CI checkouts delete untracked files), so the
 # test database is created once and reused across runs (plan oracle-ci-speed).
-state_dir="${SALTATION_IT_DIR:-$HOME/.cache/saltation-it}"
-mkdir -p "$state_dir" && chmod 700 "$state_dir"
+project_state="$HOME/.cache/$project"
+state_dir="${SALTATION_IT_DIR:-$project_state}"
+mkdir -p "$project_state" "$state_dir" && chmod 700 "$project_state" "$state_dir"
 env_file="$state_dir/env"
 compose=(docker compose -p "$project" -f "$root/infra/compose/compose.yml" --env-file "$env_file" --profile ci)
 
-# One run at a time per host: flock where available (Linux runner), otherwise a
-# directory lock that is taken over when its holder process is gone.
-exec 9>"$state_dir/lock"
-if command -v flock >/dev/null 2>&1; then
-  flock 9
-else
-  until mkdir "$state_dir/lock.d" 2>/dev/null; do
-    holder=$(cat "$state_dir/lock.d/pid" 2>/dev/null || echo)
-    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$state_dir/lock.d"; continue; fi
-    sleep 2
-  done
-  echo $$ >"$state_dir/lock.d/pid"
-  trap 'rm -rf "$state_dir/lock.d"' EXIT
-fi
+# The parent keeps fd 9 open for the entire run. The kernel releases its lock on exit.
+exec 9>"$project_state/lock"
+python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
 
 # Anything that only runs when the volumes are created is part of the key; a
 # different key recreates the test volumes so setup changes are always proven.
@@ -98,7 +94,7 @@ fi
 # Leftovers from a cancelled run: the cargo container, a stopped MongoDB
 # (outbox-outage), and application containers whose relay would drain the
 # outbox under the database tests. Only observability and e2e run the bank.
-docker rm -f saltation-it-cargo >/dev/null 2>&1 || true
+docker rm -f "$cargo_name" >/dev/null 2>&1 || true
 case "$target" in
   observability|e2e) ;;
   *) "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true ;;
@@ -140,6 +136,8 @@ cargo_test() {
   local extra_env=()
   [ -n "${OUTBOX_OUTAGE_TEST:-}" ] && extra_env=(-e OUTBOX_OUTAGE_TEST)
   [ -n "${E2E_SINCE:-}" ] && extra_env=(-e E2E_SINCE -e MONGO_TRUTH_URI -e E2E_ATM -v "${project}_applogs:/var/log/saltation:ro")
+  if [ -n "${GENERATOR_BC_FIXTURE:-}" ]; then extra_env+=(-e GENERATOR_BC_FIXTURE -e MONGO_TRUTH_URI); fi
+  [ -z "${CARGO_BUILD_JOBS:-}" ] || extra_env+=(-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
   [ -z "${ORA_SDTZ:-}" ] || extra_env+=(-e ORA_SDTZ)
   [ -z "${TUNE_SEED_AT:-}" ] || extra_env+=(-e TUNE_SEED_AT)
   [ "${SALTATION_TEST_EXPECT_LIVE:-}" = 1 ] && extra_env+=(-e SALTATION_TEST_EXPECT_LIVE=1)
@@ -147,7 +145,7 @@ cargo_test() {
     extra_env+=(-e "TUNE_COVERAGE_OUT=/coverage/$(basename "$TUNE_COVERAGE_OUT")" -v "$(dirname "$TUNE_COVERAGE_OUT"):/coverage")
   fi
   dev_image || return
-  cargo_container --rm --name saltation-it-cargo --network "${project}_data" \
+  cargo_container --rm --name "$cargo_name" --network "${project}_data" \
     -e SALTATION_DB_USER="${IT_DB_USER:-saltation}" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=10000 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
     -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" ${extra_env[@]+"${extra_env[@]}"} \
     -v "$root/bank":/src -w /src -v "$root/contracts":/contracts:ro -e CONTRACTS_DIR=/contracts -v saltation-cargo-registry:/root/.cargo/registry -v saltation-cargo-target-guarded-v1:/target -v "$root/scripts/dev":/repo-scripts:ro \
@@ -257,7 +255,7 @@ LIMITS
         BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" &
         watcher=$!
       fi
-      if ! cargo_container --rm --name saltation-it-cargo --network "${project}_data" --cpus 2 --memory 4g \
+      if ! cargo_container --rm --name "$cargo_name" --network "${project}_data" --cpus 2 --memory 4g \
         -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
         -e MONGO_URI="mongodb://bank:${MONGO_BANK_PASSWORD}@mongo:27017/bank_logs" \
         ${bench_env[@]+"${bench_env[@]}"} -e BENCH_DRIVER -e BENCH_WORKLOAD="$workload" -e BENCH_CONCURRENCY="$concurrency" -e BENCH_RUN="$run" \
@@ -335,6 +333,33 @@ observability() {
     || { echo "observability: Grafana dashboard missing" >&2; return 1; }
   echo "observability: Grafana serves the Saltation bank dashboard"
 }
+
+generator_bc() (
+  local_dir=$(mktemp -d)
+  trap 'rm -f "$local_dir/fault.jsonl" "$local_dir/resume.jsonl" "$local_dir/verifier.log"; rmdir "$local_dir"' EXIT
+  "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
+  reset_schema
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
+  "${compose[@]}" --profile tools build generator >/dev/null
+  harness="$root/generator/tests/bc_harness.py"
+  gen=("${compose[@]}" --profile tools run --rm -T -v "$harness:/proof.py:ro" --entrypoint python generator /proof.py)
+  run_id=$("${compose[@]}" --profile tools run --rm -T --entrypoint python generator -c \
+    'from saltation_gen.client.bank import new_ulid; print(new_ulid())')
+  owner="$run_id-fault"
+  status=0
+  "${gen[@]}" fault "$run_id" "$owner" >"$local_dir/fault.jsonl" || status=$?
+  cat "$local_dir/fault.jsonl"
+  [ "$status" -eq 75 ] || { echo "generator-bc: expected fault exit 75, got $status" >&2; exit 1; }
+  grep -Fq '"fault": "discarded_committed_transfer_response"' "$local_dir/fault.jsonl"
+  status=0
+  "${gen[@]}" resume "$run_id" "$owner" >"$local_dir/resume.jsonl" || status=$?
+  cat "$local_dir/resume.jsonl"
+  [ "$status" -eq 0 ] || exit "$status"
+  fixture=$(python3 "$harness" combine "$local_dir/fault.jsonl" "$local_dir/resume.jsonl" "$owner")
+  GENERATOR_BC_FIXTURE="$fixture" MONGO_TRUTH_URI="mongodb://generator:${MONGO_GENERATOR_PASSWORD}@mongo:27017/truth" \
+    cargo_test generator_bc -- --ignored --exact generator_bc_recovery_proof 2>&1 | tee "$local_dir/verifier.log"
+  grep -Fxq 'test generator_bc_recovery_proof ... ok' "$local_dir/verifier.log"
+)
 
 # Plan step 10: the whole stack, 1,000 seeded customers, 10 minutes of normal
 # transfers from the generator, the Rust end-to-end checks, Prometheus data,
@@ -471,6 +496,7 @@ run_target() {
     outbox-outage) outbox_outage ;;
     observability) observability ;;
     e2e)         e2e ;;
+    generator-bc) generator_bc ;;
     browser-dates) browser_dates ;;
     mongo-users) mongo_users ;;
     *) echo "unknown target: $1" >&2; exit 2 ;;
@@ -489,6 +515,7 @@ if [ "$target" = all ]; then
   SALTATION_TEST_EXPECT_LIVE=1 cargo_test listeners auth accounts admin transfers payees cards card_payments inbound password_reset deposits loans outbox outcomes atm driver_parity db_pool
   db_pool_isolated
   run_target observability
+  run_target generator-bc
   host_load end
 else
   run_target "$target"

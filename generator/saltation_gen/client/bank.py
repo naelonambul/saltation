@@ -125,6 +125,8 @@ class BankClient:
         memo: str = "",
         tran_dtime: str | None = None,
         bank_code: str = "998",
+        *,
+        transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """Returns (status, body); 200 done, 422 rejected by the bank."""
         return await self._call(
@@ -134,7 +136,7 @@ class BankClient:
             token,
             ctx,
             json={
-                "bank_tran_id": bank_tran_id(),
+                "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                 "fintech_use_num": fintech_use_num,
                 "tran_amt": str(amount),
                 "tran_dtime": tran_dtime or time.strftime("%Y%m%d%H%M%S"),

@@ -8,15 +8,18 @@ from dataclasses import asdict
 
 from saltation_gen.client import BankClient, new_ulid
 from saltation_gen.config import Settings
-from saltation_gen.drivers import atm, live_normal
+from saltation_gen.drivers import atm, bc, live_normal
 from saltation_gen.drivers import seed as seeding
 from saltation_gen.truth import TruthStore
+from saltation_gen.truth.recovery import RecoveryError
+
+TRUTH_COMMANDS = ("seed", "run-normal", "atm-smoke", "generator-bc")
 
 
 async def _main(args: argparse.Namespace) -> None:
     settings = (
         Settings.from_env()
-        if args.command in ("seed", "run-normal", "atm-smoke")
+        if args.command in TRUTH_COMMANDS
         else Settings(
             bank_url=os.environ.get("SALTATION_BANK_URL", "http://bank:8081"),
             truth_uri="",
@@ -26,7 +29,7 @@ async def _main(args: argparse.Namespace) -> None:
     bank = BankClient(settings.bank_url)
     truth = None
     try:
-        if args.command in ("seed", "run-normal", "atm-smoke"):
+        if args.command in TRUTH_COMMANDS:
             truth = TruthStore(settings.truth_uri)
             if args.command != "atm-smoke":
                 await truth.setup()
@@ -34,6 +37,21 @@ async def _main(args: argparse.Namespace) -> None:
             print(json.dumps(await seeding.seed_parties(bank, settings.seed, args.counterparties)))
         elif args.command == "atm-smoke":
             print(json.dumps(await atm.smoke(bank, truth)))
+        elif args.command == "generator-bc":
+            try:
+                result = await bc.run(
+                    bank,
+                    truth,
+                    args.run_id,
+                    args.sender_account,
+                    args.receiver_account,
+                    args.transfer_amount,
+                    args.withdraw_amount,
+                    exited_owner=args.recover_exited_owner,
+                )
+            except RecoveryError as error:
+                raise SystemExit(str(error)) from None
+            print(json.dumps(result))
         elif args.command == "seed-terminals":
             print(json.dumps({"atm_terminals": await seeding.seed_terminals(bank)}))
         elif args.command == "clock":
@@ -83,6 +101,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--counterparties", type=int, required=True)
     sub.add_parser("seed-terminals")
     sub.add_parser("atm-smoke")
+    p = sub.add_parser("generator-bc", help="run or resume a synthetic B/C proof against a frozen bank")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--sender-account", required=True)
+    p.add_argument("--receiver-account", required=True)
+    p.add_argument("--transfer-amount", type=int, required=True)
+    p.add_argument("--withdraw-amount", type=int, required=True)
+    p.add_argument(
+        "--recover-exited-owner",
+        metavar="OWNER",
+        help="replace this exact stale owner only after verifying its process has exited",
+    )
     p = sub.add_parser("clock")
     clocks = p.add_subparsers(dest="clock_command", required=True)
     clocks.add_parser("show")
