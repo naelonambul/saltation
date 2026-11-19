@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "generator-bc-proof",
+  "kind": "implementation",
+  "title": "Prove recoverable B-to-C generator execution",
+  "base": {
+    "ref": "main",
+    "commit": "682db6baab24edd4b8951a524bd8f20dd6c5351f"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "generator/saltation_gen/**",
+    "generator/tests/**",
+    "bank/tests/generator_bc.rs",
+    "bank/tests/sql/generator_bc_*.sql",
+    "scripts/dev/it-oracle.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:4a70d2e082870d3dd8acf6619f130516cce0a9d753bc48acd03b9aff193c136d",
+      "by": "naelonambul",
+      "at": "2026-11-19T01:40:16Z",
+      "write_scope_sha256": "sha256:2780fde1dbfb8c22528a457f55b27ff311e5ca33a815b622423ba9851290f2b0",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
