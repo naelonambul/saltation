@@ -1,6 +1,6 @@
 ---
 - name: Common baseline on Saltation Ubuntu VMs
-  hosts: mongo:bank:generator
+  hosts: mongo:bank:web:generator
   become: true
   tasks:
     - name: Install base packages
@@ -164,7 +164,7 @@
       no_log: true
       changed_when: false
 
-- name: Build Saltation Bank (Rust x86_64) and Mobile Web SPA (nginx) on saltation-bank
+- name: Build Saltation Bank (Rust x86_64) on saltation-bank
   hosts: bank
   become: true
   vars:
@@ -219,6 +219,29 @@
         group: lab
         mode: "0755"
 
+- name: Build Mobile Web SPA (nginx) on saltation-web
+  hosts: web
+  become: true
+  vars:
+    saltation_repo_url: "https://github.com/naelonambul/saltation.git"
+    saltation_ref: "main"
+    saltation_dir: "/opt/saltation"
+    effective_bank_ip: "{% if bank_lan_ip is defined %}{{ bank_lan_ip }}{% else %}{{ hostvars[groups['bank'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['bank'][0]].ansible_host) }}{% endif %}"
+  tasks:
+    - name: Clone or update Saltation repository
+      ansible.builtin.git:
+        repo: "{{ saltation_repo_url }}"
+        dest: "{{ saltation_dir }}"
+        version: "{{ saltation_ref }}"
+        force: true
+
+    - name: Own /opt/saltation by lab for native builds
+      ansible.builtin.file:
+        path: "{{ saltation_dir }}"
+        owner: lab
+        group: lab
+        recurse: true
+
     - name: Install Node.js 22 and nginx
       ansible.builtin.shell: |
         curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -231,8 +254,8 @@
       become_user: lab
       ansible.builtin.shell: |
         cd {{ saltation_dir }}/web
-        CI=true VITE_API_BASE="http://{{ ansible_facts.lan0.ipv4.address | default(ansible_host) }}:8080" pnpm install --frozen-lockfile
-        CI=true VITE_API_BASE="http://{{ ansible_facts.lan0.ipv4.address | default(ansible_host) }}:8080" pnpm build
+        CI=true VITE_API_BASE="http://{{ effective_bank_ip }}:8080" pnpm install --frozen-lockfile
+        CI=true VITE_API_BASE="http://{{ effective_bank_ip }}:8080" pnpm build
       args:
         creates: "{{ saltation_dir }}/web/apps/mobile/dist/index.html"
 
