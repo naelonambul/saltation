@@ -158,16 +158,16 @@ sequenceDiagram
     B->>B: Validate status, ownership, balance, and limits
     alt Validation passes
       B->>O: Ledger writes TRANSFER, ACCOUNT_TRANSACTION, balances, daily totals
-      B->>O: INSERT domain & request.completed events into OUTBOX; COMMIT
+      B->>O: INSERT domain & request.completed events into OUTBOX and COMMIT
       B-->>C: 200 OK
     else Business rejection
-      B->>O: Update TRANSACTION_REQUEST status = REJECTED + insert OUTBOX event; COMMIT
+      B->>O: Update TRANSACTION_REQUEST status = REJECTED + insert OUTBOX event and COMMIT
       B-->>C: Rejection response (zero balance change)
     end
   end
   R->>O: Read up to 500 undelivered OUTBOX rows in event_id order
   R->>M: Batch insert on _id = event_id (journaled write ack)
-  R->>O: DELETE delivered rows from OUTBOX; COMMIT
+  R->>O: DELETE delivered rows from OUTBOX and COMMIT
 ```
 
 - **Lock Ordering**: Operations affecting more than one in-bank account (`transfer`, `term_open`, `term_close`, `loan_disburse`, `loan_repay`) lock all affected accounts with `SELECT ... FOR UPDATE` in ascending `account_id` order in a single Oracle transaction.

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "readme-mermaid-fix",
+  "kind": "repository",
+  "title": "Fix Mermaid sequenceDiagram semicolon parse error in README.md",
+  "base": {
+    "ref": "main",
+    "commit": "e32f59313ac50cc1e816fedf2a39eebbbe16920f"
+  },
+  "baseline": {},
+  "write_scope": [
+    "README.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:09f6c4aede651e3f6b30addc8474fa622fc4ba2be7bb98142a26e47e535d8528",
+      "by": "naelonambul",
+      "at": "2026-11-20T13:33:28Z",
+      "write_scope_sha256": "sha256:be3ae3b6479236a18da3e876a0de9dfe9ae2428896d83c3e804db008861b12d0",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:09f6c4ae)"
+    }
+  ]
+}
