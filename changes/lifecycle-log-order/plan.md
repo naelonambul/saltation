@@ -1,0 +1,16 @@
+# Verify lifecycle switches across rotated logs in timestamp order
+
+## Incident
+
+The [Oracle check for PR #25](https://github.com/naelonambul/saltation/actions/runs/44639978176/job/135968308632) failed in the lifecycle verifier at `bank/tests/generator_lifecycle.rs:227`. Both mode requests were successful. The first was logged at 23:59:19 UTC and the repeat at 00:01:49 UTC in different daily files. The mounted directory enumerated the newer file before the older one, so the verifier compared file traversal order with request order. The failing verifier, fixture and integration launcher are byte-for-byte identical to the base revision, `bf43cb5`. PR #25 remains open.
+
+## Order of work
+
+1. Preserve the failing verifier result and actual request times in ignored evidence. Replay the two log segments in both orders. The deterministic case must feed the newer segment first and fail with the same reversed-ID result when the verifier logic still uses iteration order. Retain a chronological-input control. Use the existing Rust dev image and an exact named Cargo test without connecting to Oracle for this regression.
+2. In `bank/tests/generator_lifecycle.rs`, let the access-log checker consume the existing files through an iterator so the regression can supply segments in a known order. Collect the two mode request events with their full RFC3339 log timestamps, order by instant and assert the same exact two IDs. Require the original timestamp to be strictly earlier than the repeat's, since equal timestamps do not establish chronology. Retain timestamp parsing failures, successful POST, cutoff and clock checks, duplicate detection, and every existing Oracle and MongoDB assertion. Add offline cases to the same Rust test target. Cover both discovery orders with distinct timestamps across UTC midnight and IDs whose lexical order differs from their time order. Also cover a repeat timestamped before the original, and equal timestamps in both discovery orders. Prove syntax and formatting with the native Rust tooling.
+3. In `scripts/dev/it-oracle.sh`, have the existing lifecycle target run its ignored Oracle proof and the new offline cases from the same test binary. Require an exact success marker for each named case and the existing Oracle proof; a filter matching zero tests must fail. Keep the scenarios target, fixture timing, logging, registered groups, and required checks. Run `bash -n scripts/dev/it-oracle.sh`, then `scripts/dev/it-oracle.sh generator-lifecycle` and `python3 scripts/repo.py verify --change lifecycle-log-order --full` on an isolated test project. Keep the before and after evidence and clean that project's owned resources.
+4. Open a separate PR against main under the agent identity. Confirm its exact-head CI and required summary. After the fix merges, update PR #25 with main without rewriting the existing workflow commit. Verify the updated head using its approved plan and monitor CI through the required summary. If the fix has yet to merge, report the dependency on that merge.
+
+## Scope and rollback
+
+Only the lifecycle test and its runner change. Preserve production logging and the ordering requirement. Revert the two test changes together to restore the previous verifier and test invocation.

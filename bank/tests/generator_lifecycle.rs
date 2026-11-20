@@ -179,18 +179,26 @@ async fn assert_manifest(db: &Db, manifest: &Value, fixture: &Fixture) -> Cutove
 
 fn access_logs(fixture: &Fixture, cutover: &Cutover) -> BTreeMap<String, Value> {
     let directory = env::var("SALTATION_LOG_DIR").unwrap_or_else(|_| "/var/log/saltation".into());
+    let segments = fs::read_dir(directory)
+        .expect("read the mounted bank application log directory")
+        .filter_map(|entry| {
+            let path = entry.expect("bank application log entry").path();
+            let name = path.file_name().expect("log file name").to_string_lossy();
+            (name.starts_with("app") && name.ends_with(".log")).then_some(path)
+        })
+        .map(|path| fs::read_to_string(path).expect("read bank application log"));
+    check_access_log_segments(fixture, cutover, segments)
+}
+
+fn check_access_log_segments(
+    fixture: &Fixture,
+    cutover: &Cutover,
+    segments: impl IntoIterator<Item = String>,
+) -> BTreeMap<String, Value> {
     let mut requests = BTreeMap::new();
     let mut switches = Vec::new();
-    for entry in fs::read_dir(directory).expect("read the mounted bank application log directory") {
-        let path = entry.expect("bank application log entry").path();
-        let name = path.file_name().expect("log file name").to_string_lossy();
-        if !name.starts_with("app") || !name.ends_with(".log") {
-            continue;
-        }
-        for line in fs::read_to_string(path)
-            .expect("read bank application log")
-            .lines()
-        {
+    for segment in segments {
+        for line in segment.lines() {
             let row: Value = serde_json::from_str(line).expect("bank application log JSON");
             if row["target"] != "request" || row["listener"] != "GENERATOR" {
                 continue;
@@ -207,7 +215,7 @@ fn access_logs(fixture: &Fixture, cutover: &Cutover) -> BTreeMap<String, Value> 
                 assert_eq!(row["status"], 200);
                 assert_eq!(row["method"], "POST");
                 assert!(at >= cutover.committed);
-                switches.push(id.clone());
+                switches.push((at, id.clone()));
             }
             if matches!(
                 row["endpoint"].as_str(),
@@ -224,15 +232,97 @@ fn access_logs(fixture: &Fixture, cutover: &Cutover) -> BTreeMap<String, Value> 
             );
         }
     }
+    switches.sort_by_key(|(at, _)| *at);
+    assert!(
+        switches.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "mode switch log timestamps must be strictly increasing"
+    );
     assert_eq!(
-        switches,
+        switches
+            .iter()
+            .map(|(_, id)| id.as_str())
+            .collect::<Vec<_>>(),
         [
-            fixture.mode_request_id.clone(),
-            fixture.mode_repeat_request_id.clone()
+            fixture.mode_request_id.as_str(),
+            fixture.mode_repeat_request_id.as_str()
         ],
         "the generator sends one switch; the proof separately tests idempotent reentry"
     );
     requests
+}
+
+const TEST_INITIAL_SWITCH: &str = "z-initial";
+const TEST_REPEAT_SWITCH: &str = "a-repeat";
+const TEST_BEFORE_ROTATION: &str = "2026-11-19T23:59:19.019572Z";
+const TEST_AFTER_ROTATION: &str = "2026-11-20T00:01:49.046985Z";
+
+fn mode_log_segment(id: &str, timestamp: &str) -> String {
+    json!({
+        "target": "request",
+        "listener": "GENERATOR",
+        "timestamp": timestamp,
+        "request_id": id,
+        "endpoint": MODE,
+        "status": 200,
+        "method": "POST",
+    })
+    .to_string()
+}
+
+fn check_mode_log_segments(segments: [String; 2]) {
+    let start = time(&json!("2026-11-19T23:58:00Z"));
+    let fixture = Fixture {
+        run_id: "test-log-rotation".into(),
+        started_at: start,
+        finished_at: time(&json!("2026-11-20T00:02:00Z")),
+        mode_request_id: TEST_INITIAL_SWITCH.into(),
+        mode_repeat_request_id: TEST_REPEAT_SWITCH.into(),
+        dispatch_count: 2,
+        profiles: BTreeMap::new(),
+    };
+    let cutover = Cutover {
+        planned: start,
+        committed: start,
+        observed: start,
+        end: fixture.finished_at,
+    };
+    let requests = check_access_log_segments(&fixture, &cutover, segments);
+    assert_eq!(requests.len(), fixture.dispatch_count);
+}
+
+#[test]
+fn generator_lifecycle_rotated_log_order() {
+    let earlier = mode_log_segment(TEST_INITIAL_SWITCH, TEST_BEFORE_ROTATION);
+    let later = mode_log_segment(TEST_REPEAT_SWITCH, TEST_AFTER_ROTATION);
+    check_mode_log_segments([earlier.clone(), later.clone()]);
+    check_mode_log_segments([later, earlier]);
+}
+
+fn assert_switch_logs_rejected(segments: [String; 2], expected: &str) {
+    let panic = std::panic::catch_unwind(|| check_mode_log_segments(segments))
+        .expect_err("invalid switch chronology must be rejected");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("panic message");
+    assert!(message.contains(expected), "{message}");
+}
+
+#[test]
+fn generator_lifecycle_rejects_reversed_switch_times() {
+    let initial = mode_log_segment(TEST_INITIAL_SWITCH, TEST_AFTER_ROTATION);
+    let repeat = mode_log_segment(TEST_REPEAT_SWITCH, TEST_BEFORE_ROTATION);
+    assert_switch_logs_rejected([initial, repeat], "the generator sends one switch");
+}
+
+#[test]
+fn generator_lifecycle_rejects_equal_switch_times() {
+    let initial = mode_log_segment(TEST_INITIAL_SWITCH, TEST_BEFORE_ROTATION);
+    let repeat = mode_log_segment(TEST_REPEAT_SWITCH, TEST_BEFORE_ROTATION);
+    let expected = "mode switch log timestamps must be strictly increasing";
+    assert_switch_logs_rejected([initial.clone(), repeat.clone()], expected);
+    assert_switch_logs_rejected([repeat, initial], expected);
 }
 
 fn expected_http(op: &Operation) -> u64 {

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "lifecycle-log-order",
+  "kind": "incident",
+  "title": "Verify lifecycle switches across rotated logs in timestamp order",
+  "base": {
+    "ref": "main",
+    "commit": "bf43cb5f84f37c3c4ef4bfdf63cd8ecd860a8774"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "bank/tests/generator_lifecycle.rs",
+    "scripts/dev/it-oracle.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:28ca948d152ef82dc52bc47bf3530f04a9d3f8f7cc6719042d0fd324d793f175",
+      "by": "naelonambul",
+      "at": "2026-11-20T00:31:33Z",
+      "write_scope_sha256": "sha256:975f277effbbe0456050048abd1a31bbaee428b4a236a7e63b197476e22fd60d",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
