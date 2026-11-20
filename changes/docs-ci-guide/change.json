@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "docs-ci-guide",
+  "kind": "repository",
+  "title": "Explain the documentation-only Oracle CI result",
+  "base": {
+    "ref": "main",
+    "commit": "e32f59313ac50cc1e816fedf2a39eebbbe16920f"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/agent-testing.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:394c09cebdcab98f94b36b981f9cac2d852f0c7489239a5139dc43d132f18de8",
+      "by": "naelonambul",
+      "at": "2026-11-20T05:04:59Z",
+      "write_scope_sha256": "sha256:fa238bfe7fe27dd21c09e7a503c360b0c13d1f3c6745d0245fa887cc2ce7673b",
+      "note": "\uc751 \uc2b9\uc778"
+    }
+  ]
+}
