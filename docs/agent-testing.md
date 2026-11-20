@@ -40,6 +40,8 @@ unset SALTATION_IT_DIR
 | Switch to live mode and recover after an interrupted handoff | `scripts/dev/it-oracle.sh generator-lifecycle` | The bounded fixture and `test generator_lifecycle_proof ... ok` both succeed. |
 | Every registered check | `python3 scripts/repo.py verify --full` (add `--change <id>` for an approved change) | Inspect `.evidence/<run>/evidence.json` for a complete passing run. This includes the separate browser check. |
 
+For a documentation-only PR, open the `oracle` job in GitHub Actions and look for `Oracle integration: not applicable (documentation-only)`. A passing `summary` confirms the required PR checks. To report an Oracle runtime result, cite a passing Oracle integration step or local verifier output. See [the CI policy](host-setup.md#protect-main-with-a-ruleset).
+
 ## Run the scenario smoke test
 
 The harness starts the bank, sends synthetic requests and verifies stored results. Watch the output until it exits. A first startup can take several minutes. Use a fresh project if synthetic world credentials are already reserved or before repeating a full run.
