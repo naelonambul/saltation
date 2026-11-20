@@ -17,11 +17,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:ec2580f758e60e1f017b789500693b5457bdd2e5f6b68890a11df96c00a997eb",
+      "sha256": "sha256:91b540149dd6efc195c7fb0a0edab60d5ec1c221d1413c10de8e2e455dc8c8e6",
       "by": "naelonambul",
-      "at": "2026-11-20T21:21:05Z",
+      "at": "2026-11-20T22:29:02Z",
       "write_scope_sha256": "sha256:1f5372819d5fe99e0a06643829c2ead550a5ba93c04ab1d93781fd7a9a976c22",
-      "note": "Owner in session: \uc2b9\uc778 (revised plan sha256:ec2580f7 for unified wsl-vmware-lab oraclelinux-8)"
+      "note": "Owner in session: \uc774\uac70 \uc2b9\uc778 (split saltation-web into 5th VM matching Compose)"
     }
   ]
 }

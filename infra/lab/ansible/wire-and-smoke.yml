@@ -1,17 +1,17 @@
 ---
-- name: Gather network facts across all 4 Saltation VMs
-  hosts: oracle:mongo:bank:generator
+- name: Gather network facts across all 5 Saltation VMs
+  hosts: oracle:mongo:bank:web:generator
   gather_facts: true
   tasks: []
 
-- name: Start Saltation Bank systemd service connected to Oracle and MongoDB VMs
+- name: Start Saltation Bank systemd service connected to Oracle, MongoDB, and Web VMs
   hosts: bank
   become: true
   vars:
     saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
-    effective_oracle_ip: "{{ oracle_lan_ip | default(hostvars[groups['oracle'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['oracle'][0]].ansible_host)) }}"
-    effective_mongo_ip: "{{ mongo_lan_ip | default(hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host)) }}"
-    effective_bank_ip: "{{ bank_lan_ip | default(ansible_facts.lan0.ipv4.address | default(ansible_host)) }}"
+    effective_oracle_ip: "{% if oracle_lan_ip is defined %}{{ oracle_lan_ip }}{% else %}{{ hostvars[groups['oracle'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['oracle'][0]].ansible_host) }}{% endif %}"
+    effective_mongo_ip: "{% if mongo_lan_ip is defined %}{{ mongo_lan_ip }}{% else %}{{ hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host) }}{% endif %}"
+    effective_web_ip: "{% if web_lan_ip is defined %}{{ web_lan_ip }}{% else %}{{ hostvars[groups['web'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['web'][0]].ansible_host) }}{% endif %}"
   tasks:
     - name: Load lab secrets
       ansible.builtin.include_vars:
@@ -37,7 +37,7 @@
           SALTATION_ATM_WITHDRAW_LIMIT=1000000
           SALTATION_ATM_WITHDRAW_DAILY_LIMIT=6000000
           SALTATION_LOG_DIR=/var/log/saltation
-          SALTATION_CORS_ORIGINS=http://{{ effective_bank_ip }}:8088,http://localhost:8088
+          SALTATION_CORS_ORIGINS=http://{{ effective_web_ip }}:8088,http://localhost:8088
           RUST_LOG=info
       no_log: true
 
@@ -84,13 +84,20 @@
         url: http://127.0.0.1:9100/metrics
         status_code: 200
 
-- name: Run end-to-end smoke test from saltation-gen across all 4 VMs
+    - name: Verify saltation-web nginx listener :8088 is reachable over LAN
+      ansible.builtin.uri:
+        url: "http://{{ effective_web_ip }}:8088/healthz"
+        return_content: true
+      register: web_health
+      failed_when: "web_health.status != 200 or ('ok' not in web_health.content)"
+
+- name: Run end-to-end smoke test from saltation-gen across all 5 VMs
   hosts: generator
   become: true
   vars:
     saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
-    effective_mongo_ip: "{{ mongo_lan_ip | default(hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host)) }}"
-    effective_bank_ip: "{{ bank_lan_ip | default(hostvars[groups['bank'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['bank'][0]].ansible_host)) }}"
+    effective_mongo_ip: "{% if mongo_lan_ip is defined %}{{ mongo_lan_ip }}{% else %}{{ hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host) }}{% endif %}"
+    effective_bank_ip: "{% if bank_lan_ip is defined %}{{ bank_lan_ip }}{% else %}{{ hostvars[groups['bank'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['bank'][0]].ansible_host) }}{% endif %}"
   tasks:
     - name: Load lab secrets
       ansible.builtin.include_vars:

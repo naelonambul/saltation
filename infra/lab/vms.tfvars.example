@@ -1,5 +1,6 @@
 # Copy to vms.tfvars in your wsl-vmware-lab checkout (gitignored).
-# Provisions all four Saltation x86_64 VMs (12 vCPU / 18 GB RAM total).
+# Provisions all five Saltation x86_64 VMs (14 vCPU / 20 GB RAM total),
+# matching the Docker Compose service separation 1:1.
 # Requires wsl-vmware-lab with oraclelinux-8 support (PR #61+).
 
 vms = {
@@ -20,7 +21,14 @@ vms = {
   "saltation-bank" = {
     processors = 4
     memory_mb  = 4096
-    groups     = ["app", "bank", "web"]
+    groups     = ["app", "bank"]
+    image      = "ubuntu-24.04"
+    lan        = true
+  }
+  "saltation-web" = {
+    processors = 2
+    memory_mb  = 2048
+    groups     = ["web"]
     image      = "ubuntu-24.04"
     lan        = true
   }

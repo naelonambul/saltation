@@ -2,13 +2,14 @@
 
 Multi-VM `x86_64` deployment of Saltation on a Windows + WSL2 + VMware Workstation host using [`wsl-vmware-lab`](https://github.com/naelonambul/wsl-vmware-lab) (Terraform + Ansible), running every component natively without Docker.
 
-## Topology (4 VMs, 12 vCPU / 18 GB RAM)
+## Topology (5 VMs, 14 vCPU / 20 GB RAM)
 
 | VM | Image (`x86_64`) | vCPU / RAM | Ansible Groups | Services |
 |---|---|---:|---|---|
 | `saltation-oracle` | `oraclelinux-8` (official OL8.10 KVM + `mods.iso`) | 4 vCPU / 8 GB | `db`, `oracle` | Oracle Database 19c EE (`:1521/ORCLPDB1`), `SALTATION_DATA`, 4 GB-capped `OUTBOX_TS` |
 | `saltation-mongo` | `ubuntu-24.04` | 2 vCPU / 4 GB | `db`, `mongo` | MongoDB 8.0 (`:27017`, WiredTiger 1.5 GB, `bank_logs` + `truth` user isolation) |
-| `saltation-bank` | `ubuntu-24.04` | 4 vCPU / 4 GB | `app`, `bank`, `web` | Rust 1.99.1 `bank` (`systemd`: `:8080`, `:8081`, `:9100`) + `nginx` Mobile SPA (`:8088`) |
+| `saltation-bank` | `ubuntu-24.04` | 4 vCPU / 4 GB | `app`, `bank` | Rust 1.99.1 `bank` (`systemd`: `:8080`, `:8081`, `:9100`) |
+| `saltation-web` | `ubuntu-24.04` | 2 vCPU / 2 GB | `web` | `nginx` Mobile SPA static server (`:8088`, pointing at `saltation-bank:8080`) |
 | `saltation-gen` | `ubuntu-24.04` | 2 vCPU / 2 GB | `gen`, `generator` | Python 3.13 (`uv 0.8.17`) `/opt/venv/bin/saltation-gen` |
 
 Every VM attaches three NICs:
@@ -30,7 +31,7 @@ Every VM attaches three NICs:
    # Edit ~/.config/saltation-lab/secrets.yml and replace every placeholder.
    ```
 
-## Step 1: Provision All 4 VMs via Terraform (`wsl-vmware-lab`)
+## Step 1: Provision All 5 VMs via Terraform (`wsl-vmware-lab`)
 
 From your `wsl-vmware-lab` checkout in WSL:
 
@@ -48,7 +49,7 @@ ANSIBLE_TIMEOUT=60 ./lab configure ansible/check-lab.yml
 
 > **Note on `saltation-oracle` disk space:** The default `oraclelinux-8` image ships a ~32 GB root logical volume (enough for Oracle 19c EE + smoke tests). For a full 365-day backfill, expand the VM disk to 45+ GB before running backfill.
 
-## Step 2: Deploy MongoDB, Bank (Rust + Web/nginx), and Generator
+## Step 2: Deploy MongoDB, Bank (Rust), Web (nginx), and Generator
 
 ```sh
 ANSIBLE_TIMEOUT=60 ./lab configure /path/to/saltation/infra/lab/ansible/site.yml \
@@ -67,11 +68,11 @@ ANSIBLE_TIMEOUT=60 ./lab configure /path/to/saltation/infra/lab/ansible/oracle.y
   -e "saltation_secrets_file=$HOME/.config/saltation-lab/secrets.yml"
 ```
 
-## Step 4: Wire `saltation-bank` (`systemd`) & Run 4-VM E2E Smoke Test
+## Step 4: Wire `saltation-bank` (`systemd`) & Run 5-VM E2E Smoke Test
 
 ```sh
 ANSIBLE_TIMEOUT=60 ./lab configure /path/to/saltation/infra/lab/ansible/wire-and-smoke.yml \
   -e "saltation_secrets_file=$HOME/.config/saltation-lab/secrets.yml"
 ```
 
-`wire-and-smoke.yml` discovers each VM's `lan0` IP from Ansible facts (override with `-e oracle_lan_ip=... -e mongo_lan_ip=... -e bank_lan_ip=...` if needed), starts `saltation-bank.service` (running all Oracle SQL migrations automatically), verifies `:8080/healthz` and `:9100/metrics`, seeds 20 customers and 5 counterparties from `saltation-gen`, switches the simulated clock to `live`, drives live transfers, and verifies delivered `bank_logs.events` and `truth.labels` counts on `saltation-mongo`.
+`wire-and-smoke.yml` discovers each VM's `lan0` IP from Ansible facts (override with `-e oracle_lan_ip=... -e mongo_lan_ip=... -e bank_lan_ip=... -e web_lan_ip=...` if needed), configures `SALTATION_CORS_ORIGINS` for `saltation-web`, starts `saltation-bank.service` (running all Oracle SQL migrations automatically), verifies `:8080/healthz`, `:9100/metrics`, and `saltation-web:8088/healthz`, seeds 20 customers and 5 counterparties from `saltation-gen`, switches the simulated clock to `live`, drives live transfers, and verifies delivered `bank_logs.events` and `truth.labels` counts on `saltation-mongo`.
