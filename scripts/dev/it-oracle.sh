@@ -486,7 +486,7 @@ time_oracle_phase() {
 }
 
 generator_stage6() (
-  local target="$1" run_id fixture verifier verify_user="" verify_password=""
+  local target="$1" run_id fixture verifier proof verify_user="" verify_password=""
   verifier=$(mktemp)
   cleanup_verifier() {
     rm -f "$verifier"
@@ -529,8 +529,12 @@ for (const name of ["truth","bank_logs"]) {
       --entrypoint python generator /proof.py "$run_id")
     printf '%s\n' "$fixture"
     GENERATOR_LIFECYCLE_FIXTURE="$fixture" \
-      time_oracle_phase "generator-lifecycle verifier" cargo_test generator_lifecycle -- --ignored \
-      --exact generator_lifecycle_proof --show-output 2>&1 | tee "$verifier"
+      time_oracle_phase "generator-lifecycle verifier" cargo_test generator_lifecycle -- --include-ignored \
+        generator_lifecycle_ --show-output 2>&1 | tee "$verifier"
+    for proof in generator_lifecycle_rotated_log_order generator_lifecycle_rejects_reversed_switch_times \
+      generator_lifecycle_rejects_equal_switch_times; do
+      grep -Fxq "test $proof ... ok" "$verifier"
+    done
   fi
   grep -Fxq "test generator_${target}_proof ... ok" "$verifier"
   cleanup_stage6_proof "$run_id"
