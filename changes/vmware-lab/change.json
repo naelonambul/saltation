@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "vmware-lab",
+  "kind": "implementation",
+  "title": "Add VMware x86_64 multi-VM lab topology and Ansible playbooks",
+  "base": {
+    "ref": "main",
+    "commit": "a6fcdad5824c0f3e2b220b822992918a2596968e"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "infra/lab/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ff822bac68a311e728e580fb84d8ba5a3f8a7c4ca95857ce6261b1f3eb4b8abf",
+      "by": "naelonambul",
+      "at": "2026-11-20T20:32:33Z",
+      "write_scope_sha256": "sha256:1f5372819d5fe99e0a06643829c2ead550a5ba93c04ab1d93781fd7a9a976c22",
+      "note": "Owner in session: \uc2b9\uc778 (plan sha256:ff822bac)"
+    }
+  ]
+}
