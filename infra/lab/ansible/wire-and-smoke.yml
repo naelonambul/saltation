@@ -1,18 +1,18 @@
 ---
+- name: Gather network facts across all 4 Saltation VMs
+  hosts: oracle:mongo:bank:generator
+  gather_facts: true
+  tasks: []
+
 - name: Start Saltation Bank systemd service connected to Oracle and MongoDB VMs
   hosts: bank
   become: true
   vars:
     saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
+    effective_oracle_ip: "{{ oracle_lan_ip | default(hostvars[groups['oracle'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['oracle'][0]].ansible_host)) }}"
+    effective_mongo_ip: "{{ mongo_lan_ip | default(hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host)) }}"
+    effective_bank_ip: "{{ bank_lan_ip | default(ansible_facts.lan0.ipv4.address | default(ansible_host)) }}"
   tasks:
-    - name: Assert required LAN IP variables are provided
-      ansible.builtin.assert:
-        that:
-          - oracle_lan_ip is defined
-          - mongo_lan_ip is defined
-          - bank_lan_ip is defined
-        fail_msg: "Pass -e oracle_lan_ip=... -e mongo_lan_ip=... -e bank_lan_ip=..."
-
     - name: Load lab secrets
       ansible.builtin.include_vars:
         file: "{{ saltation_secrets_file }}"
@@ -28,8 +28,8 @@
           ORA_SDTZ=+09:00
           SALTATION_DB_USER=saltation
           SALTATION_DB_PASSWORD={{ oracle_db_password }}
-          SALTATION_DB_CONNECT={{ oracle_lan_ip }}:1521/ORCLPDB1
-          MONGO_HOST={{ mongo_lan_ip }}:27017
+          SALTATION_DB_CONNECT={{ effective_oracle_ip }}:1521/ORCLPDB1
+          MONGO_HOST={{ effective_mongo_ip }}:27017
           MONGO_USER=bank
           MONGO_PASSWORD={{ mongo_bank_password }}
           MONGO_DB=bank_logs
@@ -37,7 +37,7 @@
           SALTATION_ATM_WITHDRAW_LIMIT=1000000
           SALTATION_ATM_WITHDRAW_DAILY_LIMIT=6000000
           SALTATION_LOG_DIR=/var/log/saltation
-          SALTATION_CORS_ORIGINS=http://{{ bank_lan_ip }}:8088,http://localhost:8088
+          SALTATION_CORS_ORIGINS=http://{{ effective_bank_ip }}:8088,http://localhost:8088
           RUST_LOG=info
       no_log: true
 
@@ -89,6 +89,8 @@
   become: true
   vars:
     saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
+    effective_mongo_ip: "{{ mongo_lan_ip | default(hostvars[groups['mongo'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['mongo'][0]].ansible_host)) }}"
+    effective_bank_ip: "{{ bank_lan_ip | default(hostvars[groups['bank'][0]].ansible_facts.lan0.ipv4.address | default(hostvars[groups['bank'][0]].ansible_host)) }}"
   tasks:
     - name: Load lab secrets
       ansible.builtin.include_vars:
@@ -98,8 +100,8 @@
     - name: Seed 20 customers, 5 counterparties, switch clock to live, and run transfers
       ansible.builtin.shell: |
         set -euo pipefail
-        export SALTATION_BANK_URL="http://{{ bank_lan_ip }}:8081"
-        export MONGO_HOST="{{ mongo_lan_ip }}:27017"
+        export SALTATION_BANK_URL="http://{{ effective_bank_ip }}:8081"
+        export MONGO_HOST="{{ effective_mongo_ip }}:27017"
         export MONGO_USER="generator"
         export MONGO_PASSWORD="${MONGO_GENERATOR_PASSWORD}"
         export MONGO_DB="truth"

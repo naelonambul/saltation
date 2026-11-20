@@ -1,29 +1,23 @@
 ---
 - name: Install and initialize Oracle Database 19c EE natively on saltation-oracle
-  hosts: all
+  hosts: oracle
   become: true
   vars:
     saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
     oracle_rpm_path: "/tmp/oracle-database-ee-19c-1.0-1.x86_64.rpm"
     oracle_hostname: "saltation-oracle"
+    effective_oracle_ip: "{{ oracle_lan_ip | default(ansible_facts.lan0.ipv4.address | default(ansible_host)) }}"
   tasks:
-    - name: Assert oracle_lan_ip is provided
-      ansible.builtin.assert:
-        that:
-          - oracle_lan_ip is defined
-          - oracle_lan_ip | length > 0
-        fail_msg: "Pass -e oracle_lan_ip=<IP> for saltation-oracle."
-
     - name: Load lab secrets
       ansible.builtin.include_vars:
         file: "{{ saltation_secrets_file }}"
       no_log: true
 
-    - name: Ensure /etc/hosts maps oracle_hostname to oracle_lan_ip
+    - name: Ensure /etc/hosts maps oracle_hostname to effective_oracle_ip
       ansible.builtin.lineinfile:
         path: /etc/hosts
         regexp: "{{ oracle_hostname }}$"
-        line: "{{ oracle_lan_ip }} {{ oracle_hostname }}"
+        line: "{{ effective_oracle_ip }} {{ oracle_hostname }}"
 
     - name: Create 4 GB swapfile if no swap is active
       ansible.builtin.shell: |
@@ -122,7 +116,7 @@
         set -euo pipefail
         export ORACLE_HOME=/opt/oracle/product/19c/dbhome_1
         export PATH="$ORACLE_HOME/bin:$PATH"
-        echo "SELECT 'SALTATION_OK' FROM dual;" | sqlplus -s -L "saltation/${SALTATION_DB_PASSWORD}@//{{ oracle_lan_ip }}:1521/ORCLPDB1" | grep -q "SALTATION_OK"
+        echo "SELECT 'SALTATION_OK' FROM dual;" | sqlplus -s -L "saltation/${SALTATION_DB_PASSWORD}@//{{ effective_oracle_ip }}:1521/ORCLPDB1" | grep -q "SALTATION_OK"
       args:
         executable: /bin/bash
       environment:

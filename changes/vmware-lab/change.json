@@ -17,11 +17,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:ff822bac68a311e728e580fb84d8ba5a3f8a7c4ca95857ce6261b1f3eb4b8abf",
+      "sha256": "sha256:ec2580f758e60e1f017b789500693b5457bdd2e5f6b68890a11df96c00a997eb",
       "by": "naelonambul",
-      "at": "2026-11-20T20:32:33Z",
+      "at": "2026-11-20T21:21:05Z",
       "write_scope_sha256": "sha256:1f5372819d5fe99e0a06643829c2ead550a5ba93c04ab1d93781fd7a9a976c22",
-      "note": "Owner in session: \uc2b9\uc778 (plan sha256:ff822bac)"
+      "note": "Owner in session: \uc2b9\uc778 (revised plan sha256:ec2580f7 for unified wsl-vmware-lab oraclelinux-8)"
     }
   ]
 }

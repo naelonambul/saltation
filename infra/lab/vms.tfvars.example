@@ -1,9 +1,15 @@
 # Copy to vms.tfvars in your wsl-vmware-lab checkout (gitignored).
-# Provisions the three Ubuntu 24.04 x86_64 VMs for Saltation (8 vCPU / 10 GB RAM).
-# saltation-oracle (Oracle Linux 8.10, 4 vCPU / 8 GB RAM) is built separately
-# with infra/lab/ol8/build-oracle-vm.sh (official OL8 KVM + mods.iso).
+# Provisions all four Saltation x86_64 VMs (12 vCPU / 18 GB RAM total).
+# Requires wsl-vmware-lab with oraclelinux-8 support (PR #61+).
 
 vms = {
+  "saltation-oracle" = {
+    processors = 4
+    memory_mb  = 8192
+    groups     = ["db", "oracle"]
+    image      = "oraclelinux-8"
+    lan        = true
+  }
   "saltation-mongo" = {
     processors = 2
     memory_mb  = 4096
