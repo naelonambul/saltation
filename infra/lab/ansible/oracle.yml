@@ -1,0 +1,125 @@
+---
+- name: Install and initialize Oracle Database 19c EE natively on saltation-oracle
+  hosts: oracle
+  become: true
+  vars:
+    saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
+    oracle_rpm_path: "/tmp/oracle-database-ee-19c-1.0-1.x86_64.rpm"
+    oracle_hostname: "saltation-oracle"
+    effective_oracle_ip: "{{ oracle_lan_ip | default(ansible_facts.lan0.ipv4.address | default(ansible_host)) }}"
+  tasks:
+    - name: Load lab secrets
+      ansible.builtin.include_vars:
+        file: "{{ saltation_secrets_file }}"
+      no_log: true
+
+    - name: Ensure /etc/hosts maps oracle_hostname to effective_oracle_ip
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "{{ oracle_hostname }}$"
+        line: "{{ effective_oracle_ip }} {{ oracle_hostname }}"
+
+    - name: Create 4 GB swapfile if no swap is active
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [ "$(swapon --noheadings | wc -l)" -eq 0 ]; then
+          fallocate -l 4G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap defaults 0 0" >> /etc/fstab
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure firewalld allows 1521/tcp
+      ansible.builtin.shell: |
+        firewall-cmd --permanent --add-port=1521/tcp || true
+        firewall-cmd --reload || true
+      changed_when: false
+
+    - name: Install oracle-database-preinstall-19c
+      ansible.builtin.dnf:
+        name: https://yum.oracle.com/repo/OracleLinux/OL8/appstream/x86_64/getPackage/oracle-database-preinstall-19c-1.0-2.el8.x86_64.rpm
+        state: present
+        disable_gpg_check: true
+
+    - name: Check if Oracle 19c DB home is already installed
+      ansible.builtin.stat:
+        path: /opt/oracle/product/19c/dbhome_1/bin/sqlplus
+      register: oracle_home_exists
+
+    - name: Install oracle-database-ee-19c RPM natively
+      when: not oracle_home_exists.stat.exists
+      ansible.builtin.dnf:
+        name: "{{ oracle_rpm_path }}"
+        state: present
+        disable_gpg_check: true
+
+    - name: Remove RPM installer from /tmp to reclaim disk space
+      ansible.builtin.file:
+        path: "{{ oracle_rpm_path }}"
+        state: absent
+
+    - name: Check if ORCLCDB database is already created
+      ansible.builtin.stat:
+        path: /opt/oracle/oradata/ORCLCDB/system01.dbf
+      register: orclcdb_exists
+
+    - name: Configure ORCLCDB and ORCLPDB1 via Oracle init script
+      when: not orclcdb_exists.stat.exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sed -i "s/^ORACLE_SID=.*/ORACLE_SID=ORCLCDB/" /etc/sysconfig/oracledb_ORCLCDB-19c.conf || true
+        (echo "$ORACLE_PWD"; echo "$ORACLE_PWD") | /etc/init.d/oracledb_ORCLCDB-19c configure
+      args:
+        executable: /bin/bash
+      environment:
+        ORACLE_PWD: "{{ oracle_db_password }}"
+      no_log: true
+
+    - name: Copy non-secret oracle-init.sql
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/oracle-init.sql"
+        dest: /tmp/saltation_oracle_init.sql
+        mode: "0644"
+
+    - name: Apply Saltation storage settings and create SALTATION user
+      ansible.builtin.shell: |
+        set -euo pipefail
+        su - oracle -c "export ORACLE_SID=ORCLCDB ORACLE_HOME=/opt/oracle/product/19c/dbhome_1 PATH=/opt/oracle/product/19c/dbhome_1/bin:\$PATH; sqlplus -s / as sysdba @/tmp/saltation_oracle_init.sql"
+      args:
+        executable: /bin/bash
+
+    - name: Set SALTATION user password from secrets file
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cat <<SQL > /tmp/saltation_set_pw.sql
+        WHENEVER SQLERROR EXIT SQL.SQLCODE
+        ALTER SESSION SET CONTAINER = ORCLPDB1;
+        ALTER USER saltation IDENTIFIED BY "${SALTATION_DB_PASSWORD}";
+        EXIT
+        SQL
+        chmod 600 /tmp/saltation_set_pw.sql
+        chown oracle /tmp/saltation_set_pw.sql
+        trap "rm -f /tmp/saltation_set_pw.sql" EXIT
+        su - oracle -c "export ORACLE_SID=ORCLCDB ORACLE_HOME=/opt/oracle/product/19c/dbhome_1 PATH=/opt/oracle/product/19c/dbhome_1/bin:\$PATH; sqlplus -s / as sysdba @/tmp/saltation_set_pw.sql"
+      args:
+        executable: /bin/bash
+      environment:
+        SALTATION_DB_PASSWORD: "{{ oracle_db_password }}"
+      no_log: true
+
+    - name: Verify SALTATION TCP login to ORCLPDB1 on port 1521
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export ORACLE_HOME=/opt/oracle/product/19c/dbhome_1
+        export PATH="$ORACLE_HOME/bin:$PATH"
+        echo "SELECT 'SALTATION_OK' FROM dual;" | sqlplus -s -L "saltation/${SALTATION_DB_PASSWORD}@//{{ effective_oracle_ip }}:1521/ORCLPDB1" | grep -q "SALTATION_OK"
+      args:
+        executable: /bin/bash
+      environment:
+        SALTATION_DB_PASSWORD: "{{ oracle_db_password }}"
+      no_log: true
+      changed_when: false

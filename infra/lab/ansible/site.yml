@@ -1,0 +1,291 @@
+---
+- name: Common baseline on Saltation Ubuntu VMs
+  hosts: mongo:bank:generator
+  become: true
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - ca-certificates
+          - gnupg
+          - build-essential
+          - pkg-config
+        state: present
+        update_cache: true
+
+- name: Configure MongoDB 8.0 natively on saltation-mongo
+  hosts: mongo
+  become: true
+  vars:
+    saltation_secrets_file: "{{ lookup('env', 'HOME') }}/.config/saltation-lab/secrets.yml"
+  tasks:
+    - name: Load lab secrets
+      ansible.builtin.include_vars:
+        file: "{{ saltation_secrets_file }}"
+      no_log: true
+
+    - name: Add MongoDB 8.0 GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc \
+          | gpg --dearmor --yes -o /usr/share/keyrings/mongodb-server-8.0.gpg
+      args:
+        creates: /usr/share/keyrings/mongodb-server-8.0.gpg
+
+    - name: Add MongoDB 8.0 apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/mongodb-org-8.0.list
+        mode: "0644"
+        content: "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse\n"
+
+    - name: Install mongodb-org
+      ansible.builtin.apt:
+        name: mongodb-org
+        state: present
+        update_cache: true
+
+    - name: Check if bank user already authenticates
+      ansible.builtin.shell: |
+        mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs --eval "quit(db.runCommand({ping:1}).ok === 1 ? 0 : 2)"
+      environment:
+        MONGO_BANK_PASSWORD: "{{ mongo_bank_password }}"
+      no_log: true
+      register: mongo_auth_check
+      failed_when: false
+      changed_when: false
+
+    - name: Configure mongod without auth for initial user bootstrap
+      when: mongo_auth_check.rc != 0
+      ansible.builtin.copy:
+        dest: /etc/mongod.conf
+        mode: "0644"
+        content: |
+          storage:
+            dbPath: /var/lib/mongodb
+            wiredTiger:
+              engineConfig:
+                cacheSizeGB: 1.5
+          systemLog:
+            destination: file
+            logAppend: true
+            path: /var/log/mongodb/mongod.log
+          net:
+            port: 27017
+            bindIp: 0.0.0.0
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+
+    - name: Restart mongod for bootstrap
+      when: mongo_auth_check.rc != 0
+      ansible.builtin.systemd:
+        name: mongod
+        state: restarted
+        enabled: true
+
+    - name: Wait for MongoDB port 27017 for bootstrap
+      when: mongo_auth_check.rc != 0
+      ansible.builtin.wait_for:
+        port: 27017
+        timeout: 30
+
+    - name: Create root, bank, and generator users via mongosh script file
+      when: mongo_auth_check.rc != 0
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cat <<'JS' > /tmp/saltation_mongo_init.js
+        const admin = db.getSiblingDB("admin");
+        if (!admin.getUser("root")) {
+          admin.createUser({ user: "root", pwd: process.env.MONGO_ROOT_PASSWORD, roles: [{ role: "root", db: "admin" }] });
+        }
+        const bl = db.getSiblingDB("bank_logs");
+        if (!bl.getUser("bank")) {
+          bl.createUser({ user: "bank", pwd: process.env.MONGO_BANK_PASSWORD, roles: [{ role: "readWrite", db: "bank_logs" }] });
+        }
+        const tr = db.getSiblingDB("truth");
+        if (!tr.getUser("generator")) {
+          tr.createUser({ user: "generator", pwd: process.env.MONGO_GENERATOR_PASSWORD, roles: [{ role: "readWrite", db: "truth" }] });
+        }
+        JS
+        trap 'rm -f /tmp/saltation_mongo_init.js' EXIT
+        mongosh --quiet --file /tmp/saltation_mongo_init.js
+      args:
+        executable: /bin/bash
+      environment:
+        MONGO_ROOT_PASSWORD: "{{ mongo_root_password }}"
+        MONGO_BANK_PASSWORD: "{{ mongo_bank_password }}"
+        MONGO_GENERATOR_PASSWORD: "{{ mongo_generator_password }}"
+      no_log: true
+
+    - name: Enable authorization in mongod.conf
+      ansible.builtin.copy:
+        dest: /etc/mongod.conf
+        mode: "0644"
+        content: |
+          storage:
+            dbPath: /var/lib/mongodb
+            wiredTiger:
+              engineConfig:
+                cacheSizeGB: 1.5
+          systemLog:
+            destination: file
+            logAppend: true
+            path: /var/log/mongodb/mongod.log
+          net:
+            port: 27017
+            bindIp: 0.0.0.0
+          security:
+            authorization: enabled
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+      register: mongod_auth_conf
+
+    - name: Ensure mongod is running with authorization enabled
+      ansible.builtin.systemd:
+        name: mongod
+        state: "{{ 'restarted' if (mongod_auth_conf.changed or mongo_auth_check.rc != 0) else 'started' }}"
+        enabled: true
+
+    - name: Wait for MongoDB port 27017 after auth enable
+      ansible.builtin.wait_for:
+        port: 27017
+        timeout: 30
+
+    - name: Verify bank and generator auth
+      ansible.builtin.shell: |
+        set -euo pipefail
+        mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs --eval "quit(db.runCommand({ping:1}).ok === 1 ? 0 : 2)"
+        mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth --eval "quit(db.runCommand({ping:1}).ok === 1 ? 0 : 3)"
+      args:
+        executable: /bin/bash
+      environment:
+        MONGO_BANK_PASSWORD: "{{ mongo_bank_password }}"
+        MONGO_GENERATOR_PASSWORD: "{{ mongo_generator_password }}"
+      no_log: true
+      changed_when: false
+
+- name: Build Saltation Bank (Rust x86_64) and Mobile Web SPA (nginx) on saltation-bank
+  hosts: bank
+  become: true
+  vars:
+    saltation_repo_url: "https://github.com/naelonambul/saltation.git"
+    saltation_ref: "main"
+    saltation_dir: "/opt/saltation"
+    rust_version: "1.99.1"
+  tasks:
+    - name: Clone or update Saltation repository
+      ansible.builtin.git:
+        repo: "{{ saltation_repo_url }}"
+        dest: "{{ saltation_dir }}"
+        version: "{{ saltation_ref }}"
+        force: true
+
+    - name: Install Rust toolchain for lab user
+      become_user: lab
+      ansible.builtin.shell: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --profile minimal --default-toolchain {{ rust_version }}
+      args:
+        creates: /home/lab/.cargo/bin/cargo
+
+    - name: Own /opt/saltation by lab for native builds
+      ansible.builtin.file:
+        path: "{{ saltation_dir }}"
+        owner: lab
+        group: lab
+        recurse: true
+
+    - name: Build bank release binary (x86_64 native)
+      become_user: lab
+      ansible.builtin.shell: |
+        export PATH="/home/lab/.cargo/bin:$PATH"
+        cd {{ saltation_dir }}/bank
+        cargo build --release --locked
+      args:
+        creates: "{{ saltation_dir }}/bank/target/release/bank"
+
+    - name: Install bank binary to /usr/local/bin/bank
+      ansible.builtin.copy:
+        src: "{{ saltation_dir }}/bank/target/release/bank"
+        dest: /usr/local/bin/bank
+        remote_src: true
+        mode: "0755"
+
+    - name: Create /var/log/saltation
+      ansible.builtin.file:
+        path: /var/log/saltation
+        state: directory
+        owner: lab
+        group: lab
+        mode: "0755"
+
+    - name: Install Node.js 22 and nginx
+      ansible.builtin.shell: |
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install -y nodejs nginx
+        corepack enable
+      args:
+        creates: /usr/bin/node
+
+    - name: Build Mobile Web SPA (x86_64 native)
+      become_user: lab
+      ansible.builtin.shell: |
+        cd {{ saltation_dir }}/web
+        CI=true VITE_API_BASE="http://{{ ansible_facts.lan0.ipv4.address | default(ansible_host) }}:8080" pnpm install --frozen-lockfile
+        CI=true VITE_API_BASE="http://{{ ansible_facts.lan0.ipv4.address | default(ansible_host) }}:8080" pnpm build
+      args:
+        creates: "{{ saltation_dir }}/web/apps/mobile/dist/index.html"
+
+    - name: Deploy Mobile SPA static files and nginx config
+      ansible.builtin.shell: |
+        rm -rf /usr/share/nginx/html/mobile
+        mkdir -p /usr/share/nginx/html/mobile
+        cp -r {{ saltation_dir }}/web/apps/mobile/dist/. /usr/share/nginx/html/mobile/
+        cp {{ saltation_dir }}/infra/nginx/nginx.conf /etc/nginx/conf.d/saltation.conf
+        rm -f /etc/nginx/sites-enabled/default
+        nginx -t
+
+    - name: Enable and restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+        enabled: true
+
+    - name: Verify mobile SPA healthz on port 8088
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8088/healthz
+        return_content: true
+      register: web_health
+      failed_when: "web_health.status != 200 or ('ok' not in web_health.content)"
+
+- name: Install Saltation Generator (Python 3.13 via uv) on saltation-gen
+  hosts: generator
+  become: true
+  vars:
+    saltation_repo_url: "https://github.com/naelonambul/saltation.git"
+    saltation_ref: "main"
+    saltation_dir: "/opt/saltation"
+  tasks:
+    - name: Clone or update Saltation repository
+      ansible.builtin.git:
+        repo: "{{ saltation_repo_url }}"
+        dest: "{{ saltation_dir }}"
+        version: "{{ saltation_ref }}"
+        force: true
+
+    - name: Install uv
+      ansible.builtin.shell: |
+        curl -LsSf https://astral.sh/uv/0.8.17/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+      args:
+        creates: /usr/local/bin/uv
+
+    - name: Sync generator venv with Python 3.13
+      ansible.builtin.shell: |
+        cd {{ saltation_dir }}/generator
+        UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-dev
+      args:
+        creates: /opt/venv/bin/saltation-gen
+
+    - name: Verify saltation-gen CLI help works on x86_64
+      ansible.builtin.command: /opt/venv/bin/saltation-gen --help
+      changed_when: false

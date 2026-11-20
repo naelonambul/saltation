@@ -1,0 +1,34 @@
+# Copy to vms.tfvars in your wsl-vmware-lab checkout (gitignored).
+# Provisions all four Saltation x86_64 VMs (12 vCPU / 18 GB RAM total).
+# Requires wsl-vmware-lab with oraclelinux-8 support (PR #61+).
+
+vms = {
+  "saltation-oracle" = {
+    processors = 4
+    memory_mb  = 8192
+    groups     = ["db", "oracle"]
+    image      = "oraclelinux-8"
+    lan        = true
+  }
+  "saltation-mongo" = {
+    processors = 2
+    memory_mb  = 4096
+    groups     = ["db", "mongo"]
+    image      = "ubuntu-24.04"
+    lan        = true
+  }
+  "saltation-bank" = {
+    processors = 4
+    memory_mb  = 4096
+    groups     = ["app", "bank", "web"]
+    image      = "ubuntu-24.04"
+    lan        = true
+  }
+  "saltation-gen" = {
+    processors = 2
+    memory_mb  = 2048
+    groups     = ["gen", "generator"]
+    image      = "ubuntu-24.04"
+    lan        = true
+  }
+}
