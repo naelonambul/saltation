@@ -1,0 +1,38 @@
+groups:
+  - name: saltation_operations
+    rules:
+      - alert: SaltationOutboxBacklogHigh
+        expr: bank_outbox_undelivered > 50000
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saltation outbox backlog exceeded 50,000 events (F-36a)"
+          description: "Undelivered outbox rows reached {{ $value }}."
+
+      - alert: SaltationOutboxRelayErrors
+        expr: increase(bank_outbox_relay_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saltation outbox relay errors detected"
+          description: "Outbox relay recorded {{ $value }} errors in the last 5 minutes."
+
+      - alert: SaltationDailyCloseMismatch
+        expr: bank_daily_close_mismatches > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saltation daily-close mismatch detected (N-5)"
+          description: "Daily close reported {{ $value }} mismatches or F-21 violations."
+
+      - alert: SaltationTransferLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(bank_http_request_duration_seconds_bucket{endpoint="/v2.0/transfer/withdraw/fin_num"}[5m]))) > 0.3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saltation transfer p95 latency exceeded 300ms (N-1)"
+          description: "Transfer p95 latency is {{ $value }}s over the last 5 minutes."

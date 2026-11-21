@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "stage8-observability-retention",
+  "kind": "implementation",
+  "title": "Complete Stage 8 Grafana dashboards, Prometheus alerts, and N-9 retention checks",
+  "base": {
+    "ref": "main",
+    "commit": "c9f973ef19a276c979ea0f45e777838ce7cfa4e2"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "infra/observability/**",
+    "infra/compose/compose.yml",
+    "scripts/ops/**",
+    "checks.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:358f8af42ea4396598cf0dca470a9b0f329eb88f7411970135a4ce45ad04a3b4",
+      "by": "naelonambul",
+      "at": "2026-11-21T08:29:08Z",
+      "write_scope_sha256": "sha256:6b6cd9f5d24493093d883c8cb14689563ffaf8939b3acd8e4c5e04185259cd4e",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
