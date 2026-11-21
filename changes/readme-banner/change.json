@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "readme-banner",
+  "kind": "implementation",
+  "title": "Add hero banner image and caption to README",
+  "base": {
+    "ref": "main",
+    "commit": "dd819118cbeca607667b0c26feea01d84706effa"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "README.md",
+    "README.ko.md",
+    "docs/assets/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:7bb914d83db08c50bdf63168cc597993293467e1bd39804872d1889cdb533142",
+      "by": "naelonambul",
+      "at": "2026-11-21T00:16:17Z",
+      "write_scope_sha256": "sha256:25ec4a43443740d7555c82dd8e778245a80ce9e2225c88e7429f81c49aa5d28f",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
