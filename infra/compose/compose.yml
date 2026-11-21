@@ -136,6 +136,24 @@ services:
         limits: { cpus: "0.5", memory: 1g }
     logging: *logging
 
+  # Run on demand: docker compose --profile tools run --rm loadtest all
+  loadtest:
+    build:
+      context: ../../loadtest
+    image: saltation/loadtest:local
+    profiles: [tools]
+    environment:
+      SALTATION_BANK_URL: http://bank:8081
+      SALTATION_METRICS_URL: http://bank:9100
+      SALTATION_REPORT_DIR: /evidence/loadtest
+    volumes:
+      - ../../.evidence/loadtest:/evidence/loadtest
+    networks: [internal, obs]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1g }
+    logging: *logging
+
   alloy:
     image: grafana/alloy:v1.9.2
     profiles: [local, ci]

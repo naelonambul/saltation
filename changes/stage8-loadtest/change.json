@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "stage8-loadtest",
+  "kind": "implementation",
+  "title": "Add N-1 to N-3 and N-5 transfer load tests",
+  "base": {
+    "ref": "main",
+    "commit": "f7700e778e68f3cda74ce3549d4cbecedb2a4cf6"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "loadtest/**",
+    "checks.json",
+    "scripts/dev/ci-loadtest.sh",
+    "infra/compose/compose.yml"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:cf3c5cd5001d46a4a9965b6bc933005dbd2d9ce94e60f7cd107c5766434fcda1",
+      "by": "naelonambul",
+      "at": "2026-11-21T07:16:47Z",
+      "write_scope_sha256": "sha256:b009643e6d6c7ba40882e3873abb34abf6d0bbcb0c5b95a196e05ec0f5a71a70",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
