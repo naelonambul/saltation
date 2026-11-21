@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "stage8-edge-security",
+  "kind": "implementation",
+  "title": "Add Cloudflare Workers VPC edge config and Stage 8 security negative test suite",
+  "base": {
+    "ref": "main",
+    "commit": "fd844b2bb78cf615ed69172757806fb779dfd067"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "infra/cloudflare/**",
+    "scripts/ops/security_negative_test.py",
+    "scripts/ops/test_security_negative.py",
+    "checks.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:9886fdc291fb970266d6bc598f90358ab59813009b80e2eb22a831c509483889",
+      "by": "naelonambul",
+      "at": "2026-11-21T12:22:04Z",
+      "write_scope_sha256": "sha256:efd96243b587444fde817a5e5f9bb954c04c91bcd4a30c71c1b2ef88ad7979ca",
+      "note": "\uc9c4\ud589\ud558\uc790. \uc2b9\uc778"
+    }
+  ]
+}
