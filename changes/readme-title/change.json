@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "readme-title",
+  "kind": "implementation",
+  "title": "Remove README banner caption and use phonetic title",
+  "base": {
+    "ref": "main",
+    "commit": "04d16aaee701446d9aef9fd767e79131f56d3c81"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "README.md",
+    "README.ko.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:24622d41c081ecc8176cd201bdcbf8075cb5312557062d9734863a96bacd54ed",
+      "by": "naelonambul",
+      "at": "2026-11-21T01:00:19Z",
+      "write_scope_sha256": "sha256:96a2678a79fde6180f9a201c1e6e84f77c16f84137ff461fd81c43ef07392f0d",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
