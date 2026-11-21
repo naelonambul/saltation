@@ -29,6 +29,27 @@
       ]
     },
     {
+      "id": "ops-observability",
+      "group": "python",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/ops/test_retention.py",
+        "-v"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 300,
+      "paths": [
+        "infra/observability/**",
+        "scripts/ops/**",
+        "checks.json"
+      ],
+      "requires": [
+        "python3"
+      ]
+    },
+    {
       "id": "rust-fmt",
       "group": "rust",
       "argv": [

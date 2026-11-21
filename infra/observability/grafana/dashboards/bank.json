@@ -179,6 +179,175 @@
           "expr": "{job=\"bank\"}"
         }
       ]
+    },
+    {
+      "title": "Row-lock wait p95 (ledger.lock_accounts, N-1)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(bank_db_statement_duration_seconds_bucket{statement=\"ledger.lock_accounts\"}[5m])))",
+          "legendFormat": "lock_accounts p95"
+        }
+      ],
+      "id": 7
+    },
+    {
+      "title": "Outbox oldest event age (F-36a)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "bank_outbox_oldest_age_seconds",
+          "legendFormat": "oldest age"
+        }
+      ],
+      "id": 8
+    },
+    {
+      "title": "Daily-close mismatches (N-5)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "bank_daily_close_mismatches",
+          "legendFormat": "mismatches"
+        }
+      ],
+      "id": 9
+    },
+    {
+      "title": "Deadlock retries & relay errors (5m)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(bank_deadlock_retries_total[5m])",
+          "legendFormat": "deadlock retries"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "increase(bank_outbox_relay_errors_total[5m])",
+          "legendFormat": "relay errors"
+        }
+      ],
+      "id": 10
+    },
+    {
+      "title": "5xx error rate (%)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "100 * sum(rate(bank_http_request_duration_seconds_count{status=~\"5..\"}[5m])) / clamp_min(sum(rate(bank_http_request_duration_seconds_count[5m])), 1e-9)",
+          "legendFormat": "5xx %"
+        }
+      ],
+      "id": 11
     }
   ]
 }
