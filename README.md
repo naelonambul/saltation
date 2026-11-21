@@ -2,14 +2,7 @@
 
 <img src="docs/assets/saltation-banner.jpg" alt="Desert dunes with rising sand" width="100%" />
 
-<sub>
-<b>sal·ta·tion</b> (<code>/sælˈteɪʃən/</code>) — the leaping movement of sand grains across desert dunes, lifted by the wind or by vibrations beneath the surface.<br />
-<em>Borrowed from the desert physics of <b>Dune</b>, where jumping grains of sand betray unseen movement beneath the dunes: a single transaction at rest looks like any other grain, and only in a continuous stream do hidden patterns take shape.</em>
-</sub>
-
-<br /><br />
-
-# Saltation
+# sal·ta·tion (/sælˈteɪʃən/)
 
 **Simulated Korean Open-Banking server and synthetic fraud generator for real-time FDS & MLOps pipelines.**
 
