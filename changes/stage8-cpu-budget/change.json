@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "id": "stage8-cpu-budget",
+  "kind": "behavior",
+  "title": "Define OCI ARM and x86 CPU budgets",
+  "base": {
+    "ref": "main",
+    "commit": "fd844b2bb78cf615ed69172757806fb779dfd067"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "infra/compose/compose.yml",
+    "scripts/ops/*compose_budget*.py",
+    "docs/dev-host.md",
+    "infra/lab/README.md",
+    "checks.json",
+    "README.md",
+    "spec.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383",
+      "by": "naelonambul",
+      "at": "2026-11-22T11:45:00Z",
+      "note": "\uc2b9\uc778"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:f5cc1dd80da994115f5104b2d6e78c926bcda24e3cb59e0087119ebe70582ead",
+      "by": "naelonambul",
+      "at": "2026-11-22T11:49:43Z",
+      "write_scope_sha256": "sha256:5a239eb9cbdc2a037343f919505cf1caa1a61e5f095eae3d3bca39ffced0d9b7",
+      "note": "CPU \uc608\uc0b0 \uad6c\ud604 \uacc4\ud68d\ub3c4 \uc2b9\uc778."
+    }
+  ]
+}

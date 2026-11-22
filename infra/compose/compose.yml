@@ -29,7 +29,7 @@ services:
       start_period: 30m
     deploy:
       resources:
-        limits: { cpus: "1.5", memory: 6g }
+        limits: { cpus: "1.50", memory: 6g }
     logging: *logging
 
   mongo:
@@ -54,7 +54,7 @@ services:
       start_period: 30s
     deploy:
       resources:
-        limits: { cpus: "0.5", memory: 3g }
+        limits: { cpus: "0.40", memory: 3g }
     logging: *logging
 
   bank:
@@ -92,7 +92,7 @@ services:
       start_period: 30s
     deploy:
       resources:
-        limits: { cpus: "1.0", memory: 1g }
+        limits: { cpus: "0.75", memory: 1g }
     logging: *logging
 
   web:
@@ -114,9 +114,10 @@ services:
       retries: 6
     deploy:
       resources:
-        limits: { cpus: "0.25", memory: 128m }
+        limits: { cpus: "0.10", memory: 128m }
     logging: *logging
 
+  # On the OCI host, run at most one generator or loadtest container at a time.
   # Run on demand: docker compose --profile tools run --rm generator <command>
   generator:
     build:
@@ -133,7 +134,7 @@ services:
     networks: [internal, data]
     deploy:
       resources:
-        limits: { cpus: "0.5", memory: 1g }
+        limits: { cpus: "0.50", memory: 768m }
     logging: *logging
 
   # Run on demand: docker compose --profile tools run --rm loadtest all
@@ -151,7 +152,7 @@ services:
     networks: [internal, obs]
     deploy:
       resources:
-        limits: { cpus: "1.0", memory: 1g }
+        limits: { cpus: "0.75", memory: 768m }
     logging: *logging
 
   alloy:
@@ -166,7 +167,7 @@ services:
     depends_on: [loki]
     deploy:
       resources:
-        limits: { cpus: "0.25", memory: 256m }
+        limits: { cpus: "0.10", memory: 256m }
     logging: *logging
 
   loki:
@@ -184,7 +185,7 @@ services:
       retries: 12
     deploy:
       resources:
-        limits: { cpus: "0.25", memory: 768m }
+        limits: { cpus: "0.10", memory: 768m }
     logging: *logging
 
   prometheus:
@@ -206,7 +207,7 @@ services:
       retries: 12
     deploy:
       resources:
-        limits: { cpus: "0.25", memory: 768m }
+        limits: { cpus: "0.10", memory: 768m }
     logging: *logging
 
   grafana:
@@ -229,7 +230,7 @@ services:
       retries: 12
     deploy:
       resources:
-        limits: { cpus: "0.25", memory: 256m }
+        limits: { cpus: "0.05", memory: 256m }
     logging: *logging
 
 networks:

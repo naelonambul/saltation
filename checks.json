@@ -50,6 +50,28 @@
       ]
     },
     {
+      "id": "ops-security-negative",
+      "group": "python",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/ops/test_security_negative.py",
+        "-v"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 300,
+      "paths": [
+        "infra/cloudflare/**",
+        "scripts/ops/security_negative_test.py",
+        "scripts/ops/test_security_negative.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3"
+      ]
+    },
+    {
       "id": "rust-fmt",
       "group": "rust",
       "argv": [
@@ -266,6 +288,27 @@
         "infra/**"
       ],
       "requires": [
+        "docker"
+      ]
+    },
+    {
+      "id": "compose-budget",
+      "group": "oracle",
+      "argv": [
+        "python3",
+        "scripts/ops/check_compose_budget.py",
+        "static"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 120,
+      "paths": [
+        "infra/compose/**",
+        "scripts/ops/check_compose_budget.py",
+        "scripts/ops/test_compose_budget.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3",
         "docker"
       ]
     },
