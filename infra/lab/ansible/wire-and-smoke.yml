@@ -26,6 +26,7 @@
         mode: "0600"
         content: |
           ORA_SDTZ=+09:00
+          GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.mmap_threshold=131072
           SALTATION_DB_USER=saltation
           SALTATION_DB_PASSWORD={{ oracle_db_password }}
           SALTATION_DB_CONNECT={{ effective_oracle_ip }}:1521/ORCLPDB1

@@ -2,7 +2,7 @@
 //! behind its own small concurrency gate, opaque bearer tokens stored as
 //! SHA-256 hashes, and the customer bearer-token extractor.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -37,15 +37,27 @@ fn hasher() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
-fn gate() -> &'static Semaphore {
-    static GATE: OnceLock<Semaphore> = OnceLock::new();
-    GATE.get_or_init(|| Semaphore::new(2))
+fn gate() -> &'static Arc<Semaphore> {
+    static GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    GATE.get_or_init(|| Arc::new(Semaphore::new(2)))
+}
+
+async fn run_gated_blocking<T, F>(gate: &Arc<Semaphore>, work: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let permit = Arc::clone(gate).acquire_owned().await?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await?
 }
 
 /// Hashes a secret (password or PIN) with Argon2id on a blocking thread.
 pub async fn hash_secret(secret: String) -> anyhow::Result<String> {
-    let _permit = gate().acquire().await?;
-    tokio::task::spawn_blocking(move || {
+    run_gated_blocking(gate(), move || {
         let mut salt = [0u8; 16];
         rand::rng().fill_bytes(&mut salt);
         let salt = SaltString::encode_b64(&salt).map_err(|e| anyhow::anyhow!("salt: {e}"))?;
@@ -54,17 +66,16 @@ pub async fn hash_secret(secret: String) -> anyhow::Result<String> {
             .map(|h| h.to_string())
             .map_err(|e| anyhow::anyhow!("hash: {e}"))
     })
-    .await?
+    .await
 }
 
 /// Verifies a secret against a stored Argon2id hash on a blocking thread.
 pub async fn verify_secret(hash: String, secret: String) -> anyhow::Result<bool> {
-    let _permit = gate().acquire().await?;
-    tokio::task::spawn_blocking(move || {
+    run_gated_blocking(gate(), move || {
         let parsed = PasswordHash::new(&hash).map_err(|e| anyhow::anyhow!("stored hash: {e}"))?;
         Ok(hasher().verify_password(secret.as_bytes(), &parsed).is_ok())
     })
-    .await?
+    .await
 }
 
 /// A new opaque bearer token and the hash stored for it.
@@ -248,6 +259,68 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(token_hash(&token), hash);
         assert_eq!(user_seq_no(42), "0000000042");
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_keeps_gate_permit_until_blocking_work_finishes() {
+        let gate = Arc::new(Semaphore::new(2));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release1_tx, release1_rx) = std::sync::mpsc::channel::<()>();
+        let (release2_tx, release2_rx) = std::sync::mpsc::channel::<()>();
+
+        let g1 = Arc::clone(&gate);
+        let s1 = started_tx.clone();
+        let h1 = tokio::spawn(async move {
+            run_gated_blocking(&g1, move || {
+                let _ = s1.send(1);
+                let _ = release1_rx.recv();
+                Ok(())
+            })
+            .await
+        });
+
+        let g2 = Arc::clone(&gate);
+        let s2 = started_tx.clone();
+        let h2 = tokio::spawn(async move {
+            run_gated_blocking(&g2, move || {
+                let _ = s2.send(2);
+                let _ = release2_rx.recv();
+                Ok(())
+            })
+            .await
+        });
+
+        let _ = started_rx.recv().await;
+        let _ = started_rx.recv().await;
+        assert_eq!(gate.available_permits(), 0);
+
+        // Cancelling the caller future must not free the permit while blocking work still runs.
+        h1.abort();
+        let _ = h1.await;
+        assert_eq!(gate.available_permits(), 0);
+
+        let g3 = Arc::clone(&gate);
+        let s3 = started_tx;
+        let h3 = tokio::spawn(async move {
+            run_gated_blocking(&g3, move || {
+                let _ = s3.send(3);
+                Ok(())
+            })
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), started_rx.recv())
+                .await
+                .is_err(),
+            "third task must wait until a running blocking job finishes"
+        );
+
+        let _ = release1_tx.send(());
+        assert_eq!(started_rx.recv().await, Some(3));
+        let _ = release2_tx.send(());
+        h2.await.expect("join h2").expect("h2 ok");
+        h3.await.expect("join h3").expect("h3 ok");
+        assert_eq!(gate.available_permits(), 2);
     }
 }
 
