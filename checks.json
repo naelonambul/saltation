@@ -50,6 +50,28 @@
       ]
     },
     {
+      "id": "ops-security-negative",
+      "group": "python",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/ops/test_security_negative.py",
+        "-v"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 300,
+      "paths": [
+        "infra/cloudflare/**",
+        "scripts/ops/security_negative_test.py",
+        "scripts/ops/test_security_negative.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3"
+      ]
+    },
+    {
       "id": "rust-fmt",
       "group": "rust",
       "argv": [
