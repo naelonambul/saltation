@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "stage8-alerts-retention-hardening",
+  "kind": "implementation",
+  "title": "Align Stage 8 outbox alerts and N-9 retention script with spec F-36a and N-9",
+  "base": {
+    "ref": "main",
+    "commit": "6473ce9701030a329f484ae872a80540a08be7ad"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
+  },
+  "write_scope": [
+    "infra/observability/prometheus/alerts.yml",
+    "scripts/ops/retention.py",
+    "scripts/ops/test_retention.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8c44a8dfec5ad11f1afcf4ab41eff2c23bc501fbfb1f77c220ea824cbe5bffa2",
+      "by": "naelonambul",
+      "at": "2026-11-22T22:45:00Z",
+      "write_scope_sha256": "sha256:62b0bf0c484dbb169d4efa82eefacea65f7a391ebac63ef815235c46afc20f53",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
