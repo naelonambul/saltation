@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "bank-observability-readiness",
+  "kind": "implementation",
+  "title": "Add session_id to app.log, /readyz readiness probe, and process RSS metrics",
+  "base": {
+    "ref": "main",
+    "commit": "1c126649fb5cf7fd80b513c89322a53d9095923f"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
+  },
+  "write_scope": [
+    "bank/src/app.rs",
+    "bank/src/shared/telemetry/mod.rs",
+    "bank/src/shared/outcome/mod.rs",
+    "bank/src/features/auth/mod.rs",
+    "infra/observability/prometheus/alerts.yml",
+    "scripts/ops/test_retention.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:573c827285759d93f15580bfa1932e9bb66e6511d28e039c450ee968747ccc57",
+      "by": "naelonambul",
+      "at": "2026-11-22T23:30:04Z",
+      "write_scope_sha256": "sha256:c809429169ee1aa9f0ffa480270dde9505bd41aecd4b36faf8b5de5d2c5d5a6e",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}

@@ -98,6 +98,10 @@ class ObservabilityConfigTests(unittest.TestCase):
         self.assertEqual(exprs.get("SaltationOutboxOldestAgeHigh"), "bank_outbox_oldest_age_seconds > 30")
         self.assertEqual(exprs.get("SaltationDailyCloseMismatch"), "bank_daily_close_mismatches > 0")
         self.assertIn("> 0.3", exprs.get("SaltationTransferLatencyHigh", ""))
+        self.assertEqual(
+            exprs.get("SaltationBankMemoryHigh"),
+            "bank_process_resident_memory_bytes > 786432000",
+        )
 
 
 if __name__ == "__main__":

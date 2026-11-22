@@ -78,8 +78,10 @@ pub struct Recorder {
 }
 impl Recorder {
     pub fn attach(req: &mut Request, ctx: RequestContext) -> Self {
-        let identity = IdentitySlot::default();
-        req.extensions_mut().insert(identity.clone());
+        let identity = req
+            .extensions_mut()
+            .get_or_insert_default::<IdentitySlot>()
+            .clone();
         let path = req.uri().path();
         let endpoint = req
             .extensions()
