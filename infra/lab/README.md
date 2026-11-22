@@ -76,3 +76,11 @@ ANSIBLE_TIMEOUT=60 ./lab configure /path/to/saltation/infra/lab/ansible/wire-and
 ```
 
 `wire-and-smoke.yml` discovers each VM's `lan0` IP from Ansible facts (override with `-e oracle_lan_ip=... -e mongo_lan_ip=... -e bank_lan_ip=... -e web_lan_ip=...` if needed), configures `SALTATION_CORS_ORIGINS` for `saltation-web`, starts `saltation-bank.service` (running all Oracle SQL migrations automatically), verifies `:8080/healthz`, `:9100/metrics`, and `saltation-web:8088/healthz`, seeds 20 customers and 5 counterparties from `saltation-gen`, switches the simulated clock to `live`, drives live transfers, and verifies delivered `bank_logs.events` and `truth.labels` counts on `saltation-mongo`.
+
+## Native x86 CPU calibration
+
+Start from the WSL control host and the existing lab directory. Run `./lab network` and `./lab status` and inspect both power and bridge state. Terraform controls VMware Workstation on Windows through vmrest. Ansible connects to each guest using its pinned host key. Check for separately registered dependencies such as an existing Oracle guest before planning additions. A load-only run needs bank, Oracle, MongoDB and a private driver, with the other guests kept outside the comparison unless they are explicitly part of the workload.
+
+Record guest vCPU and memory from vmrest, guest `cpu.max` and `cpu.stat` for the workload's cgroup, service and application health and the date/revision or binary digest. Record WSL memory and CPU availability separately from Windows physical memory. Measure Windows available memory and page-in/page-out rates before and during the run, then account for each powered VMware guest and the WSL driver. Move the driver to a separate host when its scheduling delays interfere with measurements.
+
+Use the transfer harness in [loadtest](../../loadtest). Establish a baseline with secret-free environment metadata, then vary one CPU allocation or runtime service quota. Keep the VM and driver placement fixed and repeat each candidate with the same offered load. Reject under-delivery and compare server measurements, application errors, N-5 evidence, and host/guest health. Keep raw results in ignored `.evidence/`. Use these runs for x86 sizing and record OCI acceptance separately.
