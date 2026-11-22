@@ -11,19 +11,19 @@ Checks:
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
-BUDGET_BYTES = 70 * 1024 * 1024 * 1024  # 70 GiB (spec N-9)
-ALERT_RATIO = 0.80  # 80% alert threshold (56 GiB)
+BUDGET_BYTES = 70 * 1000**3  # 70 GB decimal SI (spec N-9, matches docker system df)
+ALERT_RATIO = 0.80  # 80% alert threshold (56 GB)
 RETENTION_MONTHS = 18
-RETENTION_DAYS = 548  # 18 months
 MAX_APP_LOG_FILES = 7
 
 SALTATION_VOLUMES = (
@@ -46,12 +46,17 @@ _UNIT_MULT = {
 }
 
 
-def compute_bank_logs_cutoff(now: datetime | None = None, days: int = RETENTION_DAYS) -> str:
-    """Returns an ISO-8601 UTC cutoff timestamp matching bank_logs.events.recorded_at."""
+def compute_bank_logs_cutoff(now: datetime | None = None, months: int = RETENTION_MONTHS) -> str:
+    """Returns an ISO-8601 UTC cutoff timestamp `months` calendar months before `now`."""
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
-    cutoff = ref.astimezone(UTC) - timedelta(days=days)
+    ref_utc = ref.astimezone(UTC)
+    total_months = ref_utc.year * 12 + (ref_utc.month - 1) - months
+    year, zero_month = divmod(total_months, 12)
+    month = zero_month + 1
+    day = min(ref_utc.day, calendar.monthrange(year, month)[1])
+    cutoff = ref_utc.replace(year=year, month=month, day=day)
     return cutoff.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
@@ -172,7 +177,13 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Saltation N-9 retention and 70 GB disk budget check")
-    p.add_argument("--apply", action="store_true", help="Delete expired bank_logs and excess app.log files")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="Delete expired bank_logs and excess app.log files")
+    mode.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Report budget and retention status without deleting data (default)",
+    )
     p.add_argument("--env-file", default="infra/compose/.env", help="Path to compose .env file")
     p.add_argument("--mongo-container", default="saltation-mongo-1")
     p.add_argument("--bank-container", default="saltation-bank-1")
@@ -204,8 +215,8 @@ def main() -> None:
         "bank_logs_expired_or_deleted": expired_events,
         "app_log_excess_files": excess_logs,
         "disk_budget": asdict(budget),
-        "disk_usage_gb": round(budget.total_bytes / (1024**3), 2),
-        "disk_budget_gb": round(budget.budget_bytes / (1024**3), 2),
+        "disk_usage_gb": round(budget.total_bytes / (1000**3), 2),
+        "disk_budget_gb": round(budget.budget_bytes / (1000**3), 2),
         "disk_usage_pct": round(budget.usage_ratio * 100, 2),
     }
     print(json.dumps(report, indent=2))

@@ -2,13 +2,31 @@ groups:
   - name: saltation_operations
     rules:
       - alert: SaltationOutboxBacklogHigh
-        expr: bank_outbox_undelivered > 50000
+        expr: bank_outbox_undelivered > 10000
         for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Saltation outbox backlog exceeded 50,000 events (F-36a)"
+          summary: "Saltation outbox backlog exceeded 10,000 events (F-36a)"
           description: "Undelivered outbox rows reached {{ $value }}."
+
+      - alert: SaltationOutboxBacklogCritical
+        expr: bank_outbox_undelivered >= 50000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Saltation outbox backlog reached 50,000 events backfill-stop watermark (F-36a)"
+          description: "Undelivered outbox rows reached {{ $value }}; backfill must pause."
+
+      - alert: SaltationOutboxOldestAgeHigh
+        expr: bank_outbox_oldest_age_seconds > 30
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saltation oldest undelivered outbox event exceeded 30s (F-36a)"
+          description: "Oldest undelivered outbox event age is {{ $value }}s."
 
       - alert: SaltationOutboxRelayErrors
         expr: increase(bank_outbox_relay_errors_total[5m]) > 0
