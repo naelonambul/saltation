@@ -9,7 +9,7 @@
   },
   "baseline": {
     "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
-    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
   },
   "write_scope": [
     "loadtest/**",

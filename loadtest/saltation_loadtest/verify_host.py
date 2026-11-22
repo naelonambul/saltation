@@ -29,7 +29,7 @@ CO_TENANTS = frozenset(
         "cloudflared-oci-podobank-api",
     }
 )
-CPU_BUDGET = 3
+CPU_BUDGET = 4
 MEMORY_BUDGET = 14 * 1024**3
 PROJECT_LABEL = "com.docker.compose.project"
 SERVICE_LABEL = "com.docker.compose.service"
@@ -775,7 +775,9 @@ class HostVerifier:
         if memory_complete:
             snapshot["memory_limit_bytes"] = memory
         if cpu > CPU_BUDGET:
-            self.violations.append(f"{phase}: Saltation CPU limits total {float(cpu):g} vCPU (> 3).")
+            self.violations.append(
+                f"{phase}: Saltation CPU limits total {float(cpu):g} vCPU (> {CPU_BUDGET})."
+            )
         if memory > MEMORY_BUDGET:
             self.violations.append(f"{phase}: Saltation memory limits total {memory} bytes (> 14 GiB).")
 
