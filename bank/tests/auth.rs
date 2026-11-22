@@ -702,3 +702,108 @@ mod deferred_touch {
         assert_touched(stored(&api, &customer.token).await, now);
     }
 }
+
+#[tokio::test]
+async fn concurrent_expired_lock_logins_relock_after_five_failures() {
+    const EXPIRE_LOCK: SqlStmt = SqlStmt {
+        name: "test.auth_expire_lock",
+        sql: "UPDATE customer_credential \
+              SET failed_count = 5, locked_until = :expired_until \
+              WHERE customer_id = (SELECT customer_id FROM customer WHERE customer_no = :customer_no)",
+    };
+
+    let api = api().await;
+    let n = unique_digits(8);
+    let phone = format!("010{n}");
+    let customer_no = format!("C{n}");
+
+    let (status, body) = call(
+        &api.generator,
+        "POST",
+        "/internal/v1/seed/customers",
+        &new_id(),
+        None,
+        Some(json!({
+            "customers": [{
+                "customer_no": customer_no,
+                "name": "동시잠금",
+                "phone": phone,
+                "address": "서울",
+                "customer_type": "INDIVIDUAL",
+                "password": "right-pass-concurrent"
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Place the credential into an expired-lock state relative to business time
+    // without mutating the shared clock.
+    let expired_until =
+        api.state.clock.state().await.unwrap().business_time - chrono::Duration::minutes(1);
+    let cno = customer_no.clone();
+    api.state
+        .db
+        .run(move |s| {
+            let updated = s.execute(&EXPIRE_LOCK, &[&expired_until, &cno])?;
+            assert_eq!(updated, 1);
+            s.commit()
+        })
+        .await
+        .expect("set expired lock");
+
+    // Six concurrent wrong-password logins after lock expiry must serialize via FOR UPDATE,
+    // reset once, count 1..=5 to re-lock, and reject the sixth as LOCKED.
+    let mut handles = Vec::new();
+    for _ in 0..6 {
+        let router = api.generator.clone();
+        let phone = phone.clone();
+        handles.push(tokio::spawn(async move {
+            let rid = new_id();
+            let (status, body) = call(
+                &router,
+                "POST",
+                "/v2.0/ext/auth/login",
+                &rid,
+                None,
+                Some(json!({ "phone": phone, "password": "wrong" })),
+            )
+            .await;
+            (rid, status, body)
+        }));
+    }
+
+    let mut wrong_count = 0;
+    let mut locked_count = 0;
+    for handle in handles {
+        let (rid, status, _body) = handle.await.expect("join concurrent login");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        match attempt(&api, &rid).await.0.as_str() {
+            "WRONG_PASSWORD" => wrong_count += 1,
+            "LOCKED" => locked_count += 1,
+            other => panic!("unexpected login attempt outcome: {other}"),
+        }
+    }
+    assert_eq!(
+        wrong_count, 5,
+        "exactly five failures should count toward re-lock"
+    );
+    assert_eq!(
+        locked_count, 1,
+        "sixth concurrent failure must see the active lock"
+    );
+
+    // A correct password immediately afterwards must be rejected as LOCKED.
+    let rid = new_id();
+    let (status, _) = call(
+        &api.generator,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &rid,
+        None,
+        Some(json!({ "phone": phone, "password": "right-pass-concurrent" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(attempt(&api, &rid).await.0, "LOCKED");
+}

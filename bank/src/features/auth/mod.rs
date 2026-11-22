@@ -113,89 +113,113 @@ async fn login(
     };
 
     let verified_hash = found.as_ref().map(|(_, _, hash, ..)| hash.clone());
-    let customer = found.map(|(id, no, _, _, locked)| (id, no, locked));
+    let customer = found.map(|(id, no, ..)| (id, no));
     let (token, token_hash) = auth::new_token();
     let session_id = Ulid::new().to_string();
     let c = ctx.clone();
     let phone = req.phone.clone();
     let dev = device_id.clone();
     let sid = session_id.clone();
-    let (failures, customer_id): (i64, Option<i64>) = state
+    let (outcome, failures, customer_id): (Outcome, i64, Option<i64>) = state
         .db
         .run_in(&stats, move |s| {
             let customer_id = customer.as_ref().map(|(id, ..)| *id);
+            let mut outcome = outcome;
             let mut failures = 0;
             let mut event = Event::for_request(&c, "login.failed", now, CHANNEL, "rejected")
                 .device(dev.clone())
                 .codes(codes::UNAUTHORIZED, None);
-            if let Some((id, no, locked)) = &customer {
+            if let Some((id, no)) = &customer {
                 event = event.customer(no.clone());
-                // An expired lock starts a fresh count.
-                if locked.is_some_and(|until| until <= now) {
-                    s.execute(&RESET_FAILURES, &[id])?;
-                }
                 match outcome {
                     Outcome::WrongPassword => {
-                        failures =
-                            s.insert_returning_id(&RECORD_FAILURE, &[&(now + LOCK_FOR), id])?;
+                        let (_, current_failed, current_locked): (
+                            String,
+                            i64,
+                            Option<DateTime<FixedOffset>>,
+                        ) = s.query_row(&LOCK_CREDENTIAL, &[id])?;
+                        if current_locked.is_some_and(|until| until > now) {
+                            outcome = Outcome::Locked;
+                            failures = current_failed;
+                        } else {
+                            // Only the first locked writer resets an expired lock.
+                            if current_locked.is_some_and(|until| until <= now) {
+                                s.execute(&RESET_FAILURES, &[id])?;
+                            }
+                            failures =
+                                s.insert_returning_id(&RECORD_FAILURE, &[&(now + LOCK_FOR), id])?;
+                        }
                     }
                     Outcome::Success => {
-                        // The password was verified before this transaction; if it changed
-                        // since (a reset), the caller retries and is judged on the new one.
-                        let current: String = s.query_row(&LOCK_CREDENTIAL, &[id])?;
-                        if Some(&current) != verified_hash.as_ref() {
+                        // The password was verified before this transaction; lock the row
+                        // to check both concurrent lockouts and concurrent password resets.
+                        let (current_hash, current_failed, current_locked): (
+                            String,
+                            i64,
+                            Option<DateTime<FixedOffset>>,
+                        ) = s.query_row(&LOCK_CREDENTIAL, &[id])?;
+                        if current_locked.is_some_and(|until| until > now) {
+                            outcome = Outcome::Locked;
+                            failures = current_failed;
+                        } else if Some(&current_hash) != verified_hash.as_ref() {
                             s.rollback()?;
                             return Err(DbError::Busy);
-                        }
-                        s.execute(&RESET_FAILURES, &[id])?;
-                        let mut new_device = false;
-                        if let Some(d) = &dev {
-                            let seen: i64 = s.query_row(&SELECT_DEVICE, &[id, d])?;
-                            if seen == 0 {
-                                s.execute(&INSERT_DEVICE, &[id, d, &now, &now])?;
-                                new_device = true;
-                            } else {
-                                s.execute(&TOUCH_DEVICE, &[&now, id, d])?;
+                        } else {
+                            s.execute(&RESET_FAILURES, &[id])?;
+                            let mut new_device = false;
+                            if let Some(d) = &dev {
+                                let seen: i64 = s.query_row(&SELECT_DEVICE, &[id, d])?;
+                                if seen == 0 {
+                                    s.execute(&INSERT_DEVICE, &[id, d, &now, &now])?;
+                                    new_device = true;
+                                } else {
+                                    s.execute(&TOUCH_DEVICE, &[&now, id, d])?;
+                                }
                             }
-                        }
-                        let human = if c.human { "Y" } else { "N" };
-                        s.execute(
-                            &INSERT_SESSION,
-                            &[
-                                &sid,
-                                id,
-                                &dev,
-                                &c.listener.as_str(),
-                                &human,
-                                &c.ip,
-                                &c.region,
-                                &now,
-                                &now,
-                            ],
-                        )?;
-                        s.execute(
-                            &INSERT_TOKEN,
-                            &[
-                                &token_hash,
-                                id,
-                                &CUSTOMER_SCOPE,
-                                &sid,
-                                &(now + SESSION_IDLE),
-                            ],
-                        )?;
-                        event =
-                            Event::for_request(&c, "login.succeeded", now, CHANNEL, "completed")
-                                .customer(no.clone())
-                                .session(sid.clone())
-                                .device(dev.clone())
-                                .codes(codes::SUCCESS, None);
-                        if new_device {
-                            let device_event =
-                                Event::for_request(&c, "device.new", now, CHANNEL, "completed")
-                                    .customer(no.clone())
-                                    .session(sid.clone())
-                                    .device(dev.clone());
-                            outbox::record(s, &device_event)?;
+                            let human = if c.human { "Y" } else { "N" };
+                            s.execute(
+                                &INSERT_SESSION,
+                                &[
+                                    &sid,
+                                    id,
+                                    &dev,
+                                    &c.listener.as_str(),
+                                    &human,
+                                    &c.ip,
+                                    &c.region,
+                                    &now,
+                                    &now,
+                                ],
+                            )?;
+                            s.execute(
+                                &INSERT_TOKEN,
+                                &[
+                                    &token_hash,
+                                    id,
+                                    &CUSTOMER_SCOPE,
+                                    &sid,
+                                    &(now + SESSION_IDLE),
+                                ],
+                            )?;
+                            event = Event::for_request(
+                                &c,
+                                "login.succeeded",
+                                now,
+                                CHANNEL,
+                                "completed",
+                            )
+                            .customer(no.clone())
+                            .session(sid.clone())
+                            .device(dev.clone())
+                            .codes(codes::SUCCESS, None);
+                            if new_device {
+                                let device_event =
+                                    Event::for_request(&c, "device.new", now, CHANNEL, "completed")
+                                        .customer(no.clone())
+                                        .session(sid.clone())
+                                        .device(dev.clone());
+                                outbox::record(s, &device_event)?;
+                            }
                         }
                     }
                     Outcome::Locked | Outcome::UnknownPhone => {}
@@ -232,7 +256,7 @@ async fn login(
                 },
             )?;
             s.commit()?;
-            Ok((failures, customer_id))
+            Ok((outcome, failures, customer_id))
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;

@@ -64,17 +64,17 @@ struct WithdrawRequest {
 impl WithdrawRequest {
     /// SHA-256 of the fields that define the movement (spec F-18).
     fn hash(&self) -> String {
-        let canonical = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            self.fintech_use_num,
+        let canonical = json!([
+            &self.fintech_use_num,
             self.tran_amt,
-            self.recv_client_bank_code,
-            self.recv_client_account_num,
-            self.recv_client_name,
-            self.wd_print_content,
-            self.dps_print_content,
-            self.transfer_purpose
-        );
+            &self.recv_client_bank_code,
+            &self.recv_client_account_num,
+            &self.recv_client_name,
+            &self.wd_print_content,
+            &self.dps_print_content,
+            &self.transfer_purpose,
+        ])
+        .to_string();
         auth::hex(&Sha256::digest(canonical.as_bytes()))
     }
 }
@@ -729,4 +729,36 @@ async fn result(
         &ctx,
         json!({ "res_cnt": list.len().to_string(), "res_list": list }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WithdrawRequest;
+
+    fn sample(recv_name: &str, wd_print: &str, dps_print: &str) -> WithdrawRequest {
+        WithdrawRequest {
+            bank_tran_id: "M202600001U000000001".into(),
+            fintech_use_num: "199000000000000000000001".into(),
+            tran_amt: "10000".into(),
+            tran_dtime: "20261123060000".into(),
+            wd_print_content: wd_print.into(),
+            dps_print_content: dps_print.into(),
+            transfer_purpose: "TR".into(),
+            recv_client_name: recv_name.into(),
+            recv_client_bank_code: "099".into(),
+            recv_client_account_num: "110123456789".into(),
+        }
+    }
+
+    #[test]
+    fn withdraw_hash_prevents_pipe_delimiter_collisions() {
+        let a = sample("ALPHA|BETA", "memo", "");
+        let b = sample("ALPHA", "BETA|memo", "");
+        let c = sample("ALPHA", "BETA", "memo");
+        let d = sample("ALPHA|BETA", "memo", "");
+        assert_eq!(a.hash(), d.hash());
+        assert_ne!(a.hash(), b.hash());
+        assert_ne!(b.hash(), c.hash());
+        assert_ne!(a.hash(), c.hash());
+    }
 }
