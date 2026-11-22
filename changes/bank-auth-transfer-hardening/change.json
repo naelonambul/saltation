@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "bank-auth-transfer-hardening",
+  "kind": "implementation",
+  "title": "Fix concurrent expired-lock login race and transfer idempotency hash delimiter collision",
+  "base": {
+    "ref": "main",
+    "commit": "6723ba1ebddc8a69fe9e6114508487378f7888b3"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
+  },
+  "write_scope": [
+    "bank/src/features/auth/**",
+    "bank/src/features/transfers/mod.rs",
+    "bank/tests/auth.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:e2bf5db3b38ae58635c21b9f3c4d87fd6e3e8068cd7dbd502a45d8ca6a7fd0c6",
+      "by": "naelonambul",
+      "at": "2026-11-22T21:57:32Z",
+      "write_scope_sha256": "sha256:e9c979320ae8b9fbc675f26c1bdc193d3062cf140cd564eebbae74e42c686b8e",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
