@@ -107,3 +107,21 @@ The `oracle` group needs the locally built Oracle image, which GitHub-hosted run
 `.github/workflows/repository.yml` runs one job per check group: `rust`, `web` and `python` on GitHub-hosted runners, and `oracle` on the self-hosted `saltation-oracle` runner. Each job runs `python3 scripts/repo.py verify --full --group <group>`, and `summary` requires all of them. Changes to the workflow file are pushed by the owner (`docs/host-setup.md`, "Workflow changes").
 
 `.github/workflows/weekly-fresh.yml` runs `scripts/dev/it-oracle.sh all --fresh` on the same runner, against `main`, every Sunday at 04:00 KST (Saturday 19:00 UTC). It proves that database creation and the whole suite still work from empty volumes, which the reused test database of ordinary runs would hide. The owner can start it by hand with `gh workflow run weekly-fresh.yml`; results are the workflow's runs in the Actions tab, and GitHub emails a failed run to the owner. It is not part of `summary`, so it never blocks a pull request. It shares the runner's test database and lock with the `oracle` job of pull requests: one waits for the other, and the next `oracle` job reuses the database the weekly run leaves behind. GitHub disables scheduled workflows after 60 days without repository activity; the owner re-enables it in the Actions tab.
+
+## OCI ARM resource budget
+
+The shared Ampere A1 host has 4 vCPU and 24 GB RAM. Saltation's N-7 CPU ceiling includes the active server, observability services, any Saltation connector and the single active one-off driver. On A1 one OCI OCPU represents one vCPU. On OCI x86 Compute one OCPU represents two vCPUs. In both cases, Docker CPU quotas are expressed in guest logical CPU equivalents. [Oracle Compute Shapes](https://docs.oracle.com/en-us/iaas/Content/Compute/References/computeshapes.htm)
+
+Before changing the shared deployment, render the checked-in phase budgets:
+
+```sh
+python3 scripts/ops/check_compose_budget.py static
+```
+
+The matrix reserves 0.15 vCPU and 128 MiB for a connector. Audit the actual Docker context before any one-off launch and again while it runs. Use the connector inventory for the project. The runtime audit requires the full server inventory. Use `--plan-driver loadtest` or `--plan-driver generator` before the launch to include the proposed quota and reject an existing one-off. Pass `--effective` on the Linux Docker host to read the applied cgroup v2 quota, memory limit, and CPU set.
+
+```sh
+python3 scripts/ops/check_compose_budget.py runtime --external-connector saltation-edge
+```
+
+Replace `saltation-edge` with the actual container name or ID. Repeat the option for multiple external connectors, or use `--no-external-connectors` when there are none. Keep generator and load phases mutually exclusive and serialize their launches through the shared operator session. Use `docker compose --profile tools run --rm SERVICE ...` for a single tool. With a containerized load driver, create `.evidence/loadtest` with private permissions and ownership matching the container user (UID and GID 10001), or use Compose `run --user "$(id -u):$(id -g)"` with a private operator-owned directory. A passing quota snapshot does not establish N-8 health. Record lifecycle, restart and health evidence for the run separately.

@@ -313,6 +313,8 @@ The bank's generator listener (`:8081`) and metrics listener (`:9100`), Alloy, L
 
 ### 3. Seed Data & Run the Generator
 
+On the shared OCI host, use the [CPU budget preflight](docs/dev-host.md#oci-arm-resource-budget) before launching a tool.
+
 A new database starts in `backfill` mode. Use the `generator` service (`tools` profile) to seed customers and counterparties, switch the clock to `live`, and generate transfers:
 
 ```sh

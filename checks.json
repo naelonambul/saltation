@@ -270,6 +270,27 @@
       ]
     },
     {
+      "id": "compose-budget",
+      "group": "oracle",
+      "argv": [
+        "python3",
+        "scripts/ops/check_compose_budget.py",
+        "static"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 120,
+      "paths": [
+        "infra/compose/**",
+        "scripts/ops/check_compose_budget.py",
+        "scripts/ops/test_compose_budget.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3",
+        "docker"
+      ]
+    },
+    {
       "id": "oracle-integration",
       "group": "oracle",
       "argv": [
