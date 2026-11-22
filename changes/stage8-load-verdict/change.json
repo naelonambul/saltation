@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "stage8-load-verdict",
+  "kind": "implementation",
+  "title": "Require complete Stage 8 load acceptance evidence",
+  "base": {
+    "ref": "main",
+    "commit": "fd844b2bb78cf615ed69172757806fb779dfd067"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:4c67f4d57872f9e7fb59a8bdf8c0024e82cd47ac29d3f1867b0eec9c8a60644f"
+  },
+  "write_scope": [
+    "loadtest/**",
+    "bank/src/shared/db/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a4f7f72a2061891016be6954d90bbfc3692de06e94308547cf8e24abbad5b7bb",
+      "by": "naelonambul",
+      "at": "2026-11-22T11:45:00Z",
+      "write_scope_sha256": "sha256:278fc8e3f57538e4154b223623b0475671be64f6aa52ed9d4379165239a0eb62",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
