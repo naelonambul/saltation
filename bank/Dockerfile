@@ -17,7 +17,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,id=saltat
     cargo clean --release --package bank --locked && cargo build --release --locked && cp /target/release/bank /bank
 
 FROM oraclelinux:9-slim AS runtime
-ENV ORA_SDTZ=+09:00
+ENV ORA_SDTZ=+09:00 \
+    GLIBC_TUNABLES=glibc.malloc.arena_max=2:glibc.malloc.mmap_threshold=131072
 RUN microdnf -y install ca-certificates \
  && microdnf clean all && rm -rf /var/cache/yum /var/cache/dnf
 COPY --from=build /bank /usr/local/bin/bank

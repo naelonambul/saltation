@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "bank-argon2-oom",
+  "kind": "incident",
+  "title": "Bound bank glibc allocator arenas and Argon2 semaphore lifetime to prevent OOM",
+  "base": {
+    "ref": "main",
+    "commit": "2f95e993157e2d569e50a1f5d93595d5f907b234"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
+  },
+  "write_scope": [
+    "bank/Dockerfile",
+    "bank/src/shared/auth/mod.rs",
+    "infra/lab/ansible/wire-and-smoke.yml"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:b6f0769cc42c55d3133cd3d18be9404059992b29835d2805db1f1f3172ee73fb",
+      "by": "naelonambul",
+      "at": "2026-11-22T21:29:18Z",
+      "write_scope_sha256": "sha256:6d8cd285131cd22a045614c31b599c97c909054f6ef80f49f4d9f88f3b8fbaae",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
