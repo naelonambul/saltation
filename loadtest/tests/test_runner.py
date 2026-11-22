@@ -1,19 +1,26 @@
+import json
 from pathlib import Path
 
 import httpx
 
-from saltation_loadtest.client import Actor, LoadClient
+from saltation_loadtest.client import Actor, LoadClient, TransferAttempt
 from saltation_loadtest.runner import compute_success_rate, run_open_loop
 from saltation_loadtest.scenarios import write_evidence_report
 from saltation_loadtest.thresholds import evaluate_n1
 
-EP = 'endpoint="/v2.0/transfer/withdraw/fin_num"'
+EP = 'listener="GENERATOR",status="200",endpoint="/v2.0/transfer/withdraw/fin_num"'
 LK = 'statement="ledger.lock_accounts"'
 
 
 def test_compute_success_rate_excludes_business_422() -> None:
-    assert compute_success_rate({200: 999, 422: 50, 503: 1}) == 0.999
-    assert compute_success_rate({200: 100, 422: 10}) == 1.0
+    base = ("request", "key", "sender", "receiver", 100)
+    attempts = [
+        TransferAttempt(*base, 200, True, None, 0),
+        TransferAttempt(*base, 422, False, "405", 0),
+        TransferAttempt(*base, 422, False, None, 0),
+        TransferAttempt(*base, 0, False, None, 0),
+    ]
+    assert compute_success_rate(attempts) == 1 / 3
 
 
 async def test_open_loop_runner_with_mock_transport(tmp_path: Path) -> None:
@@ -78,4 +85,10 @@ async def test_open_loop_runner_with_mock_transport(tmp_path: Path) -> None:
     )
     assert verdict.passed
     jp, mp = write_evidence_report(tmp_path, "n1", {"total_sent": res.total_sent}, verdict)
-    assert jp.exists() and mp.exists()
+    assert json.loads(jp.read_text())["outcome"] == "EXPLORATORY"
+    assert json.loads(jp.read_text())["passed"] is None
+    assert "EXPLORATORY" in mp.read_text()
+    assert res.workload_complete
+    assert res.server_complete
+    assert len(res.attempts) == 10
+    assert all(a.sender == a1.account_no for a in res.attempts)

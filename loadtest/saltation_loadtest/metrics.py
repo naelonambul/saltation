@@ -90,17 +90,50 @@ class MetricsSnapshot:
 def histogram_delta_buckets(
     before: MetricsSnapshot, after: MetricsSnapshot, base_name: str, match: dict[str, str] | None = None
 ) -> dict[float, float]:
-    b0 = before.histogram_buckets(base_name, match)
-    b1 = after.histogram_buckets(base_name, match)
-    keys = sorted(set(b0.keys()) | set(b1.keys()))
-    delta: dict[float, float] = {}
-    prev = 0.0
-    for k in keys:
-        d = max(0.0, b1.get(k, 0.0) - b0.get(k, 0.0))
-        d = max(d, prev)
-        delta[k] = d
-        prev = d
-    return delta
+    def series(snapshot: MetricsSnapshot) -> dict[tuple, dict[float, float]]:
+        results: dict[tuple, dict[float, float]] = {}
+        for sample in snapshot.samples:
+            if match and any(sample.labels.get(k) != v for k, v in match.items()):
+                continue
+            if sample.name == f"{base_name}_bucket":
+                try:
+                    bound = float(sample.labels["le"])
+                except (KeyError, ValueError) as exc:
+                    raise ValueError("invalid histogram bucket bound") from exc
+            elif sample.name == f"{base_name}_count":
+                bound = -1.0
+            else:
+                continue
+            key = tuple(sorted((k, v) for k, v in sample.labels.items() if k != "le"))
+            values = results.setdefault(key, {})
+            if bound in values or not math.isfinite(sample.value) or sample.value < 0:
+                raise ValueError("invalid histogram series")
+            values[bound] = sample.value
+        return results
+
+    initial, final = series(before), series(after)
+    if initial.keys() - final.keys():
+        raise ValueError("histogram series disappeared")
+    cumulative: dict[float, float] = {}
+    expected_bounds = None
+    for key, current in final.items():
+        previous = initial.get(key, {})
+        if (previous and previous.keys() != current.keys()) or (
+            expected_bounds is not None and current.keys() != expected_bounds
+        ):
+            raise ValueError("histogram bounds changed")
+        expected_bounds = current.keys()
+        delta = {bound: value - previous.get(bound, 0) for bound, value in current.items()}
+        count = delta.pop(-1.0, None)
+        if count is None or count != delta.get(math.inf):
+            raise ValueError("histogram count does not match buckets")
+        last = 0.0
+        for bound, value in sorted(delta.items()):
+            if bound <= 0 or math.isnan(bound) or value < last or not value.is_integer():
+                raise ValueError("histogram counter reset or invalid bucket")
+            cumulative[bound] = cumulative.get(bound, 0.0) + value
+            last = value
+    return cumulative
 
 
 def histogram_quantile(q: float, buckets: dict[float, float]) -> float | None:
@@ -117,7 +150,7 @@ def histogram_quantile(q: float, buckets: dict[float, float]) -> float | None:
     for bound, count in ordered:
         if count >= rank:
             if math.isinf(bound):
-                return prev_bound
+                return None
             bucket_count = count - prev_count
             if bucket_count <= 0:
                 return bound
@@ -143,14 +176,32 @@ class ServerWindowMetrics:
     outbox_undelivered_end: int
     daily_close_mismatches: int
     limiting_resource: str
+    pool_saturated: bool = False
+    status_counts: dict[int, int] = field(default_factory=dict)
 
 
 def summarize_window(before: MetricsSnapshot, after: MetricsSnapshot) -> ServerWindowMetrics:
-    tx_match = {"endpoint": "/v2.0/transfer/withdraw/fin_num"}
+    tx_match = {"listener": "GENERATOR", "endpoint": "/v2.0/transfer/withdraw/fin_num"}
     tx_buckets = histogram_delta_buckets(before, after, "bank_http_request_duration_seconds", tx_match)
     _, tx_c0 = before.histogram_sum_count("bank_http_request_duration_seconds", tx_match)
     _, tx_c1 = after.histogram_sum_count("bank_http_request_duration_seconds", tx_match)
     tx_count = max(0, round(tx_c1 - tx_c0))
+    statuses = {
+        int(sample.labels.get("status", ""))
+        for sample in after.samples
+        if sample.name == "bank_http_request_duration_seconds_count"
+        and all(sample.labels.get(k) == v for k, v in tx_match.items())
+    }
+    if any(not 100 <= status <= 599 for status in statuses):
+        raise ValueError("invalid HTTP metrics status")
+    status_counts = {
+        status: int(
+            histogram_delta_buckets(
+                before, after, "bank_http_request_duration_seconds", {**tx_match, "status": str(status)}
+            )[math.inf]
+        )
+        for status in statuses
+    }
 
     p50_s = histogram_quantile(0.50, tx_buckets)
     p95_s = histogram_quantile(0.95, tx_buckets)
@@ -187,7 +238,18 @@ def summarize_window(before: MetricsSnapshot, after: MetricsSnapshot) -> ServerW
 
     p95_ms = p95_s * 1000.0 if p95_s is not None else None
     lock_p95_ms = lock_p95_s * 1000.0 if lock_p95_s is not None else None
-    limiting = classify_limiting_resource(p95_ms, lock_p95_ms, deadlocks, outbox_full)
+    pool_capacity = after.gauge_max("bank_db_pool_capacity")
+    pool_buckets = histogram_delta_buckets(before, after, "bank_db_pool_acquire_wait_seconds")
+    pool_wait = histogram_quantile(0.95, pool_buckets)
+    pool_saturated = (
+        pool_capacity > 0
+        and pool_wait is not None
+        and p95_s is not None
+        and pool_wait >= max(0.05, 0.4 * p95_s)
+    )
+    limiting = classify_limiting_resource(
+        p95_ms, lock_p95_ms, deadlocks, outbox_full, pool_saturated=pool_saturated
+    )
 
     return ServerWindowMetrics(
         transfer_count=tx_count,
@@ -203,6 +265,8 @@ def summarize_window(before: MetricsSnapshot, after: MetricsSnapshot) -> ServerW
         outbox_undelivered_end=outbox_end,
         daily_close_mismatches=close_mismatches,
         limiting_resource=limiting,
+        pool_saturated=pool_saturated,
+        status_counts=status_counts,
     )
 
 
@@ -211,6 +275,8 @@ def classify_limiting_resource(
     lock_wait_p95_ms: float | None,
     deadlock_retries: int,
     outbox_full_events: int,
+    *,
+    pool_saturated: bool = False,
 ) -> str:
     if outbox_full_events > 0:
         return "outbox_tablespace"
@@ -222,5 +288,5 @@ def classify_limiting_resource(
     ):
         return "row_lock_wait"
     if transfer_p95_ms is not None and transfer_p95_ms > 300.0:
-        return "db_pool_or_cpu"
+        return "db_pool" if pool_saturated else "unknown"
     return "none_saturated"

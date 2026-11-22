@@ -47,6 +47,19 @@ class Actor:
     device: str
 
 
+@dataclass(frozen=True)
+class TransferAttempt:
+    request_id: str
+    bank_tran_id: str
+    sender: str
+    receiver: str
+    amount: int
+    status: int
+    succeeded: bool
+    business_rejection: str | None
+    elapsed_ms: float
+
+
 class LoadClient:
     def __init__(
         self,
@@ -60,9 +73,11 @@ class LoadClient:
     ):
         limits = httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_connections)
         self._bank = httpx.AsyncClient(
-            base_url=bank_url, timeout=timeout, limits=limits, transport=bank_transport
+            base_url=bank_url, timeout=timeout, limits=limits, transport=bank_transport, trust_env=False
         )
-        self._metrics = httpx.AsyncClient(base_url=metrics_url, timeout=timeout, transport=metrics_transport)
+        self._metrics = httpx.AsyncClient(
+            base_url=metrics_url, timeout=timeout, transport=metrics_transport, trust_env=False
+        )
 
     async def close(self) -> None:
         await self._bank.aclose()
@@ -108,21 +123,24 @@ class LoadClient:
         res.raise_for_status()
         return res.json()["access_token"]
 
-    async def transfer(self, sender: Actor, receiver: Actor, amount: int) -> tuple[int, float]:
-        """Executes one in-bank transfer and returns (http_status, elapsed_ms)."""
+    async def transfer(self, sender: Actor, receiver: Actor, amount: int) -> TransferAttempt:
+        """Record the outcome and the identifiers needed for independent reconciliation."""
         started = time.perf_counter()
+        request_id = new_ulid()
+        transaction_id = bank_tran_id()
+        code = bank_code = None
         try:
             res = await self._bank.post(
                 "/v2.0/transfer/withdraw/fin_num",
                 headers={
-                    "X-Request-Id": new_ulid(),
+                    "X-Request-Id": request_id,
                     "Authorization": f"Bearer {sender.token}",
                     "X-Sim-Ip": sender.ip,
                     "X-Sim-Region": sender.region,
                     "X-Sim-Device": sender.device,
                 },
                 json={
-                    "bank_tran_id": bank_tran_id(),
+                    "bank_tran_id": transaction_id,
                     "fintech_use_num": sender.fintech_use_num,
                     "tran_amt": str(amount),
                     "tran_dtime": time.strftime("%Y%m%d%H%M%S"),
@@ -134,7 +152,27 @@ class LoadClient:
                 },
             )
             status = res.status_code
+            try:
+                body = res.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict):
+                code = body.get("rsp_code")
+                bank_code = body.get("bank_rsp_code")
         except httpx.HTTPError:
             status = 0
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        return status, elapsed_ms
+        rejection = None
+        if status == 422 and code == "A0004" and bank_code in ("403", "404", "405", "406"):
+            rejection = bank_code
+        return TransferAttempt(
+            request_id,
+            transaction_id,
+            sender.account_no,
+            receiver.account_no,
+            amount,
+            status,
+            status == 200 and code == "A0000",
+            rejection,
+            elapsed_ms,
+        )

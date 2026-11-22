@@ -1,3 +1,5 @@
+import pytest
+
 from saltation_loadtest.metrics import (
     MetricsSnapshot,
     classify_limiting_resource,
@@ -5,7 +7,7 @@ from saltation_loadtest.metrics import (
     summarize_window,
 )
 
-TX = 'listener="generator",endpoint="/v2.0/transfer/withdraw/fin_num",status="200"'
+TX = 'listener="GENERATOR",endpoint="/v2.0/transfer/withdraw/fin_num",status="200"'
 LK = 'statement="ledger.lock_accounts"'
 
 SAMPLE_BEFORE = "\n".join(
@@ -73,5 +75,16 @@ def test_summarize_window_deltas() -> None:
 
 def test_classify_limiting_resource() -> None:
     assert classify_limiting_resource(400.0, 200.0, 0, 0) == "row_lock_wait"
-    assert classify_limiting_resource(400.0, 20.0, 0, 0) == "db_pool_or_cpu"
+    assert classify_limiting_resource(400.0, 20.0, 0, 0) == "unknown"
     assert classify_limiting_resource(100.0, 10.0, 0, 1) == "outbox_tablespace"
+
+
+def test_inconsistent_histogram_is_not_clamped_into_evidence() -> None:
+    before = MetricsSnapshot.parse(SAMPLE_BEFORE)
+    after = MetricsSnapshot.parse(SAMPLE_AFTER.replace(f"count{{{TX}}} 120", f"count{{{TX}}} 121"))
+    with pytest.raises(ValueError, match="count"):
+        summarize_window(before, after)
+
+
+def test_unbounded_last_bucket_is_not_a_latency_measurement() -> None:
+    assert histogram_quantile(0.95, {0.01: 0.0, float("inf"): 1.0}) is None
