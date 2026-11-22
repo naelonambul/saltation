@@ -21,28 +21,37 @@ def test_n2_requires_200_senders() -> None:
     assert not bad.passed
 
 
-def test_n3_saturation_above_100_tps() -> None:
-    ok = evaluate_n3(
-        [
-            StepOutcome(25, 25.0, 40.0, 1.0, "none_saturated"),
-            StepOutcome(50, 50.0, 80.0, 1.0, "none_saturated"),
-            StepOutcome(100, 99.5, 210.0, 1.0, "none_saturated"),
-            StepOutcome(200, 180.0, 450.0, 0.99, "db_pool_or_cpu"),
-        ]
-    )
-    assert ok.passed
+def step(tps: int, p95_ms: float | None = 50, resource: str = "none_saturated") -> StepOutcome:
+    return StepOutcome(tps, tps, p95_ms, 1.0, resource, 180.0, True, True, 1)
 
-    bad = evaluate_n3(
-        [
-            StepOutcome(25, 25.0, 40.0, 1.0, "none_saturated"),
-            StepOutcome(50, 50.0, 80.0, 1.0, "none_saturated"),
-            StepOutcome(100, 95.0, 350.0, 1.0, "row_lock_wait"),
-            StepOutcome(200, 120.0, 900.0, 0.95, "row_lock_wait"),
-        ]
-    )
-    assert not bad.passed
+
+def test_n3_saturation_above_100_tps() -> None:
+    steps = [step(25), step(50), step(100), step(200, 450.0, "db_pool")]
+    assert evaluate_n3(steps).passed
+    steps[2] = step(100, 350, "row_lock_wait")
+    assert not evaluate_n3(steps).passed
+    assert evaluate_n3(steps).evidence_complete
+
+
+def test_n3_rejects_incomplete_steps() -> None:
+    steps = [step(25), step(50), step(100), step(200)]
+    assert evaluate_n3(steps).passed
+    for invalid in ([], steps[:3], steps[::-1], [*steps[:3], step(100)]):
+        assert not evaluate_n3(invalid).evidence_complete
+    for invalid_last in (step(200, None), step(200, 450, "unknown")):
+        assert not evaluate_n3([*steps[:3], invalid_last]).evidence_complete
+    steps[-1].achieved_tps = 180
+    assert not evaluate_n3(steps).evidence_complete
 
 
 def test_n5_correctness() -> None:
     assert evaluate_n5(daily_close_mismatches=0, duplicate_movements=0, f21_violations=0).passed
     assert not evaluate_n5(daily_close_mismatches=1, duplicate_movements=0, f21_violations=0).passed
+
+
+def test_n3_rejections_do_not_establish_capacity() -> None:
+    steps = [step(25), step(50), step(100), step(200)]
+    for window in steps:
+        window.successes = 0
+        window.success_rate = 0
+    assert not evaluate_n3(steps).passed

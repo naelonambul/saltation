@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -17,6 +18,7 @@ class ScenarioVerdict:
     scenario: str
     passed: bool
     checks: list[CheckResult] = field(default_factory=list)
+    evidence_complete: bool = True
 
 
 def evaluate_n1(
@@ -83,6 +85,10 @@ def evaluate_n2(
     return ScenarioVerdict(scenario="N-2", passed=all(c.passed for c in checks), checks=checks)
 
 
+N3_STEPS = (25, 50, 100, 200)
+N3_STEP_SECONDS = 180.0
+
+
 @dataclass
 class StepOutcome:
     target_tps: int
@@ -90,31 +96,55 @@ class StepOutcome:
     p95_ms: float | None
     success_rate: float
     limiting_resource: str
+    duration_seconds: float = 0.0
+    workload_complete: bool = False
+    server_complete: bool = False
+    successes: int = 0
 
 
 def evaluate_n3(steps: list[StepOutcome]) -> ScenarioVerdict:
-    """First step whose p95 exceeds 300 ms must be > 100 TPS (spec N-3)."""
-    first_exceed: StepOutcome | None = None
-    for step in sorted(steps, key=lambda s: s.target_tps):
-        if step.p95_ms is None or step.p95_ms > 300.0:
-            first_exceed = step
-            break
+    """Evaluate ordered, fully evidenced steps before interpreting saturation."""
+    if tuple(s.target_tps for s in steps) != N3_STEPS or any(
+        s.duration_seconds != N3_STEP_SECONDS
+        or not s.workload_complete
+        or s.achieved_tps != s.target_tps
+        or not s.server_complete
+        or s.p95_ms is None
+        or not math.isfinite(s.p95_ms)
+        or s.p95_ms < 0
+        for s in steps
+    ):
+        return ScenarioVerdict(
+            "N-3",
+            False,
+            [CheckResult("Complete prescribed workload and server evidence", False, "incomplete")],
+            evidence_complete=False,
+        )
 
-    passed_threshold = first_exceed is None or first_exceed.target_tps > 100
+    crossing = next((s for s in steps if s.p95_ms is not None and s.p95_ms > 300.0), None)
+    resource_known = crossing is None or crossing.limiting_resource in {
+        "row_lock_wait",
+        "disk",
+        "cpu",
+        "db_pool",
+    }
+    passing_threshold = crossing is None or crossing.target_tps > 100
     detail = (
-        "no step exceeded 300ms"
-        if first_exceed is None
-        else f"first step > 300ms: {first_exceed.target_tps} TPS (limiting={first_exceed.limiting_resource})"
+        "No crossing observed through the 200 TPS step"
+        if crossing is None
+        else f"first step > 300ms: {crossing.target_tps} TPS (limiting={crossing.limiting_resource})"
+    )
+    successful_load = all(
+        step.successes > 0 and (step is crossing or step.success_rate >= 0.999) for step in steps
     )
     checks = [
-        CheckResult("first_p95_over_300ms > 100 TPS", passed_threshold, detail),
-        CheckResult(
-            "all steps <= 100 TPS >= 99.9% success",
-            all(s.success_rate >= 0.999 for s in steps if s.target_tps <= 100),
-            ", ".join(f"{s.target_tps}tps:{s.success_rate * 100:.2f}%" for s in steps),
-        ),
+        CheckResult("first_p95_over_300ms > 100 TPS", passing_threshold, detail),
+        CheckResult("successful load before saturation", successful_load, "success counters by step"),
+        CheckResult("limiting resource supported", resource_known, detail),
     ]
-    return ScenarioVerdict(scenario="N-3", passed=all(c.passed for c in checks), checks=checks)
+    return ScenarioVerdict(
+        "N-3", passing_threshold and resource_known and successful_load, checks, resource_known
+    )
 
 
 def evaluate_n5(

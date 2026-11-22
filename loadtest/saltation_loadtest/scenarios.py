@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,9 @@ from pathlib import Path
 from saltation_loadtest.client import Actor, LoadClient
 from saltation_loadtest.runner import RunResult, run_open_loop
 from saltation_loadtest.thresholds import (
+    N3_STEP_SECONDS,
+    N3_STEPS,
+    CheckResult,
     ScenarioVerdict,
     StepOutcome,
     evaluate_n1,
@@ -110,13 +114,23 @@ async def run_n1(
     res = await run_open_loop(client, target_tps=tps, duration_seconds=duration_seconds, pair_picker=pick)
     srv = res.server
     verdict = evaluate_n1(
-        p50_ms=srv.transfer_p50_ms if srv and srv.transfer_p50_ms is not None else res.client_p50_ms,
-        p95_ms=srv.transfer_p95_ms if srv and srv.transfer_p95_ms is not None else res.client_p95_ms,
-        p99_ms=srv.transfer_p99_ms if srv and srv.transfer_p99_ms is not None else res.client_p99_ms,
+        p50_ms=srv.transfer_p50_ms if srv else None,
+        p95_ms=srv.transfer_p95_ms if srv else None,
+        p99_ms=srv.transfer_p99_ms if srv else None,
         lock_wait_p95_ms=srv.lock_wait_p95_ms if srv else None,
         success_rate=res.non_business_success_rate,
     )
-    return res, verdict
+    complete = (
+        tps == 50
+        and duration_seconds == 600
+        and res.workload_complete
+        and res.server_complete
+        and srv is not None
+        and srv.lock_wait_count >= sum(a.succeeded for a in res.attempts) > 0
+        and srv.lock_wait_p95_ms is not None
+        and all(p is not None for p in (srv.transfer_p50_ms, srv.transfer_p95_ms, srv.transfer_p99_ms))
+    )
+    return res, require_evidence(verdict, complete)
 
 
 async def run_n2(
@@ -135,20 +149,31 @@ async def run_n2(
     res = await run_open_loop(client, target_tps=tps, duration_seconds=duration_seconds, pair_picker=pick)
     srv = res.server
     verdict = evaluate_n2(
-        p95_ms=srv.transfer_p95_ms if srv and srv.transfer_p95_ms is not None else res.client_p95_ms,
+        p95_ms=srv.transfer_p95_ms if srv else None,
         success_rate=res.non_business_success_rate,
-        sender_count=len(senders),
+        sender_count=len({a.sender for a in res.attempts}),
     )
-    return res, verdict
+    complete = (
+        tps == 50
+        and duration_seconds == 300
+        and res.workload_complete
+        and res.server_complete
+        and srv is not None
+        and srv.transfer_p95_ms is not None
+        and {a.receiver for a in res.attempts} == {receiver.account_no}
+    )
+    return res, require_evidence(verdict, complete)
 
 
 async def run_n3(
     client: LoadClient,
     actors: list[Actor],
     *,
-    steps: tuple[int, ...] = (25, 50, 100, 200),
-    step_duration_seconds: float = 180.0,
+    steps: tuple[int, ...] = N3_STEPS,
+    step_duration_seconds: float = N3_STEP_SECONDS,
     seed: int = 99,
+    capture_resource: Callable[[], dict] | None = None,
+    classify_resource: Callable[[dict, dict], str] | None = None,
 ) -> tuple[list[RunResult], ScenarioVerdict]:
     rng = random.Random(seed)
     n = len(actors)
@@ -163,13 +188,27 @@ async def run_n3(
     results: list[RunResult] = []
     outcomes: list[StepOutcome] = []
     for tps in steps:
+        before = capture_resource() if capture_resource else None
         res = await run_open_loop(
             client, target_tps=tps, duration_seconds=step_duration_seconds, pair_picker=pick
         )
         results.append(res)
         srv = res.server
-        p95 = srv.transfer_p95_ms if srv and srv.transfer_p95_ms is not None else res.client_p95_ms
+        p95 = srv.transfer_p95_ms if srv else None
         limiting = srv.limiting_resource if srv else "unknown"
+        pool_full = sum(occupancy == capacity for _, occupancy, capacity in res.pool_samples) >= 2
+        if srv and srv.pool_saturated and pool_full and limiting == "row_lock_wait":
+            limiting = "ambiguous"
+        if limiting == "db_pool" and not pool_full:
+            limiting = "ambiguous"
+        if before is not None and capture_resource and classify_resource:
+            res.resource_before = before
+            res.resource_after = capture_resource()
+            host_limit = classify_resource(before, res.resource_after)
+            if limiting == "unknown":
+                limiting = host_limit
+            elif host_limit not in ("unknown", limiting):
+                limiting = "ambiguous"
         outcomes.append(
             StepOutcome(
                 target_tps=tps,
@@ -177,10 +216,24 @@ async def run_n3(
                 p95_ms=p95,
                 success_rate=res.non_business_success_rate,
                 limiting_resource=limiting,
+                duration_seconds=res.duration_seconds,
+                workload_complete=res.workload_complete,
+                server_complete=res.server_complete,
+                successes=sum(a.succeeded for a in res.attempts),
             )
         )
 
     return results, evaluate_n3(outcomes)
+
+
+def require_evidence(verdict: ScenarioVerdict, complete: bool) -> ScenarioVerdict:
+    if not complete:
+        verdict.checks.append(
+            CheckResult("Complete prescribed workload and server evidence", False, "incomplete")
+        )
+        verdict.passed = False
+        verdict.evidence_complete = False
+    return verdict
 
 
 def write_evidence_report(
@@ -188,18 +241,27 @@ def write_evidence_report(
     scenario: str,
     payload: dict[str, object],
     verdict: ScenarioVerdict,
+    *,
+    exploratory: bool = True,
+    run_id: str | None = None,
 ) -> tuple[Path, Path]:
     """Writes measured evidence strictly into git-ignored .evidence/loadtest/."""
     report_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    stem = f"{ts}-{scenario.lower()}"
+    stem = f"{run_id or ts}-{scenario.lower()}"
+    outcome = "EXPLORATORY"
+    if not exploratory:
+        outcome = "INCOMPLETE"
+        if verdict.evidence_complete:
+            outcome = "PASS" if verdict.passed else "FAIL"
     json_path = report_dir / f"{stem}.json"
     md_path = report_dir / f"{stem}.md"
 
     doc = {
         "timestamp_utc": ts,
         "scenario": scenario,
-        "passed": verdict.passed,
+        "outcome": outcome,
+        "passed": verdict.passed if not exploratory else None,
         "checks": [asdict(c) for c in verdict.checks],
         "data": payload,
     }
@@ -209,7 +271,7 @@ def write_evidence_report(
         f"# Saltation Load Test Evidence: {scenario}",
         "",
         f"- **Timestamp (UTC)**: `{ts}`",
-        f"- **Verdict**: `{'PASS' if verdict.passed else 'FAIL'}`",
+        f"- **Verdict**: `{outcome}`",
         "",
         "## Checks",
         "",
@@ -217,7 +279,8 @@ def write_evidence_report(
         "| --- | --- | --- |",
     ]
     for c in verdict.checks:
-        lines.append(f"| {c.name} | {'PASS' if c.passed else 'FAIL'} | `{c.detail}` |")
+        status = "observed" if exploratory else ("met" if c.passed else "unmet")
+        lines.append(f"| {c.name} | {status} | `{c.detail}` |")
     lines.append("")
     lines.append("> OTN notice: Do not commit this file or copy measured Oracle timings into public text.")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

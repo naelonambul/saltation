@@ -88,6 +88,9 @@ struct Inner<C: Connector> {
     state: Mutex<State<C::Conn>>,
     max: usize,
     spawn: Spawner,
+    capacity: metrics::Gauge,
+    in_use: metrics::Gauge,
+    acquire_wait: metrics::Histogram,
 }
 
 pub(crate) struct Pool<C: Connector> {
@@ -109,6 +112,10 @@ impl<C: Connector> Pool<C> {
     }
 
     fn with_spawner(connector: C, max: usize, spawn: Spawner) -> Self {
+        let capacity = metrics::gauge!("bank_db_pool_capacity");
+        let in_use = metrics::gauge!("bank_db_pool_in_use");
+        // Unlabelled gauges sum across pools sharing the recorder.
+        capacity.increment(max as f64);
         Self {
             inner: Arc::new(Inner {
                 connector: Arc::new(connector),
@@ -123,11 +130,24 @@ impl<C: Connector> Pool<C> {
                 }),
                 max,
                 spawn,
+                capacity,
+                in_use,
+                acquire_wait: metrics::histogram!("bank_db_pool_acquire_wait_seconds"),
             }),
         }
     }
 
     pub(crate) async fn acquire(&self, budget: Duration) -> Result<Lease<C>, PoolError<C::Error>> {
+        let start = Instant::now();
+        let result = self.acquire_lease(budget).await;
+        // A cancelled future has no completed acquisition to record.
+        self.inner
+            .acquire_wait
+            .record(start.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn acquire_lease(&self, budget: Duration) -> Result<Lease<C>, PoolError<C::Error>> {
         let deadline = tokio::time::Instant::now() + budget;
         let mut opening = None;
         let wake = Arc::new(Notify::new());
@@ -161,6 +181,8 @@ impl<C: Connector> Pool<C> {
                     if let Some(id) = waiter.id.take() {
                         state.remove_waiter(id);
                     }
+                    drop(state);
+                    self.inner.in_use.increment(1.0);
                     return Ok(Lease {
                         inner: self.inner.clone(),
                         conn: Some(conn),
@@ -380,6 +402,7 @@ impl<C: Connector> Inner<C> {
 
 impl<C: Connector> Drop for Inner<C> {
     fn drop(&mut self) {
+        self.capacity.decrement(self.max as f64);
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
         state.closed = true;
         let connections: Vec<_> = state
@@ -469,8 +492,15 @@ impl<C: Connector> Lease<C> {
     pub(crate) fn conn_mut(&mut self) -> &mut C::Conn {
         self.conn.as_mut().expect("active lease")
     }
+
+    fn take_conn(&mut self) -> Option<C::Conn> {
+        let conn = self.conn.take()?;
+        self.inner.in_use.decrement(1.0);
+        Some(conn)
+    }
+
     pub(crate) fn release(mut self, healthy: bool) {
-        let conn = self.conn.take().expect("active lease");
+        let conn = self.take_conn().expect("active lease");
         let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
         if healthy && !state.closed {
             state.idle.push(conn);
@@ -487,7 +517,7 @@ impl<C: Connector> Lease<C> {
 
 impl<C: Connector> Drop for Lease<C> {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
+        if let Some(conn) = self.take_conn() {
             self.inner.retire(
                 conn,
                 self.blocking || tokio::runtime::Handle::try_current().is_err(),
@@ -610,6 +640,85 @@ mod tests {
                 }
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn metrics_follow_checked_out_leases_and_completed_attempts() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .set_buckets(&[0.01, 0.1])
+            .unwrap()
+            .build_recorder();
+        let pool = metrics::with_local_recorder(&recorder, || Pool::new(Fake::default(), 1));
+        let handle = recorder.handle();
+        let reports = |sample| assert!(handle.render().lines().any(|line| line == sample));
+
+        pool.warm(1, BUDGET).unwrap();
+        reports("bank_db_pool_capacity 1");
+        reports("bank_db_pool_in_use 0");
+
+        let lease = pool.acquire(Duration::ZERO).await.unwrap();
+        reports("bank_db_pool_in_use 1");
+        assert!(matches!(pool.acquire(SHORT).await, Err(PoolError::Busy)));
+        reports("bank_db_pool_in_use 1");
+
+        let mut cancelled = Box::pin(pool.acquire(BUDGET));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        reports("bank_db_pool_in_use 1");
+        drop(cancelled);
+        reports("bank_db_pool_in_use 1");
+        reports("bank_db_pool_acquire_wait_seconds_count 2");
+
+        lease.release(true);
+        reports("bank_db_pool_in_use 0");
+        let lease = pool.acquire(Duration::ZERO).await.unwrap();
+        pool.close();
+        reports("bank_db_pool_capacity 1");
+        reports("bank_db_pool_in_use 1");
+        tokio::task::spawn_blocking(move || drop(lease))
+            .await
+            .unwrap();
+        reports("bank_db_pool_in_use 0");
+        reports("bank_db_pool_acquire_wait_seconds_count 3");
+
+        drop(pool);
+        until(|| {
+            handle
+                .render()
+                .lines()
+                .any(|line| line == "bank_db_pool_capacity 0")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn open_failure_leaves_metrics_unoccupied() {
+        let fake = Fake::default();
+        fake.fail.store(true, Ordering::SeqCst);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .set_buckets(&[0.01, 0.1])
+            .unwrap()
+            .build_recorder();
+        let pool = metrics::with_local_recorder(&recorder, || Pool::new(fake, 1));
+
+        assert!(matches!(
+            pool.acquire(BUDGET).await,
+            Err(PoolError::Open(_))
+        ));
+        let snapshot = recorder.handle().render();
+        for sample in [
+            "bank_db_pool_capacity 1",
+            "bank_db_pool_in_use 0",
+            "bank_db_pool_acquire_wait_seconds_count 1",
+        ] {
+            assert!(snapshot.lines().any(|line| line == sample), "{snapshot}");
+        }
     }
 
     #[tokio::test]

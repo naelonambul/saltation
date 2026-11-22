@@ -3,7 +3,10 @@ name = "saltation-loadtest"
 version = "0.1.0"
 description = "Open-loop transfer load tests (N-1 to N-3, N-5, N-8) for Saltation"
 requires-python = ">=3.13"
-dependencies = ["httpx>=0.28"]
+dependencies = [
+    "httpx>=0.28",
+    "oracledb>=3,<5",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12"]
