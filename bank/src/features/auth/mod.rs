@@ -86,6 +86,7 @@ async fn login(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
+    identity: Option<Extension<crate::shared::outcome::IdentitySlot>>,
     crate::shared::api::Json(req): crate::shared::api::Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     let device_id = req.device_id.clone().or_else(|| ctx.device_id.clone());
@@ -262,16 +263,22 @@ async fn login(
         .map_err(|e| db_error(&ctx, &e))?;
 
     match outcome {
-        Outcome::Success => Ok(api::ok(
-            &ctx,
-            json!({
-                "access_token": token,
-                "token_type": "Bearer",
-                "expires_in": SESSION_IDLE.num_seconds(),
-                "scope": CUSTOMER_SCOPE,
-                "user_seq_no": auth::user_seq_no(customer_id.unwrap_or_default()),
-            }),
-        )),
+        Outcome::Success => {
+            if let Some(Extension(slot)) = identity {
+                slot.lock().unwrap_or_else(|e| e.into_inner()).session_id =
+                    Some(session_id.clone());
+            }
+            Ok(api::ok(
+                &ctx,
+                json!({
+                    "access_token": token,
+                    "token_type": "Bearer",
+                    "expires_in": SESSION_IDLE.num_seconds(),
+                    "scope": CUSTOMER_SCOPE,
+                    "user_seq_no": auth::user_seq_no(customer_id.unwrap_or_default()),
+                }),
+            ))
+        }
         Outcome::Locked => Err(ApiError::new(
             &ctx,
             StatusCode::UNAUTHORIZED,

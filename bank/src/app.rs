@@ -5,18 +5,24 @@
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue, Method};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::Response;
 use axum::routing::get;
 use metrics_exporter_prometheus::PrometheusHandle;
+use serde_json::json;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::features;
 use crate::shared::clock::Clock;
 use crate::shared::context::{self, Listener};
-use crate::shared::db::Db;
+use crate::shared::db::{Db, SqlStmt};
 use crate::shared::telemetry;
+
+const READY_PING: SqlStmt = SqlStmt {
+    name: "app.readyz",
+    sql: "SELECT 1 FROM DUAL",
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,9 +31,23 @@ pub struct AppState {
     pub limits: crate::shared::limits::Limits,
 }
 
+async fn readyz(State(state): State<AppState>) -> (StatusCode, axum::Json<serde_json::Value>) {
+    match state.db.run(|s| s.query_row::<i64>(&READY_PING, &[])).await {
+        Ok(1) => (
+            StatusCode::OK,
+            axum::Json(json!({ "status": "ok", "oracle": "ok" })),
+        ),
+        Ok(_) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({ "status": "not_ready", "oracle": "unavailable" })),
+        ),
+    }
+}
+
 fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
         .merge(features::auth::router())
         .merge(features::admin::router())
         .merge(features::password_reset::router())
@@ -72,7 +92,9 @@ fn fallback_error(
     code: &'static str,
 ) -> Response {
     use axum::response::IntoResponse;
-    if matches!(uri.path(), "/healthz" | "/metrics") || uri.path().starts_with("/internal/") {
+    if matches!(uri.path(), "/healthz" | "/readyz" | "/metrics")
+        || uri.path().starts_with("/internal/")
+    {
         return status.into_response();
     }
     crate::shared::api::ApiError::new(
@@ -130,13 +152,19 @@ pub fn generator_router(state: AppState) -> Router {
 }
 
 pub fn metrics_router(handle: PrometheusHandle) -> Router {
-    Router::new().route("/metrics", get(move || std::future::ready(handle.render())))
+    Router::new().route(
+        "/metrics",
+        get(move || {
+            telemetry::sample_process_memory();
+            std::future::ready(handle.render())
+        }),
+    )
 }
 
 async fn operation_routes(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let bypass = matches!(
         (req.method().as_str(), req.uri().path()),
-        (_, "/healthz")
+        (_, "/healthz" | "/readyz")
             | ("GET", "/internal/v1/clock" | "/internal/v1/outbox")
             | (
                 "POST",

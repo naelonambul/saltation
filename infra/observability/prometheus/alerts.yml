@@ -54,3 +54,12 @@ groups:
         annotations:
           summary: "Saltation transfer p95 latency exceeded 300ms (N-1)"
           description: "Transfer p95 latency is {{ $value }}s over the last 5 minutes."
+
+      - alert: SaltationBankMemoryHigh
+        expr: bank_process_resident_memory_bytes > 786432000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Saltation bank RSS exceeded 750 MiB (1 GiB container limit)"
+          description: "Bank resident memory is {{ $value }} bytes."

@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::shared::context::{Listener, RequestContext};
 use crate::shared::db::StatementStats;
+use crate::shared::outcome::IdentitySlot;
 
 /// Statement statistics collected for one HTTP request.
 pub type RequestStats = Arc<Mutex<StatementStats>>;
@@ -74,6 +75,10 @@ pub async fn request_log(listener: Listener, mut req: Request, next: Next) -> Re
         .unwrap_or_default();
     let stats: RequestStats = Arc::default();
     req.extensions_mut().insert(stats.clone());
+    let identity = req
+        .extensions_mut()
+        .get_or_insert_default::<IdentitySlot>()
+        .clone();
 
     let res = next.run(req).await;
 
@@ -87,9 +92,16 @@ pub async fn request_log(listener: Listener, mut req: Request, next: Next) -> Re
     )
     .record(elapsed.as_secs_f64());
     let s = stats.lock().map(|g| g.clone()).unwrap_or_default();
+    let session_id = identity
+        .lock()
+        .ok()
+        .and_then(|g| g.session_id.clone())
+        .or_else(|| s.pending_touch.as_ref().map(|p| p.session_id.clone()))
+        .unwrap_or_default();
     tracing::info!(
         target: "request",
         request_id,
+        session_id,
         listener = listener.as_str(),
         method = %method,
         endpoint,
@@ -100,4 +112,61 @@ pub async fn request_log(listener: Listener, mut req: Request, next: Next) -> Re
         slowest_ms = s.slowest.map(|(_, d)| d.as_secs_f64() * 1000.0).unwrap_or(0.0),
     );
     res
+}
+
+/// Parses `VmRSS` and `RssAnon` (in bytes) from Linux `/proc/self/status` text.
+fn parse_proc_status_memory(text: &str) -> (Option<u64>, Option<u64>) {
+    let mut vm_rss = None;
+    let mut rss_anon = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            vm_rss = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|kb| kb.saturating_mul(1024));
+        } else if let Some(rest) = line.strip_prefix("RssAnon:") {
+            rss_anon = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|kb| kb.saturating_mul(1024));
+        }
+    }
+    (vm_rss, rss_anon)
+}
+
+/// Updates process memory gauges from `/proc/self/status` on Linux; no-op elsewhere.
+pub fn sample_process_memory() {
+    let Ok(text) = std::fs::read_to_string("/proc/self/status") else {
+        return;
+    };
+    let (vm_rss, rss_anon) = parse_proc_status_memory(&text);
+    if let Some(bytes) = vm_rss {
+        metrics::gauge!("bank_process_resident_memory_bytes").set(bytes as f64);
+    }
+    if let Some(bytes) = rss_anon {
+        metrics::gauge!("bank_process_anon_memory_bytes").set(bytes as f64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_proc_status_memory;
+
+    #[test]
+    fn parses_vm_rss_and_rss_anon_in_bytes() {
+        let sample = "\
+Name:\tbank
+VmSize:\t 1309084 kB
+VmRSS:\t   20616 kB
+RssAnon:\t    9192 kB
+RssFile:\t   11424 kB
+";
+        assert_eq!(
+            parse_proc_status_memory(sample),
+            (Some(20_616 * 1024), Some(9_192 * 1024))
+        );
+        assert_eq!(parse_proc_status_memory("Name:\tbank\n"), (None, None));
+    }
 }
