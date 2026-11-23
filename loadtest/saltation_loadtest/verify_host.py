@@ -26,7 +26,7 @@ CO_TENANTS = frozenset(
         "qdrant-qdrant-1",
         "npm",
         "jenkins",
-        "cloudflared-oci-podobank-api",
+        "cloudflared-oci-vpc",
     }
 )
 CPU_BUDGET = 4
