@@ -62,6 +62,14 @@ def evaluate_restricted_route(method: str, path: str, status: int) -> NegativeCh
     )
 
 
+def evaluate_admin_unauthenticated(status: int) -> NegativeCheck:
+    return NegativeCheck(
+        name="unauthenticated /admin/v1/customers denied",
+        passed=status in (401, 403),
+        detail=f"HTTP {status} (expected 401 or 403)",
+    )
+
+
 def evaluate_spoofed_event(events: list[dict[str, Any]]) -> NegativeCheck:
     if not events:
         return NegativeCheck("public ignores X-Sim-* headers", False, "no bank_logs.events found for probe")
@@ -72,16 +80,31 @@ def evaluate_spoofed_event(events: list[dict[str, Any]]) -> NegativeCheck:
                 False,
                 f"unexpected listener/human: {ev.get('listener')}/{ev.get('human')}",
             )
-        if ev.get("ip") == SPOOFED_IP or ev.get("region") == SPOOFED_REGION:
+        ip = ev.get("ip")
+        region = ev.get("region")
+        device_id = ev.get("device_id")
+        if not isinstance(ip, str) or not ip.strip() or not isinstance(region, str) or not region.strip():
             return NegativeCheck(
                 "public ignores X-Sim-* headers",
                 False,
-                f"spoofed context leaked: ip={ev.get('ip')} region={ev.get('region')}",
+                f"missing trusted edge context: ip={ip!r} region={region!r}",
+            )
+        if ip == SPOOFED_IP or region == SPOOFED_REGION:
+            return NegativeCheck(
+                "public ignores X-Sim-* headers",
+                False,
+                f"spoofed context leaked: ip={ip} region={region}",
+            )
+        if device_id is not None:
+            return NegativeCheck(
+                "public ignores X-Sim-* headers",
+                False,
+                f"unexpected device_id persisted (X-Sim-Device leak): {device_id!r}",
             )
     return NegativeCheck(
         "public ignores X-Sim-* headers",
         True,
-        f"verified {len(events)} event(s): listener=public, human=true, region={events[0].get('region')}",
+        f"verified {len(events)} event(s): listener=public, human=true, device_id=None, region={events[0].get('region')}",
     )
 
 
@@ -173,9 +196,13 @@ def run_suite(
         st, _, _ = http_request(method, f"{api}{path}")
         results.append(evaluate_restricted_route(method, path, st))
 
-    # 4. Spoofed X-Sim-* login probe
+    # 3b. Unauthenticated admin route denied (Cloudflare Access or admin auth)
+    admin_status, _, _ = http_request("GET", f"{api}/admin/v1/customers")
+    results.append(evaluate_admin_unauthenticated(admin_status))
+
+    # 4. Spoofed X-Sim-* login probe (omit body device_id so X-Sim-Device cannot be masked)
     probe_body = json.dumps(
-        {"phone": "010-0000-0000", "password": "invalid-probe-value", "device_id": "probe-dev"}
+        {"phone": "010-0000-0000", "password": "invalid-probe-value"}
     ).encode("utf-8")
     p_status, _, p_raw = http_request(
         "POST",
@@ -218,7 +245,7 @@ def run_suite(
                 env_var_name="MONGO_BANK_PASSWORD",
                 auth_db="bank_logs",
                 target_db="bank_logs",
-                js_expr=f'print(JSON.stringify(db.events.find({{request_id: "{req_id}"}}, {{_id: 0, event_type: 1, listener: 1, human: 1, ip: 1, region: 1}}).toArray()))',
+                js_expr=f'print(JSON.stringify(db.events.find({{request_id: "{req_id}"}}, {{_id: 0, event_type: 1, listener: 1, human: 1, ip: 1, region: 1, device_id: 1}}).toArray()))',
                 env_map=env_map,
             )
             if out:
@@ -266,6 +293,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def build_summary(checks: list[NegativeCheck], *, skip_mongo: bool) -> tuple[dict[str, Any], int]:
+    all_ok = all(c.passed for c in checks)
+    if skip_mongo:
+        status = "partial" if all_ok else "failed"
+        return (
+            {"status": status, "passed": False, "partial": True, "checks": [asdict(c) for c in checks]},
+            2 if all_ok else 1,
+        )
+    return (
+        {"status": "passed" if all_ok else "failed", "passed": all_ok, "partial": False, "checks": [asdict(c) for c in checks]},
+        0 if all_ok else 1,
+    )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     checks = run_suite(
@@ -275,10 +316,10 @@ def main() -> None:
         env_file=Path(args.env_file),
         skip_mongo=args.skip_mongo,
     )
-    all_ok = all(c.passed for c in checks)
-    print(json.dumps({"passed": all_ok, "checks": [asdict(c) for c in checks]}, indent=2))
-    if not all_ok:
-        sys.exit(1)
+    summary, code = build_summary(checks, skip_mongo=args.skip_mongo)
+    print(json.dumps(summary, indent=2))
+    if code != 0:
+        sys.exit(code)
 
 
 if __name__ == "__main__":

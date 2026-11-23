@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "stage8-edge-security-hardening",
+  "kind": "behavior",
+  "title": "Harden Stage 8 edge security negative tests and sync spec N-8/F-34",
+  "base": {
+    "ref": "main",
+    "commit": "621f34f48c3584b12f64e42cce13fb6124d513e8"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:ad416ef529b39c60854beadc105b901e01ff4fb43958b28d91eacfd727e17383"
+  },
+  "write_scope": [
+    "scripts/ops/security_negative_test.py",
+    "scripts/ops/test_security_negative.py",
+    "infra/cloudflare/README.md",
+    "loadtest/saltation_loadtest/verify_host.py",
+    "loadtest/tests/test_verify_host.py",
+    "spec.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4",
+      "by": "naelonambul",
+      "at": "2026-11-23T00:14:29Z",
+      "note": "\uc2b9\uc778"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:702588e4899e81a1ffb043965503363e842ec3100bcc5fa72adfc636c828436a",
+      "by": "naelonambul",
+      "at": "2026-11-23T00:14:29Z",
+      "write_scope_sha256": "sha256:a761b6e4f416d3e8c3f99ae46682aca2153542914c14deb2a3b8e6b9101c0b8b",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}

@@ -20,6 +20,10 @@ SALTATION_API_BASE=https://sal-api.<your-subdomain>.workers.dev
 SALTATION_CORS_ORIGINS=https://sal.<your-subdomain>.workers.dev
 ```
 
+## Admin Route Protection (Cloudflare Access)
+
+Per `spec.md` § Security, `/admin/v1/**` on `sal-api` (and any future admin web origin) must be placed behind a **Cloudflare Access** application policy restricted to authorized analyst identities, in addition to the bank's own analyst bearer-token authentication (`AuthAnalyst`). Unauthenticated requests to `/admin/v1/**` must receive `401` or `403`.
+
 ## Security Verification
 
 Run the automated Stage 8 negative test suite on the host after deployment:
@@ -33,5 +37,8 @@ python3 scripts/ops/security_negative_test.py \
 It verifies:
 1. Public `/healthz` and CORS preflight succeed.
 2. `/atm/v1/session`, `/card/v1/authorize`, `/internal/v1/clock`, `/v2.0/transfer/deposit/fin_num`, and `/metrics` return `404` through the tunnel.
-3. Spoofed `X-Sim-Ip`, `X-Sim-Region`, and `X-Sim-Device` headers are ignored on the public listener (`bank_logs.events` records `listener: "public"`, `human: true`, and the real Cloudflare IP/country).
-4. MongoDB RBAC denies `bank` on `truth` and `generator` on `bank_logs`.
+3. Unauthenticated `GET /admin/v1/customers` is denied (`401` or `403`).
+4. Spoofed `X-Sim-Ip`, `X-Sim-Region`, and `X-Sim-Device` headers are ignored on the public listener (`bank_logs.events` records `listener: "public"`, `human: true`, `device_id: null`, and non-empty real Cloudflare IP/country).
+5. MongoDB RBAC denies `bank` on `truth` and `generator` on `bank_logs`.
+
+Passing `--skip-mongo` runs HTTP-only probes and exits with code `2` (`"status": "partial"`, `"passed": false`) so incomplete runs are never mistaken for a full Stage 8 security pass.
