@@ -15,16 +15,17 @@
     "scripts/dev/test_rust_cache.py",
     "scripts/dev/it-oracle.sh",
     "scripts/dev/cargo-container.sh",
-    "scripts/tests/test_workflow.py"
+    "scripts/tests/test_workflow.py",
+    "infra/compose/compose.yml"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:015c45e88870c39b5ac7ffb93e89ae3e38ae1d477f1a02061c0f783bcf13a0d6",
+      "sha256": "sha256:af7ebc77b0dd20c87c200280c4f455334d372846244ef8843bb289cb5b2f8892",
       "by": "ckh",
-      "at": "2026-11-24T11:28:42Z",
-      "write_scope_sha256": "sha256:8652a03501009c0bec27b3ebab3ba642bee96f3d8cdc6d9ae451d036758cc734",
-      "note": "Owner approved in chat: \uc2b9\uc778"
+      "at": "2026-11-24T12:39:47Z",
+      "write_scope_sha256": "sha256:99a787117eb7e13bdd7a1a489f168b348603bc0675ac2560071e000ba224a278",
+      "note": "Owner approved revised plan with Grafana preinstall/WAL fix: \uc2b9\uc778"
     }
   ]
 }

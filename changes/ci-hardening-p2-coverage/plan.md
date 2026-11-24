@@ -20,6 +20,7 @@ No `.github/workflows/**` files are modified in this packet.
 - `scripts/dev/it-oracle.sh`
 - `scripts/dev/cargo-container.sh`
 - `scripts/tests/test_workflow.py`
+- `infra/compose/compose.yml`
 
 ## Order of work
 
@@ -50,6 +51,10 @@ No `.github/workflows/**` files are modified in this packet.
 5. **Extend `scripts/tests/test_workflow.py` across all workflows**
    - Add tests verifying every `.github/workflows/*.yml` file pins all `uses:` actions to 40-hex commit SHAs, sets `persist-credentials: false` on every `actions/checkout`, and declares `permissions:\n  contents: read`.
    - Proof: `python3 -m unittest -v scripts.tests.test_workflow` and `python3 scripts/tests/run.py`.
+
+6. **Prevent Grafana 12 fresh-volume SQLite `database is locked` (`infra/compose/compose.yml`)**
+   - Set `GF_PLUGINS_PREINSTALL_DISABLED: "true"` and `GF_DATABASE_WAL: "true"` on the `grafana` service so fresh `grafanadata` volumes (`weekly-fresh` or `setup_key` changes) do not download 4 background cloud plugins concurrently with datasource provisioning under `0.05 vCPU`.
+   - Proof: `python3 scripts/ops/check_compose_budget.py static`.
 
 ## Risks and rollback
 
