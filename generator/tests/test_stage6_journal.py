@@ -66,9 +66,10 @@ class Collection:
         self.durable()
         write_errors = []
         for idx, document in enumerate(documents):
+            if "_id" not in document and {"request_id", "subject_type", "subject_id"} <= document.keys():
+                # Mirror real PyMongo insert_many in-place _id assignment.
+                document["_id"] = (document["request_id"], document["subject_type"], document["subject_id"])
             doc = deepcopy(document)
-            if "_id" not in doc and {"request_id", "subject_type", "subject_id"} <= doc.keys():
-                doc["_id"] = (doc["request_id"], doc["subject_type"], doc["subject_id"])
             if any(row["_id"] == doc["_id"] for row in self.rows):
                 write_errors.append({"index": idx, "code": 11000, "errmsg": "duplicate _id"})
                 if ordered:
@@ -342,6 +343,7 @@ async def test_batch_prepare_labels_unconfirmed_and_complete_with_resume(truth):
         "rid2": [{"request_id": "rid2", "subject_type": "account", "subject_id": "a2"}],
     }
     await labels.ensure_labels_batch(expected_labels)
+    assert all("_id" not in label for items in expected_labels.values() for label in items)
     # Re-running on resume succeeds idempotently via BulkWriteError 11000 readback.
     await labels.ensure_labels_batch(expected_labels)
 

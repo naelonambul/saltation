@@ -77,7 +77,7 @@ class RecoveryJournal:
     async def ensure_labels_batch(self, labels_by_rid: dict[str, list[dict[str, Any]]]) -> None:
         if not labels_by_rid:
             return
-        docs = [label for expected in labels_by_rid.values() for label in expected]
+        docs = [dict(label) for expected in labels_by_rid.values() for label in expected]
         if not docs:
             return
         try:
