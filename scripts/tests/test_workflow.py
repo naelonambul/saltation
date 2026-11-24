@@ -103,7 +103,8 @@ class WorkflowInvariants(unittest.TestCase):
         oracle = job_block(self.text, "oracle")
         self.assertIn("id: oracle-route", status)
         self.assertIn("steps.oracle-route.outputs.mode", status)
-        self.assertIn('python3 -Es "$route_dir/scripts/repo.py" status $REPO_ARGS', status)
+        self.assertIn("name: Verify status with base repo.py", status)
+        self.assertIn('python3 -Es "$base_dir/scripts/repo.py" status $REPO_ARGS', status)
         self.assertIn("needs: [status, identity, control-plane-tests]", oracle)
         docs_pr = "github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only'"
         self.assertIn(docs_pr + """ && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]'""", oracle)
