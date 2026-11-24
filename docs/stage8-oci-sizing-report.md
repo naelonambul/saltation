@@ -10,7 +10,7 @@ Following the 24-hour continuous stability run (`docs/stage8-24h-stability-repor
 | --- | --- |
 | **Host Shape** | OCI `VM.Standard.A1.Flex` — 4 physical Ampere Altra ARM64 cores (non-burstable), 24 GB RAM, 4 Gbps network |
 | **Block Volume (`/home/ckh/block`)** | 150 GB Balanced (`10 VPU/GB`: 9,000 IOPS / 72 MB/s; online-scalable to `20 VPU/GB` = 11,250 IOPS if needed) |
-| **Base Revision** | `7f6c522` (`main`, after PR #44 configurable Argon2id & auth histograms) |
+| **Base Revision** | `7f6c522` (initial sizing & PR #44) → `e3a960a` (`main`, post-PR #46 Stage 6 backfill batching & PR #47–#50 CI hardening) |
 | **N-7 Budget Gate** | `python3 scripts/ops/check_compose_budget.py runtime --external-connector cloudflared-oci-vpc --effective` **PASSED** after adding explicit `cpus: "0.15"` / `memory: 128m` to `/home/ckh/docker/cloudflared-oci-vpc/compose.yaml` |
 
 ## 2. Standalone Argon2id ARM64 Microbenchmark & OWASP Policy (Spec N-6)
@@ -87,10 +87,41 @@ Code inspection of `generator/saltation_gen/drivers/stage6.py`, `backfill_clock.
    - Each individual business operation executes redundant `get_operation()` reads, `_require_owner()` double-reads (`leases` + `runs`), and 4 separate synchronous `WriteConcern(w=1, j=True)` writes (`prepare` → `ensure_labels` + readback → `transition(prepared→unconfirmed)` → `transition(unconfirmed→succeeded)`).
    - **Total overhead:** ~18 Mongo round-trips and ~5.5 synchronous `j=True` journal fsyncs per single business operation, serialized through one Python lock. Reallocating container CPU alone cannot overcome this serialization ceiling.
 
-## 5. Recommended Follow-Up Changes
+## 5. Post-PR #46 Stage 6 Backfill Validation & OWASP `19456/2/1` Results
 
-No runtime code or `compose.yml` defaults are modified by this documentation change. Future implementation packets should address:
+PR #46 (`ab742da`, validated on `main` at `e3a960a`) implemented the Stage 6 backfill batching optimizations diagnosed in Section 4 (`BackfillClock` bucket-granularity gating and direct `POST /clock/set` response validation, cached card networks / home context, 256-operation lock-free normal waves with batched `prepare_batch` / `ensure_labels_batch` / `mark_unconfirmed_wave` / `complete_wave`, `$group` totals aggregation, and outbox relay 35 ms partial-batch linger with `{recorded_at: 1}` indexing).
 
-1. **Stage 6 backfill journal & wave optimization (`generator/`):** move `BackfillClock.gate()` and `wave_offset` checkpoints to bucket granularity (preserving crash-recovery and F-34 pre-send label guarantees), batch per-wave Mongo operations (`bulk_write` / `insert_many`), and remove redundant `get_operation()` / `_require_owner()` / `GET /clock` round-trips.
-2. **N-4 vs N-6 alignment:** decide whether to add realistic normal-customer session reuse in `generator/` (keeping OWASP Argon2id + `>= 200 ops/s`) or adjust N-4's sustained ops/s wording to match OWASP Argon2id on 4 vCPU.
+Two complete 3-day Stage 6 backfill slices (`20,000` customers, `amplification=20`, `workers=8`, `81,930` operations + all `3,400` annual `A..G` + `lookalike` scenarios compressed into 3 days) were then executed on OCI under Candidate A (`4.00 vCPU / 13.96 GB`):
+
+1. **Exploratory `4096/2/1` (`concurrency=3`) A/B run:** isolates the generator/MongoDB speedup from PR #46.
+2. **Production-compliant OWASP minimum `19456/2/1` (`concurrency=3`) run:** measures real end-to-end performance at the repository's default OWASP Argon2id cost.
+
+### 5.1 Three-Way Comparison (Candidate A, 3 Days / 20,000 Customers / `workers=8`)
+
+| Metric | Pre-PR #46 (`4096/2/1`, `7f6c522`) | Post-PR #46 (`4096/2/1`, `e3a960a`) | Post-PR #46 (**OWASP `19456/2/1`**, `e3a960a`) |
+| --- | --- | --- | --- |
+| **Total wall time (seeding + 3d backfill)** | Day 1 only (~9m; incomplete) | **`23m 40s`** (~5.5m seeding + ~18m backfill) | **`60m 04s`** (`29.4m` seeding + `31.0m` backfill) |
+| **Backfill average business ops/s** | `~46 ops/s` | `~75 ops/s` | **`42.4 ops/s`** (median `44.7 ops/s`) |
+| **Normal-dominant 1m business ops/s** | `~46 ops/s` | **`105.2 ops/s`** (`2.3x` vs pre-PR #46) | **`78.5 ops/s`** peak (`p90: 56.5 ops/s`) |
+| **`/clock` + `/outbox` control calls** | ~20,680 on Day 1 alone | `-83%` overall (`-95%+` on normal chunks) | `14,559` total across all 3 days |
+| **Primary bottleneck** | `generator` (`65.2%/65%`) + `mongo` (`34.8%`) | Balanced (`bank` avg `45.0%`) | **`bank` Argon2id CPU** (avg `90.8%`, p95 `130.6%`) |
+| **`bank` resident memory (RSS)** | `~24 MiB` | `24.0 MiB` | **`24.7 MiB`** (`< 2.5%` of `1 GiB` limit) |
+| **Conformance (`rejected` / `unresolved` / `daily_close_mismatches` / `outbox_undelivered`)** | — | `0 / 0 / 0 / 0` (`81,930` succeeded) | **`0 / 0 / 0 / 0`** (`81,930` succeeded, `369` daily closes) |
+
+### 5.2 OWASP `19456/2/1` Detailed Observations & 365-Day Extrapolation
+
+- **Auth share & Argon2id measurements:** Across `82,430` business HTTP requests during the 3-day slice, `/v2.0/ext/auth/login` accounted for **`27,875` requests (`33.8%`)** (average `14.7/s`, peak `27.1/s`). Across `74,353` total Argon2id hash/verify calls (seeding + backfill logins/PINs), mean hash duration was **`52.4 ms`** with mean concurrency-gate wait **`12.6 ms`**.
+- **Container resource headroom (60m full-run averages vs Candidate A limits):**
+  - `bank` (`1.30 vCPU / 1 GiB`): avg `90.8%`, p95 `130.6%`, max `135.8%`, cgroup throttled `22.9%`, RSS `24.7 MiB`.
+  - `mongo` (`0.45 vCPU / 3 GiB`): avg `11.9%`, p95 `44.3%`, cgroup throttled `18.3%`, RAM `341.8 MiB`.
+  - `generator` (`0.65 vCPU / 768 MiB`): avg `13.0%`, p95 `50.9%`, cgroup throttled `2.2%`, RAM `137.5 MiB`.
+  - `oracle` (`1.05 vCPU / 6 GiB`): avg `10.8%`, p95 `51.2%`, cgroup throttled `0.4%`, RAM `4.29 GiB`.
+- **365-day backfill extrapolation under OWASP `19456/2/1`:** Customer seeding is a one-time cost (`~30 min`). Because the 3-day slice compresses all `3,400` annual scenarios into 3 days (raising scenario overhead relative to normal traffic), a full 365-day backfill on Candidate A with OWASP `19456/2/1` is projected at **`~45–55 hours`** (~2 days) of unattended wall time at `~45–57 ops/s` sustained normal-dominant throughput.
+
+## 6. Recommended Follow-Up Changes
+
+No runtime code or `compose.yml` defaults are modified by this documentation change. Remaining follow-up items:
+
+1. ~~**Stage 6 backfill journal & wave optimization (`generator/`):**~~ **Completed in PR #46 (`ab742da`)** and validated in Section 5 (`2.3x` exploratory speedup; zero errors/mismatches under OWASP `19456/2/1`).
+2. **N-4 vs N-6 alignment:** decide whether to introduce a versioned normal mobile-visit session reuse model in `generator/` (keeping FDS guardrails intact for Scenarios E and `purchase` while lowering auth share so OWASP `19456/2/1` approaches `200 ops/s`) **or** align N-4's sustained ops/s target with the verified OWASP `19456/2/1` 4-vCPU envelope (`~45–57 ops/s` sustained / `~2 days` for 365-day backfill).
 3. **Static Compose & storage guardrails:** apply validated Candidate A CPU/RAM limits to `infra/compose/compose.yml`, add Prometheus `--storage.tsdb.retention.size=2GB`, and cap `saltation_data01.dbf` at `MAXSIZE 32G` in `infra/oracle/setup/01_saltation.sql` before running formal `loadtest --qualify all` and the 365-day backfill + 24-hour live qualification.
