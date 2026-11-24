@@ -42,7 +42,10 @@ pub async fn events_collection(uri: &str) -> Result<Collection<Document>, mongod
     let db = client
         .default_database()
         .unwrap_or_else(|| client.database("bank_logs"));
-    let collection = db.collection::<Document>("events");
+    Ok(db.collection::<Document>("events"))
+}
+
+async fn ensure_events_index(collection: &Collection<Document>) {
     let recorded_at_index = IndexModel::builder()
         .keys(doc! { "recorded_at": 1 })
         .options(
@@ -51,8 +54,9 @@ pub async fn events_collection(uri: &str) -> Result<Collection<Document>, mongod
                 .build(),
         )
         .build();
-    collection.create_index(recorded_at_index).await?;
-    Ok(collection)
+    if let Err(e) = collection.create_index(recorded_at_index).await {
+        tracing::warn!(error = %e, "outbox relay: failed to ensure events_recorded_at index");
+    }
 }
 
 fn to_document(event_id: &str, json: &str) -> Result<Document, RelayError> {
@@ -142,7 +146,10 @@ async fn deliver(db: &Db, mongo_uri: &str) {
     loop {
         if events.is_none() {
             match events_collection(mongo_uri).await {
-                Ok(c) => events = Some(c),
+                Ok(c) => {
+                    ensure_events_index(&c).await;
+                    events = Some(c);
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "outbox relay: MongoDB client not ready");
                     tokio::time::sleep(backoff).await;
