@@ -28,8 +28,6 @@ const SELECT_STORED: SqlStmt = sql_stmt!("inbound.select_stored", "sql/select_st
 const FINISH_REQUEST: SqlStmt = sql_stmt!("inbound.finish_request", "sql/finish_request.sql");
 const ENDPOINT: &str = "/v2.0/transfer/deposit/fin_num";
 const FORBIDDEN: &str = "O0003";
-// Valid Argon2id hash, fixed for unknown clients to perform the same verification work.
-const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGF0aW9uLWR1bW15IQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/oauth/2.0/token", post(token))
@@ -81,7 +79,7 @@ async fn token(
     let hash = found
         .as_ref()
         .map(|r| r.1.as_str())
-        .unwrap_or(DUMMY_HASH)
+        .unwrap_or_else(|| auth::dummy_hash())
         .to_owned();
     let verified = auth::verify_secret(hash, req.client_secret)
         .await
