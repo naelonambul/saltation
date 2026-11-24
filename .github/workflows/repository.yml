@@ -71,6 +71,7 @@ jobs:
           if git archive "$PR_BASE_SHA" scripts/oracle_pr_route.py scripts/repo.py | tar -xf - -C "$route_dir"; then
             mode=$(python3 -Es "$route_dir/scripts/oracle_pr_route.py" --event "$GITHUB_EVENT_NAME" \
               --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --candidate "$GITHUB_SHA" --pr-body /tmp/pr-body.md)
+            python3 -Es "$route_dir/scripts/repo.py" status $REPO_ARGS
           else
             echo 'Oracle routing: full. Base classifier is unavailable.'
           fi
@@ -159,9 +160,9 @@ jobs:
         run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
       - run: python3 scripts/repo.py verify $REPO_ARGS --full --group python
 
-  # Allocate OCI only when the Oracle check group applies.
+  # Allocate OCI only when the Oracle check group applies and trusted gates pass.
   oracle:
-    needs: [status]
+    needs: [status, identity, control-plane-tests]
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only' && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]') }}
     timeout-minutes: 120
     env:

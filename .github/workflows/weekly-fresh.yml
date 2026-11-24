@@ -26,6 +26,12 @@ jobs:
     runs-on: [self-hosted, linux, ARM64, saltation-oracle]
     timeout-minutes: 120
     steps:
+      - name: Restrict manual dispatch to main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::weekly-fresh may only run on refs/heads/main (got $GITHUB_REF)"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -33,3 +39,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: scripts/dev/it-oracle.sh all --fresh
+      - run: scripts/dev/it-oracle.sh browser-dates
