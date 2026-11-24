@@ -6,8 +6,8 @@ from contextlib import suppress
 from typing import Any
 from uuid import uuid4
 
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo import ReturnDocument, UpdateOne
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 from pymongo.write_concern import WriteConcern
 
 from .recovery import RecoveryError
@@ -161,10 +161,13 @@ class Stage6Journal:
             self._claimed = True
             return claimed
 
-    async def _require_owner(self) -> None:
-        if not self._claimed or await self._leases.find_one(self._lease_key()) is None:
+    async def _require_lease(self) -> None:
+        if not self._claimed or await self._leases.find_one(self._lease_key(), {"_id": 1}) is None:
             raise RecoveryError("stage 6 bank lease is no longer held")
-        run = await self._runs.find_one(self._owned_run_key())
+
+    async def _require_owner(self) -> None:
+        await self._require_lease()
+        run = await self._runs.find_one(self._owned_run_key(), {"completed": 1})
         if run is None or run.get("completed"):
             raise RecoveryError("stage 6 run is complete or its owner changed")
 
@@ -268,6 +271,108 @@ class Stage6Journal:
             if changed.matched_count != 1:
                 raise RecoveryError("stage 6 operation owner or state changed")
 
+    async def prepare_batch(self, items: list[tuple[str, str, dict]]) -> dict[tuple[str, str], dict]:
+        """Durably prepare a bounded chunk of operations in a single journaled batch."""
+        if not items:
+            return {}
+        rows: list[dict] = []
+        for episode_id, name, record in items:
+            if record.keys() & (_ROW_FIELDS - {"state"}) or record.get("state", "prepared") != "prepared":
+                raise RecoveryError("invalid stage 6 prepared operation")
+            _check_safe(record)
+            rows.append(
+                record
+                | self._operation_key(episode_id, name)
+                | {
+                    "episode_id": episode_id,
+                    "name": name,
+                    "owner": self.owner,
+                    "state": "prepared",
+                }
+            )
+        async with self._lock:
+            await self._require_lease()
+            try:
+                await self._operations.insert_many(rows, ordered=False)
+            except BulkWriteError as error:
+                details = error.details or {}
+                if details.get("writeConcernErrors"):
+                    raise
+                write_errors = details.get("writeErrors", [])
+                if not write_errors or any(item.get("code") != 11000 for item in write_errors):
+                    raise
+                ids = [row["_id"] for row in rows]
+                existing_by_key: dict[tuple[str, str], dict] = {}
+                async for doc in self._operations.find({"_id": {"$in": ids}, "run_id": self.run_id}):
+                    existing_by_key[(doc["episode_id"], doc["name"])] = doc
+                result: dict[tuple[str, str], dict] = {}
+                for episode_id, name, record in items:
+                    existing = existing_by_key.get((episode_id, name))
+                    if existing is None:
+                        raise RecoveryError(
+                            f"stage 6 prepared operation missing for {episode_id}/{name}"
+                        ) from None
+                    if existing["state"] in _TERMINAL:
+                        result[(episode_id, name)] = existing
+                        continue
+                    if existing["state"] != "prepared":
+                        raise RecoveryError(f"unresolved stage 6 operation {episode_id}/{name}") from None
+                    if _stable_shape({k: v for k, v in existing.items() if k not in _ROW_FIELDS}) != (
+                        _stable_shape({k: v for k, v in record.items() if k != "state"})
+                    ):
+                        raise RecoveryError("stage 6 prepared operation differs from the journal") from None
+                    result[(episode_id, name)] = existing
+                return result
+            return {(row["episode_id"], row["name"]): row for row in rows}
+
+    async def mark_unconfirmed_wave(self, rows: list[dict]) -> None:
+        """Atomically fence and transition a wave's prepared rows to unconfirmed before HTTP dispatch."""
+        if not rows:
+            return
+        async with self._lock:
+            await self._require_lease()
+            owners = {row["owner"] for row in rows}
+            if len(owners) == 1:
+                owner = next(iter(owners))
+                ids = [self._operation_key(row["episode_id"], row["name"])["_id"] for row in rows]
+                changed = await self._operations.update_many(
+                    {"_id": {"$in": ids}, "run_id": self.run_id, "owner": owner, "state": "prepared"},
+                    {"$set": {"owner": self.owner, "state": "unconfirmed"}},
+                )
+            else:
+                ops = [
+                    UpdateOne(
+                        self._operation_key(row["episode_id"], row["name"])
+                        | {"owner": row["owner"], "state": "prepared"},
+                        {"$set": {"owner": self.owner, "state": "unconfirmed"}},
+                    )
+                    for row in rows
+                ]
+                changed = await self._operations.bulk_write(ops, ordered=False)
+            if changed.matched_count != len(rows):
+                raise RecoveryError("stage 6 operation owner or state changed")
+
+    async def complete_wave(self, outcomes: list[tuple[str, str, str, dict]]) -> None:
+        """Persist terminal outcomes for all confirmed operations in a wave in one journaled batch."""
+        if not outcomes:
+            return
+        ops: list[UpdateOne] = []
+        for episode_id, name, terminal, result in outcomes:
+            if terminal not in _TERMINAL:
+                raise RecoveryError("invalid stage 6 state transition")
+            _check_safe(result)
+            ops.append(
+                UpdateOne(
+                    self._operation_key(episode_id, name) | {"owner": self.owner, "state": "unconfirmed"},
+                    {"$set": {"owner": self.owner, "state": terminal, "result": result}},
+                )
+            )
+        async with self._lock:
+            await self._require_lease()
+            changed = await self._operations.bulk_write(ops, ordered=False)
+            if changed.matched_count != len(outcomes):
+                raise RecoveryError("stage 6 operation owner or state changed")
+
     async def unresolved(self) -> bool:
         return (
             await self._operations.find_one(
@@ -312,13 +417,17 @@ class Stage6Journal:
 
     async def totals(self) -> dict:
         """Count operation states and distinct credited identities by window and kind."""
-        states = Counter()
-        async for row in self._operations.find({"run_id": self.run_id}, {"state": 1}):
-            states[row["state"]] += 1
+        cursor = await self._operations.aggregate(
+            [
+                {"$match": {"run_id": self.run_id}},
+                {"$group": {"_id": "$state", "count": {"$sum": 1}}},
+            ]
+        )
+        states = {row["_id"]: row["count"] async for row in cursor}
         credit: dict[str, Counter] = {}
         async for row in self._credit.find({"run_id": self.run_id}, {"window": 1, "kind": 1}):
             credit.setdefault(row["window"], Counter())[row["kind"]] += 1
-        return {"states": dict(states), "credit": {window: dict(counts) for window, counts in credit.items()}}
+        return {"states": states, "credit": {window: dict(counts) for window, counts in credit.items()}}
 
     async def scenario_outcomes(self) -> tuple[dict[tuple[str, str], set[str]], set[tuple[str, str, str]]]:
         cursor = await self._operations.aggregate(

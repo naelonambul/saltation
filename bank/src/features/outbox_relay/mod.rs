@@ -6,9 +6,9 @@
 use std::time::Duration;
 
 use crate::shared::db::ToSql;
-use mongodb::bson::{self, Document};
-use mongodb::options::{InsertManyOptions, WriteConcern};
-use mongodb::{Client, Collection};
+use mongodb::bson::{self, Document, doc};
+use mongodb::options::{IndexOptions, InsertManyOptions, WriteConcern};
+use mongodb::{Client, Collection, IndexModel};
 use serde_json::Value;
 
 use crate::shared::db::{Db, DbError, SqlStmt};
@@ -21,6 +21,7 @@ const DELETE_DELIVERED: SqlStmt =
 
 pub const BATCH_SIZE: i64 = 500;
 const IDLE_POLL: Duration = Duration::from_millis(200);
+const PARTIAL_BATCH_LINGER: Duration = Duration::from_millis(35);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 /// MongoDB duplicate key error code.
 const DUPLICATE_KEY: i32 = 11000;
@@ -41,7 +42,17 @@ pub async fn events_collection(uri: &str) -> Result<Collection<Document>, mongod
     let db = client
         .default_database()
         .unwrap_or_else(|| client.database("bank_logs"));
-    Ok(db.collection::<Document>("events"))
+    let collection = db.collection::<Document>("events");
+    let recorded_at_index = IndexModel::builder()
+        .keys(doc! { "recorded_at": 1 })
+        .options(
+            IndexOptions::builder()
+                .name("events_recorded_at".to_string())
+                .build(),
+        )
+        .build();
+    collection.create_index(recorded_at_index).await?;
+    Ok(collection)
 }
 
 fn to_document(event_id: &str, json: &str) -> Result<Document, RelayError> {
@@ -147,6 +158,10 @@ async fn deliver(db: &Db, mongo_uri: &str) {
             Ok(0) => {
                 backoff = Duration::from_millis(500);
                 tokio::time::sleep(IDLE_POLL).await;
+            }
+            Ok(count) if (count as i64) < BATCH_SIZE => {
+                backoff = Duration::from_millis(500);
+                tokio::time::sleep(PARTIAL_BATCH_LINGER).await;
             }
             Ok(_) => backoff = Duration::from_millis(500),
             Err(e) => {

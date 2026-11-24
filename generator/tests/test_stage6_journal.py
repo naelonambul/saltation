@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 
-from saltation_gen.truth.recovery import RecoveryError
+from saltation_gen.truth.recovery import RecoveryError, RecoveryJournal
 from saltation_gen.truth.stage6 import Stage6Journal
 
 
@@ -62,6 +62,60 @@ class Collection:
             raise DuplicateKeyError("duplicate _id")
         self.rows.append(deepcopy(document))
 
+    async def insert_many(self, documents, *, ordered=True):
+        self.durable()
+        write_errors = []
+        for idx, document in enumerate(documents):
+            doc = deepcopy(document)
+            if "_id" not in doc and {"request_id", "subject_type", "subject_id"} <= doc.keys():
+                doc["_id"] = (doc["request_id"], doc["subject_type"], doc["subject_id"])
+            if any(row["_id"] == doc["_id"] for row in self.rows):
+                write_errors.append({"index": idx, "code": 11000, "errmsg": "duplicate _id"})
+                if ordered:
+                    break
+                continue
+            self.rows.append(doc)
+        if write_errors:
+            raise BulkWriteError({"writeErrors": write_errors, "writeConcernErrors": []})
+
+    async def update_many(self, query, update):
+        self.durable()
+        matched = 0
+        for row in self.rows:
+            if matches(row, query):
+                row.update(deepcopy(update.get("$set", {})))
+                for key in update.get("$unset", {}):
+                    row.pop(key, None)
+                matched += 1
+        return SimpleNamespace(matched_count=matched)
+
+    async def bulk_write(self, requests, *, ordered=True):
+        self.durable()
+        matched = 0
+        for req in requests:
+            res = await self.update_one(req._filter, req._doc, upsert=req._upsert)
+            matched += res.matched_count
+        return SimpleNamespace(matched_count=matched)
+
+    async def aggregate(self, pipeline):
+        rows = list(self.rows)
+        for stage in pipeline:
+            if "$match" in stage:
+                rows = [r for r in rows if matches(r, stage["$match"])]
+            elif "$group" in stage:
+                field = stage["$group"]["_id"].lstrip("$")
+                counts = {}
+                for r in rows:
+                    key = r.get(field)
+                    counts[key] = counts.get(key, 0) + 1
+                rows = [{"_id": k, "count": v} for k, v in counts.items()]
+
+        async def _iter():
+            for row in rows:
+                yield deepcopy(row)
+
+        return _iter()
+
     async def find_one(self, query, projection=None):
         await asyncio.sleep(0)
         return await anext(self.find(query, projection), None)
@@ -69,7 +123,12 @@ class Collection:
     async def find(self, query, projection=None):
         for row in self.rows:
             if matches(row, query):
-                yield deepcopy({k: v for k, v in row.items() if projection is None or k in projection})
+                if projection is None:
+                    yield deepcopy(row)
+                elif all(v == 0 for v in projection.values()):
+                    yield deepcopy({k: v for k, v in row.items() if k not in projection})
+                else:
+                    yield deepcopy({k: v for k, v in row.items() if projection.get(k)})
 
     async def update_one(self, query, update, *, upsert=False):
         self.durable()
@@ -263,3 +322,52 @@ async def test_credit_recovers_after_committed_write_and_resets_across_windows(t
     assert stored["summary"] == expected
     assert "operations" not in stored
     assert "owner" not in stored
+
+
+async def test_batch_prepare_labels_unconfirmed_and_complete_with_resume(truth):
+    truth.labels = truth.runs.database["labels"]
+    first = Stage6Journal(truth, "run", "first")
+    await first.claim({})
+    prepared = await first.prepare_batch(
+        [
+            ("e1", "step1", {"request_id": "rid1", "args": {"a": 1}}),
+            ("e2", "step2", {"request_id": "rid2", "args": {"a": 2}}),
+        ]
+    )
+    assert set(prepared) == {("e1", "step1"), ("e2", "step2")}
+
+    labels = RecoveryJournal(truth, "run", "first")
+    expected_labels = {
+        "rid1": [{"request_id": "rid1", "subject_type": "account", "subject_id": "a1"}],
+        "rid2": [{"request_id": "rid2", "subject_type": "account", "subject_id": "a2"}],
+    }
+    await labels.ensure_labels_batch(expected_labels)
+    # Re-running on resume succeeds idempotently via BulkWriteError 11000 readback.
+    await labels.ensure_labels_batch(expected_labels)
+
+    # Mark wave unconfirmed and complete e1 only (simulate partial-wave crash before e2 completed).
+    await first.mark_unconfirmed_wave([prepared[("e1", "step1")]])
+    await first.complete_wave([("e1", "step1", "succeeded", {"decision": "approved"})])
+    assert await first.totals() == {"states": {"succeeded": 1, "prepared": 1}, "credit": {}}
+
+    # Simulate takeover and resume of the same chunk: e1 stays succeeded, e2 stays prepared.
+    resumed = Stage6Journal(truth, "run", "resumed")
+    await resumed.claim({}, exited_owner="first")
+    reloaded = await resumed.prepare_batch(
+        [
+            ("e1", "step1", {"request_id": "new-rid1", "args": {"a": 1}}),
+            ("e2", "step2", {"request_id": "new-rid2", "args": {"a": 2}}),
+        ]
+    )
+    assert reloaded[("e1", "step1")]["state"] == "succeeded"
+    assert reloaded[("e2", "step2")]["request_id"] == "rid2"
+    assert reloaded[("e2", "step2")]["owner"] == "first"
+
+    # Adopting e2 from prior owner transitions cleanly to unconfirmed then succeeded.
+    await resumed.mark_unconfirmed_wave([reloaded[("e2", "step2")]])
+    await resumed.complete_wave([("e2", "step2", "declined", {"decision": "rejected"})])
+    assert await resumed.totals() == {"states": {"succeeded": 1, "declined": 1}, "credit": {}}
+
+    # Stale owner is fenced out of mark_unconfirmed_wave.
+    with pytest.raises(RecoveryError, match="lease is no longer held"):
+        await first.mark_unconfirmed_wave([reloaded[("e2", "step2")]])

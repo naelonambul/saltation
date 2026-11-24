@@ -4,7 +4,7 @@ from contextlib import suppress
 from typing import Any
 
 from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 from pymongo.write_concern import WriteConcern
 
 from .store import TruthStore
@@ -73,6 +73,29 @@ class RecoveryJournal:
         actual = [label async for label in self.labels.find({"request_id": request_id}, {"_id": 0})]
         if sorted(actual, key=_subject) != sorted(expected, key=_subject):
             raise RecoveryError(f"conflicting or incomplete labels for {request_id}")
+
+    async def ensure_labels_batch(self, labels_by_rid: dict[str, list[dict[str, Any]]]) -> None:
+        if not labels_by_rid:
+            return
+        docs = [label for expected in labels_by_rid.values() for label in expected]
+        if not docs:
+            return
+        try:
+            await self.labels.insert_many(docs, ordered=False)
+            return
+        except BulkWriteError as error:
+            details = error.details or {}
+            if details.get("writeConcernErrors"):
+                raise
+            write_errors = details.get("writeErrors", [])
+            if not write_errors or any(item.get("code") != 11000 for item in write_errors):
+                raise
+        actual_by_rid: dict[str, list[dict[str, Any]]] = {rid: [] for rid in labels_by_rid}
+        async for label in self.labels.find({"request_id": {"$in": list(labels_by_rid)}}, {"_id": 0}):
+            actual_by_rid.setdefault(label["request_id"], []).append(label)
+        for rid, expected in labels_by_rid.items():
+            if sorted(actual_by_rid.get(rid, []), key=_subject) != sorted(expected, key=_subject):
+                raise RecoveryError(f"conflicting or incomplete labels for {rid}")
 
 
 def _subject(label: dict[str, Any]) -> tuple[str, str]:
