@@ -113,10 +113,12 @@ if [[ "$restored_outbox_mode" == 0 ]]; then
     echo "it-oracle: reusing the test database"
   fi
 
-  # Leftovers from a cancelled run: the cargo container, a stopped MongoDB
-  # (outbox-outage), and application containers whose relay would drain the
-  # outbox under the database tests. Only observability and e2e run the bank.
+  # Leftovers from a cancelled run: the cargo container, one-off tool containers,
+  # a stopped MongoDB (outbox-outage), and application containers whose relay
+  # would drain the outbox under the database tests.
   docker rm -f "$cargo_name" >/dev/null 2>&1 || true
+  docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.oneoff=True" \
+    | xargs -r docker rm -f >/dev/null 2>&1 || true
   case "$target" in
     observability|e2e) ;;
     *) "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true ;;
@@ -130,17 +132,50 @@ fi
 reset_schema() {
   { echo "SET VERIFY OFF"; echo "DEFINE pw = \"$SALTATION_DB_PASSWORD\""; cat "$root/infra/oracle/reset_schema.sql"; } \
     | "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null
-  "${compose[@]}" exec -T -e ORACLE_SID=ORCLCDB oracle sqlplus -s / as sysdba >/dev/null <<'SQL'
-WHENEVER SQLERROR EXIT SQL.SQLCODE
-ALTER SESSION SET CONTAINER = ORCLPDB1;
-GRANT SELECT ON SYS.V_$SQL TO saltation;
-GRANT SELECT ON SYS.V_$SQL_PLAN TO saltation;
-GRANT SELECT ON SYS.V_$SQL_PLAN_STATISTICS_ALL TO saltation;
-GRANT SELECT ON SYS.V_$SESSION TO saltation;
-EXIT
-SQL
-  "${compose[@]}" exec -T mongo mongosh --quiet -u bank -p "$MONGO_BANK_PASSWORD" --authenticationDatabase bank_logs \
-    --eval 'db.getSiblingDB("bank_logs").events.deleteMany({})' >/dev/null
+  "${compose[@]}" exec -T mongo mongosh --quiet -u root -p "$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --eval '
+for (const name of ["bank_logs", "truth"]) {
+  const d = db.getSiblingDB(name);
+  for (const c of d.getCollectionNames()) {
+    if (!c.startsWith("system.")) d.getCollection(c).drop();
+  }
+  const raw = d.getUsers();
+  const users = Array.isArray(raw) ? raw : (raw.users || []);
+  for (const u of users) {
+    if (u.user.startsWith("stage6_verifier_")) d.dropUser(u.user);
+  }
+}
+' >/dev/null
+}
+
+build_stamps=$(mktemp -d)
+cleanup_it() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  rm -rf "$build_stamps" >/dev/null 2>&1 || true
+  if [[ "${restored_outbox_mode:-0}" == 0 ]]; then
+    docker rm -f "$cargo_name" >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.oneoff=True" \
+      | xargs -r docker rm -f >/dev/null 2>&1 || true
+    "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true
+    "${compose[@]}" start oracle mongo >/dev/null 2>&1 || true
+    reset_schema >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+trap cleanup_it EXIT INT TERM HUP
+
+ensure_bank_image() {
+  if [ ! -f "$build_stamps/bank" ]; then
+    "${compose[@]}" build bank >/dev/null
+    : > "$build_stamps/bank"
+  fi
+}
+
+ensure_generator_image() {
+  if [ ! -f "$build_stamps/generator" ]; then
+    "${compose[@]}" --profile tools build generator >/dev/null
+    : > "$build_stamps/generator"
+  fi
 }
 
 dev_image_built=no
@@ -362,7 +397,8 @@ outbox_outage() {
 # Runs the whole stack: a request to the bank must appear in Loki (via
 # app.log and Alloy) and in Prometheus, and Grafana must serve the dashboard.
 observability() {
-  "${compose[@]}" up -d --build --force-recreate --wait --wait-timeout 900
+  ensure_bank_image
+  "${compose[@]}" up -d --build --force-recreate --no-deps --wait --wait-timeout 900 bank web alloy loki prometheus grafana
   local net_edge="${project}_edge" net_obs="${project}_obs" rid
   rid=$(python3 -c "import secrets; a='0123456789ABCDEFGHJKMNPQRSTVWXYZ'; print('0' + ''.join(secrets.choice(a) for _ in range(25)))")
   docker run --rm --network "$net_edge" curlimages/curl:8.15.0 -fsS -H "X-Request-Id: $rid" http://bank:8080/healthz >/dev/null
@@ -385,9 +421,23 @@ observability() {
   done
   [ "$up" -gt 0 ] || { echo "observability: bank metrics not in Prometheus" >&2; return 1; }
   echo "observability: Prometheus scrapes the bank and has request latency"
-  docker run --rm --network "$net_obs" curlimages/curl:8.15.0 -fsS -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
-    "http://grafana:3000/api/dashboards/uid/saltation-bank" | grep -q '"title":"Saltation bank"' \
-    || { echo "observability: Grafana dashboard missing" >&2; return 1; }
+  local dash_ok=0 resp code
+  for i in $(seq 1 30); do
+    resp=$(docker run --rm --network "$net_obs" curlimages/curl:8.15.0 -sS -w $'\n%{http_code}' \
+      -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
+      "http://grafana:3000/api/dashboards/uid/saltation-bank" 2>/dev/null || true)
+    code=$(printf '%s\n' "$resp" | tail -n 1)
+    if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+      echo "observability: Grafana authentication failed (HTTP $code)" >&2
+      return 1
+    fi
+    if [ "$code" = "200" ] && printf '%s\n' "$resp" | grep -q '"title":"Saltation bank"'; then
+      dash_ok=1
+      break
+    fi
+    sleep 2
+  done
+  [ "$dash_ok" -eq 1 ] || { echo "observability: Grafana dashboard missing (last HTTP ${code:-none})" >&2; return 1; }
   echo "observability: Grafana serves the Saltation bank dashboard"
 }
 
@@ -396,8 +446,9 @@ generator_bc() (
   trap 'rm -f "$local_dir/fault.jsonl" "$local_dir/resume.jsonl" "$local_dir/verifier.log"; rmdir "$local_dir"' EXIT
   "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
   reset_schema
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
-  "${compose[@]}" --profile tools build generator >/dev/null
+  ensure_bank_image
+  "${compose[@]}" up -d --no-build --wait --wait-timeout 1800 bank
+  ensure_generator_image
   harness="$root/generator/tests/bc_harness.py"
   gen=("${compose[@]}" --profile tools run --rm -T -v "$harness:/proof.py:ro" --entrypoint python generator /proof.py)
   run_id=$("${compose[@]}" --profile tools run --rm -T --entrypoint python generator -c \
@@ -423,8 +474,9 @@ generator_cards() (
   trap 'rm -f "$verifier"' EXIT
   "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
   reset_schema
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
-  "${compose[@]}" --profile tools build generator >/dev/null
+  ensure_bank_image
+  "${compose[@]}" up -d --no-build --wait --wait-timeout 1800 bank
+  ensure_generator_image
   fixture=$("${compose[@]}" --profile tools run --rm -T \
     -v "$root/generator/tests/cards_harness.py:/proof.py:ro" --entrypoint python generator /proof.py)
   printf '%s\n' "$fixture"
@@ -438,8 +490,9 @@ generator_behavior() (
   trap 'rm -f "$verifier"' EXIT
   "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
   reset_schema
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
-  "${compose[@]}" --profile tools build generator >/dev/null
+  ensure_bank_image
+  "${compose[@]}" up -d --no-build --wait --wait-timeout 1800 bank
+  ensure_generator_image
   fixture=$("${compose[@]}" --profile tools run --rm -T \
     -v "$root/generator/tests/behavior_harness.py:/proof.py:ro" --entrypoint python generator /proof.py)
   printf '%s\n' "$fixture"
@@ -500,8 +553,9 @@ generator_stage6() (
   trap cleanup_verifier EXIT
   "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null
   time_oracle_phase "generator-$target reset" reset_schema
-  time_oracle_phase "generator-$target bank startup" "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank
-  time_oracle_phase "generator-$target build generator" "${compose[@]}" --profile tools build generator >/dev/null
+  ensure_bank_image
+  time_oracle_phase "generator-$target bank startup" "${compose[@]}" up -d --no-build --wait --wait-timeout 1800 bank
+  time_oracle_phase "generator-$target build generator" ensure_generator_image
   run_id="stage6-ci-$("${compose[@]}" --profile tools run --rm -T --entrypoint python generator -c \
     'from saltation_gen.client.bank import new_ulid; print(new_ulid())')"
   verify_user="stage6_verifier_${run_id#stage6-ci-}"
@@ -593,30 +647,38 @@ browser_flow() {
 }
 
 browser_dates() {
-  local start gen roster phone password to_account zone
-  local failed=()
+  local start gen roster phone password to_account
   start=$(( ($(date +%s) % 90000) * 1000 ))
   gen=("${compose[@]}" --profile tools run --rm generator)
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800
-  "${compose[@]}" --profile tools build generator >/dev/null
+  reset_schema
+  ensure_bank_image
+  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank web
+  ensure_generator_image
   "${gen[@]}" seed-parties --counterparties 50
   "${gen[@]}" clock live
-  "${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
-    --eval 'db.getSiblingDB("truth").roster.deleteMany({})' >/dev/null
   "${gen[@]}" seed --customers 2 --start "$start"
   roster=$("${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
     --eval "const r = db.getSiblingDB('truth').roster.find({customer_no: {\$gte: 'C' + String($start).padStart(8, '0')}}).sort({customer_no: 1}).limit(2).toArray(); print(r[0].phone + ' ' + r[0].password + ' ' + r[1].account_no)")
   read -r phone password to_account <<<"$roster"
-  for zone in Etc/GMT+12 Pacific/Kiritimati; do
-    echo "browser-dates: browser zone $zone"
-    if ! browser_flow "$phone" "$password" "$to_account" "$zone"; then
-      failed+=("$zone")
-    fi
-  done
-  if [ "${#failed[@]}" -gt 0 ]; then
-    echo "browser-dates: failed zones: ${failed[*]}" >&2
-    return 1
-  fi
+  docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
+    -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true \
+    -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    mcr.microsoft.com/playwright:v1.55.0-noble sh -c '
+      corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile
+      failed=""
+      for zone in Etc/GMT+12 Pacific/Kiritimati; do
+        echo "browser-dates: browser zone $zone"
+        if ! E2E_TIMEZONE="$zone" pnpm exec playwright test; then
+          failed="$failed $zone"
+        fi
+      done
+      chown -R "$HOST_UID:$HOST_GID" /web
+      if [ -n "$failed" ]; then
+        echo "browser-dates: failed zones:$failed" >&2
+        exit 1
+      fi
+    '
 }
 
 # The db-pool cases that need their own process: another session time zone, and a

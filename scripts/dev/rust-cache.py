@@ -177,6 +177,28 @@ class Children:
             self.child = None
 
 
+def _cargo_fingerprint_args(cmd):
+    # Cargo-side flags can change compilation; exclude opaque runtime arguments
+    # and pure `cargo test` target-selection flags so switching `--test <name>`
+    # across suites reuses the trusted `bank` debug artifacts instead of cleaning.
+    args = cmd[:cmd.index('--')] if len(cmd) > 1 and cmd[1] in ('test', 'run') and '--' in cmd else list(cmd)
+    if len(args) < 2 or args[1] != 'test':
+        return args
+    filtered = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == '--test':
+            index += 2
+            continue
+        if arg.startswith('--test=') or arg in ('--tests', '--no-run'):
+            index += 1
+            continue
+        filtered.append(arg)
+        index += 1
+    return filtered
+
+
 def fingerprint(bank, contracts, config, cmd, children, env):
     parts = [str(bank), str(contracts), compile_env()]
     parts.extend(file_parts(Path(__file__).resolve()))
@@ -192,9 +214,7 @@ def fingerprint(bank, contracts, config, cmd, children, env):
         if status:
             raise CacheError('compiler identity unavailable')
         parts.extend((command[0], output))
-    # Cargo-side flags can change compilation; exclude opaque runtime arguments.
-    args = cmd[:cmd.index('--')] if cmd[1] in ('test', 'run') and '--' in cmd else cmd
-    parts.extend(args)
+    parts.extend(_cargo_fingerprint_args(cmd))
     return digest_parts(parts)
 
 
