@@ -145,12 +145,24 @@ for (const name of ["bank_logs", "truth"]) {
   }
 }
 ' >/dev/null
+  # Prune stale rotated bank app.log files while bank is stopped so a partial
+  # JSON line from an interrupted run cannot poison subsequent verifiers.
+  if docker volume inspect "${project}_applogs" >/dev/null 2>&1; then
+    docker run --rm --label "com.docker.compose.project=$project" --label "com.docker.compose.oneoff=True" \
+      -v "${project}_applogs:/var/log/saltation" oraclelinux:9-slim \
+      sh -c 'rm -f /var/log/saltation/app*.log' >/dev/null 2>&1 || true
+  fi
 }
 
 build_stamps=$(mktemp -d)
+bg_pids=()
 cleanup_it() {
-  local rc=$?
+  local rc=$? pid
   trap - EXIT INT TERM HUP
+  for pid in "${bg_pids[@]+"${bg_pids[@]}"}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   rm -rf "$build_stamps" >/dev/null 2>&1 || true
   if [[ "${restored_outbox_mode:-0}" == 0 ]]; then
     docker rm -f "$cargo_name" >/dev/null 2>&1 || true
@@ -159,6 +171,9 @@ cleanup_it() {
     "${compose[@]}" stop bank web alloy loki prometheus grafana >/dev/null 2>&1 || true
     "${compose[@]}" start oracle mongo >/dev/null 2>&1 || true
     reset_schema >/dev/null 2>&1 || true
+    # Stop oracle and mongo on exit (keeping warm volumes intact) so idle CI
+    # databases do not consume ~6-8 GB RAM or block check_compose_budget runtime.
+    "${compose[@]}" stop oracle mongo >/dev/null 2>&1 || true
   fi
   exit "$rc"
 }
@@ -168,6 +183,13 @@ ensure_bank_image() {
   if [ ! -f "$build_stamps/bank" ]; then
     "${compose[@]}" build bank >/dev/null
     : > "$build_stamps/bank"
+  fi
+}
+
+ensure_web_image() {
+  if [ ! -f "$build_stamps/web" ]; then
+    "${compose[@]}" build web >/dev/null
+    : > "$build_stamps/web"
   fi
 }
 
@@ -337,8 +359,9 @@ LIMITS
         BENCH_SNAPSHOT_USER=SALTATION_TUNE tune_restored_outbox_watch "$output/snap-outbox-1-run$run" "$$" 9>&- &
         watcher=$!
       elif [ "${BENCH_ORA_SNAP:-}" = 1 ]; then
-        BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" &
+        BENCH_SNAPSHOT_USER="$(printf %s "$bench_user" | tr "[:lower:]" "[:upper:]")" bench_snapshot_watch "$output" 9>&- &
         watcher=$!
+        bg_pids+=("$watcher")
       fi
       if ! cargo_container --rm --name "$cargo_name" --network "${project}_data" --cpus 2 --memory 4g \
         -e SALTATION_DB_USER="$bench_user" -e SALTATION_DB_PASSWORD -e SALTATION_DB_CONNECT=oracle:1521/ORCLPDB1 -e SALTATION_DB_ACQUIRE_MS=200 -e SALTATION_CORS_ORIGINS=http://localhost:8088 \
@@ -388,8 +411,9 @@ mongo_users() {
 # Stops MongoDB 10 s into the outage test for 120 s, then starts it again.
 outbox_outage() {
   ( sleep 10; "${compose[@]}" stop mongo >/dev/null; echo "outage: mongo stopped";
-    sleep 120; "${compose[@]}" start mongo >/dev/null; echo "outage: mongo started" ) &
+    sleep 120; "${compose[@]}" start mongo >/dev/null; echo "outage: mongo started" ) 9>&- &
   local chaos=$!
+  bg_pids+=("$chaos")
   OUTBOX_OUTAGE_TEST=1 cargo_test outbox -- outage_then_full_delivery --nocapture
   wait "$chaos"
 }
@@ -398,14 +422,16 @@ outbox_outage() {
 # app.log and Alloy) and in Prometheus, and Grafana must serve the dashboard.
 observability() {
   ensure_bank_image
-  "${compose[@]}" up -d --build --force-recreate --no-deps --wait --wait-timeout 900 bank web alloy loki prometheus grafana
+  ensure_web_image
+  "${compose[@]}" up -d --no-build --force-recreate --no-deps --wait --wait-timeout 900 bank web alloy loki prometheus grafana
   local net_edge="${project}_edge" net_obs="${project}_obs" rid
+  local oneoff_labels=(--label "com.docker.compose.project=$project" --label "com.docker.compose.oneoff=True")
   rid=$(python3 -c "import secrets; a='0123456789ABCDEFGHJKMNPQRSTVWXYZ'; print('0' + ''.join(secrets.choice(a) for _ in range(25)))")
-  docker run --rm --network "$net_edge" curlimages/curl:8.15.0 -fsS -H "X-Request-Id: $rid" http://bank:8080/healthz >/dev/null
+  docker run --rm "${oneoff_labels[@]}" --network "$net_edge" curlimages/curl:8.15.0 -fsS -H "X-Request-Id: $rid" http://bank:8080/healthz >/dev/null
   echo "observability: sent request $rid"
   local found="" i
   for i in $(seq 1 30); do
-    found=$(docker run --rm --network "$net_obs" curlimages/curl:8.15.0 -fsS -G http://loki:3100/loki/api/v1/query_range \
+    found=$(docker run --rm "${oneoff_labels[@]}" --network "$net_obs" curlimages/curl:8.15.0 -fsS -G http://loki:3100/loki/api/v1/query_range \
       --data-urlencode "query={job=\"bank\"} |= \"$rid\"" --data-urlencode "limit=1" | grep -c "$rid" || true)
     [ "$found" -gt 0 ] && break
     sleep 2
@@ -414,7 +440,7 @@ observability() {
   echo "observability: Loki has the app.log line for $rid"
   local up
   for i in $(seq 1 30); do
-    up=$(docker run --rm --network "$net_obs" curlimages/curl:8.15.0 -fsS -G http://prometheus:9090/api/v1/query \
+    up=$(docker run --rm "${oneoff_labels[@]}" --network "$net_obs" curlimages/curl:8.15.0 -fsS -G http://prometheus:9090/api/v1/query \
       --data-urlencode 'query=sum(bank_http_request_duration_seconds_count) > 0 and on() up{job="bank"} == 1' | grep -c '"value"' || true)
     [ "$up" -gt 0 ] && break
     sleep 2
@@ -423,7 +449,7 @@ observability() {
   echo "observability: Prometheus scrapes the bank and has request latency"
   local dash_ok=0 resp code
   for i in $(seq 1 30); do
-    resp=$(docker run --rm --network "$net_obs" curlimages/curl:8.15.0 -sS -w $'\n%{http_code}' \
+    resp=$(docker run --rm "${oneoff_labels[@]}" --network "$net_obs" curlimages/curl:8.15.0 -sS -w $'\n%{http_code}' \
       -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
       "http://grafana:3000/api/dashboards/uid/saltation-bank" 2>/dev/null || true)
     code=$(printf '%s\n' "$resp" | tail -n 1)
@@ -637,13 +663,21 @@ e2e() {
 # browser_flow <phone> <password> <to_account> [<timezone>]
 browser_flow() {
   local phone="$1" password="$2" to_account="$3" timezone="${4:-}"
+  [ -n "$phone" ] && [ -n "$password" ] && [ -n "$to_account" ] \
+    || { echo "browser-flow: missing fixture credentials" >&2; return 1; }
   local browser_env=()
   [ -z "$timezone" ] || browser_env+=(-e "E2E_TIMEZONE=$timezone")
-  docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
+  docker run --rm --label "com.docker.compose.project=$project" --label "com.docker.compose.oneoff=True" \
+    --network "${project}_edge" -v "$root/web":/web-src:ro \
     -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true ${browser_env[@]+"${browser_env[@]}"} \
     -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
-    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-    mcr.microsoft.com/playwright:v1.55.0-noble sh -c 'corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile && pnpm exec playwright test; status=$?; chown -R "$HOST_UID:$HOST_GID" /web; exit "$status"'
+    mcr.microsoft.com/playwright:v1.55.0-noble sh -ec '
+      mkdir -p /tmp/web
+      tar -C /web-src --exclude=node_modules --exclude=.git -cf - . | tar -C /tmp/web -xf -
+      corepack enable >/dev/null 2>&1
+      cd /tmp/web && pnpm install --frozen-lockfile >/dev/null
+      cd /tmp/web/apps/mobile && pnpm exec playwright test
+    '
 }
 
 browser_dates() {
@@ -652,7 +686,8 @@ browser_dates() {
   gen=("${compose[@]}" --profile tools run --rm generator)
   reset_schema
   ensure_bank_image
-  "${compose[@]}" up -d --build --wait --wait-timeout 1800 bank web
+  ensure_web_image
+  "${compose[@]}" up -d --no-build --wait --wait-timeout 1800 bank web
   ensure_generator_image
   "${gen[@]}" seed-parties --counterparties 50
   "${gen[@]}" clock live
@@ -660,12 +695,18 @@ browser_dates() {
   roster=$("${compose[@]}" exec -T mongo mongosh --quiet -u generator -p "$MONGO_GENERATOR_PASSWORD" --authenticationDatabase truth \
     --eval "const r = db.getSiblingDB('truth').roster.find({customer_no: {\$gte: 'C' + String($start).padStart(8, '0')}}).sort({customer_no: 1}).limit(2).toArray(); print(r[0].phone + ' ' + r[0].password + ' ' + r[1].account_no)")
   read -r phone password to_account <<<"$roster"
-  docker run --rm --network "${project}_edge" -v "$root/web":/web -w /web/apps/mobile \
+  [ -n "$phone" ] && [ -n "$password" ] && [ -n "$to_account" ] \
+    || { echo "browser-dates: missing fixture credentials" >&2; return 1; }
+  docker run --rm --label "com.docker.compose.project=$project" --label "com.docker.compose.oneoff=True" \
+    --network "${project}_edge" -v "$root/web":/web-src:ro \
     -v saltation-pnpm-store:/pnpm-store -e npm_config_store_dir=/pnpm-store -e CI=true \
     -e E2E_BASE_URL=http://web:8088 -e E2E_PHONE="$phone" -e E2E_PASSWORD="$password" -e E2E_TO_ACCOUNT="$to_account" \
-    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-    mcr.microsoft.com/playwright:v1.55.0-noble sh -c '
-      corepack enable >/dev/null 2>&1 && cd /web && pnpm install --frozen-lockfile >/dev/null && cd apps/mobile
+    mcr.microsoft.com/playwright:v1.55.0-noble sh -ec '
+      mkdir -p /tmp/web
+      tar -C /web-src --exclude=node_modules --exclude=.git -cf - . | tar -C /tmp/web -xf -
+      corepack enable >/dev/null 2>&1
+      cd /tmp/web && pnpm install --frozen-lockfile >/dev/null
+      cd /tmp/web/apps/mobile
       failed=""
       for zone in Etc/GMT+12 Pacific/Kiritimati; do
         echo "browser-dates: browser zone $zone"
@@ -673,7 +714,6 @@ browser_dates() {
           failed="$failed $zone"
         fi
       done
-      chown -R "$HOST_UID:$HOST_GID" /web
       if [ -n "$failed" ]; then
         echo "browser-dates: failed zones:$failed" >&2
         exit 1

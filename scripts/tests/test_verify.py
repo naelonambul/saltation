@@ -187,6 +187,32 @@ class Verify(RepoCase):
         self.assertEqual(record["status"], "blocked")
         self.assertIn("evidence log is missing", record["reason"])
 
+    def test_failed_check_prints_log_tail_in_human_output(self):
+        self.configure(check("boom", code="import sys; print('boom-detail-line'); sys.exit(2)"))
+        proc = subprocess.run(
+            [PY, str(REPO_PY), "verify", "--full"],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("boom-detail-line", proc.stdout)
+        self.assertIn("--- tail of ", proc.stdout)
+
+    def test_timeout_sends_sigterm_before_sigkill(self):
+        marker = self.root.parent / "sigterm-marker.txt"
+        script = (
+            "import pathlib, signal, sys, time; "
+            f"signal.signal(signal.SIGTERM, lambda *_: (pathlib.Path({str(marker)!r}).write_text('caught'), sys.exit(0))); "
+            "time.sleep(30)"
+        )
+        self.configure(check("hang", code=script, timeout=1))
+        result = self.verify("--full")
+        self.assertEqual(result["exit"], 1)
+        self.assertEqual(result["checks"][0]["status"], "failed")
+        self.assertTrue(marker.is_file(), "expected SIGTERM handler to run before SIGKILL")
+        self.assertEqual(marker.read_text(), "caught")
+
 
 class FixtureIsolation(unittest.TestCase):
     def test_importing_the_test_package_drops_repository_locating_git_variables(self):

@@ -7,7 +7,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from time import monotonic
 from unittest.mock import patch
 
@@ -136,6 +136,17 @@ async def run_fixture(run_id: str) -> dict:
     bank = ProofBank(settings.bank_url, transport)
     try:
         await truth.setup()
+        now_kst = datetime.now(UTC).astimezone(KST)
+        next_midnight = datetime.combine(now_kst.date() + timedelta(days=1), time(), KST)
+        until_midnight = (next_midnight - now_kst).total_seconds()
+        if until_midnight < 240:
+            wait_s = until_midnight + 2
+            print(
+                f"Near KST midnight ({until_midnight:.1f}s left); waiting {wait_s:.1f}s for next date",
+                file=sys.stderr,
+                flush=True,
+            )
+            await asyncio.sleep(wait_s)
         timer = monotonic()
         started = datetime.now(UTC)
         planned = (started.astimezone(KST) + timedelta(seconds=60)).replace(microsecond=0)
