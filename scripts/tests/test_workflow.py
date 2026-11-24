@@ -75,6 +75,12 @@ class WorkflowInvariants(unittest.TestCase):
                 f"{wf.name}: top-level permissions must be contents: read",
             )
 
+    def test_weekly_fresh_restricts_dispatch_to_main_and_runs_browser_dates(self):
+        weekly = (ROOT / ".github/workflows/weekly-fresh.yml").read_text()
+        self.assertIn('if [ "$GITHUB_REF" != "refs/heads/main" ]; then', weekly)
+        self.assertIn("scripts/dev/it-oracle.sh all --fresh", weekly)
+        self.assertIn("scripts/dev/it-oracle.sh browser-dates", weekly)
+
     def test_every_checkout_fetches_full_history(self):
         checkouts = self.text.count("uses: actions/checkout@")
         self.assertEqual(checkouts, len(re.findall(r"fetch-depth:\s*0\b", self.text)))
@@ -97,7 +103,9 @@ class WorkflowInvariants(unittest.TestCase):
         oracle = job_block(self.text, "oracle")
         self.assertIn("id: oracle-route", status)
         self.assertIn("steps.oracle-route.outputs.mode", status)
-        self.assertIn("needs: [status]", oracle)
+        self.assertIn("name: Verify status with base repo.py", status)
+        self.assertIn('python3 -Es "$base_dir/scripts/repo.py" status $REPO_ARGS', status)
+        self.assertIn("needs: [status, identity, control-plane-tests]", oracle)
         docs_pr = "github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only'"
         self.assertIn(docs_pr + """ && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]'""", oracle)
         self.assertIn(docs_pr + " && 'docs-only' || 'full'", oracle)

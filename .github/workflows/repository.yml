@@ -75,6 +75,14 @@ jobs:
             echo 'Oracle routing: full. Base classifier is unavailable.'
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+      - name: Verify status with base repo.py
+        if: github.event_name == 'pull_request'
+        run: |
+          set -o pipefail
+          base_dir=$(mktemp -d)
+          trap 'rm -rf "$base_dir"' EXIT
+          git archive "$PR_BASE_SHA" scripts/repo.py | tar -xf - -C "$base_dir"
+          python3 -Es "$base_dir/scripts/repo.py" status $REPO_ARGS
       - run: python3 scripts/repo.py status $REPO_ARGS
 
   # Fails a pull request not authored by the agent identity. An unset
@@ -159,9 +167,9 @@ jobs:
         run: printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
       - run: python3 scripts/repo.py verify $REPO_ARGS --full --group python
 
-  # Allocate OCI only when the Oracle check group applies.
+  # Allocate OCI only when the Oracle check group applies and trusted gates pass.
   oracle:
-    needs: [status]
+    needs: [status, identity, control-plane-tests]
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && needs.status.outputs.oracle_mode == 'docs-only' && '["ubuntu-latest"]' || '["self-hosted","linux","ARM64","saltation-oracle"]') }}
     timeout-minutes: 120
     env:

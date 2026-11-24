@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "ci-hardening-p3-workflows",
+  "kind": "repository",
+  "title": "Harden CI workflow security boundaries for self-hosted OCI runner and weekly-fresh",
+  "base": {
+    "ref": "main",
+    "commit": "31d8a72c00a934971d766b5c493e41e54078767a"
+  },
+  "baseline": {},
+  "write_scope": [
+    ".github/workflows/repository.yml",
+    ".github/workflows/weekly-fresh.yml",
+    "scripts/tests/test_workflow.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:b219bd0d46dc07687c99401f0d4b8ecec54e2f9a7670f165a199538d2b44c38c",
+      "by": "ckh",
+      "at": "2026-11-24T12:57:05Z",
+      "write_scope_sha256": "sha256:f690c799bf631b740b58065654cad343210f21810d95a1835a944000247ba81a",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}
