@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stage8-oci-sizing-report-owasp",
+  "kind": "repository",
+  "title": "Record post-PR #46 and OWASP 19456/2/1 Stage 6 backfill results",
+  "base": {
+    "ref": "main",
+    "commit": "e3a960a5295de9f30cf662bba434c2016881aacb"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/stage8-oci-sizing-report.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:3ff2927fda29486cb89176a4a65931b6a89236eeca6a2f88f80cc13f18d92a83",
+      "by": "ckh",
+      "at": "2026-11-24T23:31:46Z",
+      "write_scope_sha256": "sha256:8ec420aab41f0d93673be340fb54bcd6e2938995d07545ad0964ed30cf568f98",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}
