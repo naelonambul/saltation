@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "stage8-oci-sizing-report",
+  "kind": "repository",
+  "title": "Record OCI sizing, OWASP Argon2id analysis, and Stage 6 bottleneck report",
+  "base": {
+    "ref": "main",
+    "commit": "7f6c5220e367345a5ba8454b21d376d1b0df6189"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/stage8-oci-sizing-report.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:984223ce2a1bcf26a5fd8651b6228982528fcb3b60428e035b282a66d88d23a8",
+      "by": "ckh",
+      "at": "2026-11-24T05:07:16Z",
+      "write_scope_sha256": "sha256:8ec420aab41f0d93673be340fb54bcd6e2938995d07545ad0964ed30cf568f98",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}
