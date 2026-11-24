@@ -3,6 +3,7 @@
 //! SHA-256 hashes, and the customer bearer-token extractor.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -31,33 +32,143 @@ pub const SESSION_IDLE: Duration = Duration::minutes(30);
 /// Scopes granted to a customer login.
 pub const CUSTOMER_SCOPE: &str = "login inquiry transfer";
 
+/// Configured Argon2id parameters (spec N-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Argon2Config {
+    pub m_kib: u32,
+    pub t_cost: u32,
+    pub p_cost: u32,
+    pub concurrency: usize,
+}
+
+impl Default for Argon2Config {
+    fn default() -> Self {
+        Self {
+            m_kib: 19 * 1024,
+            t_cost: 2,
+            p_cost: 1,
+            concurrency: 2,
+        }
+    }
+}
+
+impl Argon2Config {
+    pub fn new(m_kib: u32, t_cost: u32, p_cost: u32, concurrency: usize) -> anyhow::Result<Self> {
+        if !(4096..=65_536).contains(&m_kib) {
+            anyhow::bail!("SALTATION_ARGON2_M_KIB must be between 4096 and 65536 (got {m_kib})");
+        }
+        if !(1..=10).contains(&t_cost) {
+            anyhow::bail!("SALTATION_ARGON2_T_COST must be between 1 and 10 (got {t_cost})");
+        }
+        if !(1..=4).contains(&p_cost) {
+            anyhow::bail!("SALTATION_ARGON2_P_COST must be between 1 and 4 (got {p_cost})");
+        }
+        if !(1..=8).contains(&concurrency) {
+            anyhow::bail!(
+                "SALTATION_ARGON2_CONCURRENCY must be between 1 and 8 (got {concurrency})"
+            );
+        }
+        Params::new(m_kib, t_cost, p_cost, None)
+            .map_err(|e| anyhow::anyhow!("invalid Argon2 parameters: {e}"))?;
+        Ok(Self {
+            m_kib,
+            t_cost,
+            p_cost,
+            concurrency,
+        })
+    }
+
+    pub fn from_env() -> anyhow::Result<Self> {
+        fn read_u32(name: &str, default: u32) -> anyhow::Result<u32> {
+            match std::env::var(name) {
+                Ok(v) => v
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| anyhow::anyhow!("{name} must be an unsigned integer")),
+                Err(std::env::VarError::NotPresent) => Ok(default),
+                Err(e) => Err(anyhow::anyhow!("{name}: {e}")),
+            }
+        }
+        let d = Self::default();
+        let m_kib = read_u32("SALTATION_ARGON2_M_KIB", d.m_kib)?;
+        let t_cost = read_u32("SALTATION_ARGON2_T_COST", d.t_cost)?;
+        let p_cost = read_u32("SALTATION_ARGON2_P_COST", d.p_cost)?;
+        let concurrency = read_u32("SALTATION_ARGON2_CONCURRENCY", d.concurrency as u32)? as usize;
+        Self::new(m_kib, t_cost, p_cost, concurrency)
+    }
+
+    fn hasher(self) -> Argon2<'static> {
+        let params =
+            Params::new(self.m_kib, self.t_cost, self.p_cost, None).expect("validated Argon2");
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    }
+
+    fn dummy_phc(self) -> String {
+        let phc = format!(
+            "$argon2id$v=19$m={},t={},p={}$c2FsdGF0aW9uLWR1bW15IQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            self.m_kib, self.t_cost, self.p_cost
+        );
+        PasswordHash::new(&phc).expect("valid dummy PHC hash");
+        phc
+    }
+}
+
+static ARGON2_CONFIG: OnceLock<Argon2Config> = OnceLock::new();
+static GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+
+/// Validates and locks Argon2id parameters from the environment at process startup.
+pub fn init_argon2_from_env() -> anyhow::Result<Argon2Config> {
+    let cfg = Argon2Config::from_env()?;
+    let active = *ARGON2_CONFIG.get_or_init(|| cfg);
+    let _ = GATE.get_or_init(|| Arc::new(Semaphore::new(active.concurrency)));
+    let _ = DUMMY_HASH.get_or_init(|| active.dummy_phc());
+    Ok(active)
+}
+
+fn config() -> Argon2Config {
+    *ARGON2_CONFIG.get_or_init(|| Argon2Config::from_env().unwrap_or_default())
+}
+
 fn hasher() -> Argon2<'static> {
-    // OWASP minimum for Argon2id: 19 MiB, 2 iterations, 1 lane (spec N-6).
-    let params = Params::new(19 * 1024, 2, 1, None).expect("valid Argon2 parameters");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+    config().hasher()
 }
 
 fn gate() -> &'static Arc<Semaphore> {
-    static GATE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    GATE.get_or_init(|| Arc::new(Semaphore::new(2)))
+    GATE.get_or_init(|| Arc::new(Semaphore::new(config().concurrency)))
 }
 
-async fn run_gated_blocking<T, F>(gate: &Arc<Semaphore>, work: F) -> anyhow::Result<T>
+/// Valid Argon2id PHC hash matching the active N-6 parameters for constant-work rejection paths.
+pub fn dummy_hash() -> &'static str {
+    DUMMY_HASH.get_or_init(|| config().dummy_phc()).as_str()
+}
+
+async fn run_gated_blocking<T, F>(
+    gate: &Arc<Semaphore>,
+    op: &'static str,
+    work: F,
+) -> anyhow::Result<T>
 where
     T: Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,
 {
+    let wait_started = Instant::now();
     let permit = Arc::clone(gate).acquire_owned().await?;
+    metrics::histogram!("bank_auth_gate_wait_seconds").record(wait_started.elapsed().as_secs_f64());
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        work()
+        let hash_started = Instant::now();
+        let result = work();
+        metrics::histogram!("bank_auth_hash_duration_seconds", "op" => op)
+            .record(hash_started.elapsed().as_secs_f64());
+        result
     })
     .await?
 }
 
 /// Hashes a secret (password or PIN) with Argon2id on a blocking thread.
 pub async fn hash_secret(secret: String) -> anyhow::Result<String> {
-    run_gated_blocking(gate(), move || {
+    run_gated_blocking(gate(), "hash", move || {
         let mut salt = [0u8; 16];
         rand::rng().fill_bytes(&mut salt);
         let salt = SaltString::encode_b64(&salt).map_err(|e| anyhow::anyhow!("salt: {e}"))?;
@@ -71,7 +182,7 @@ pub async fn hash_secret(secret: String) -> anyhow::Result<String> {
 
 /// Verifies a secret against a stored Argon2id hash on a blocking thread.
 pub async fn verify_secret(hash: String, secret: String) -> anyhow::Result<bool> {
-    run_gated_blocking(gate(), move || {
+    run_gated_blocking(gate(), "verify", move || {
         let parsed = PasswordHash::new(&hash).map_err(|e| anyhow::anyhow!("stored hash: {e}"))?;
         Ok(hasher().verify_password(secret.as_bytes(), &parsed).is_ok())
     })
@@ -271,7 +382,7 @@ mod tests {
         let g1 = Arc::clone(&gate);
         let s1 = started_tx.clone();
         let h1 = tokio::spawn(async move {
-            run_gated_blocking(&g1, move || {
+            run_gated_blocking(&g1, "verify", move || {
                 let _ = s1.send(1);
                 let _ = release1_rx.recv();
                 Ok(())
@@ -282,7 +393,7 @@ mod tests {
         let g2 = Arc::clone(&gate);
         let s2 = started_tx.clone();
         let h2 = tokio::spawn(async move {
-            run_gated_blocking(&g2, move || {
+            run_gated_blocking(&g2, "verify", move || {
                 let _ = s2.send(2);
                 let _ = release2_rx.recv();
                 Ok(())
@@ -302,7 +413,7 @@ mod tests {
         let g3 = Arc::clone(&gate);
         let s3 = started_tx;
         let h3 = tokio::spawn(async move {
-            run_gated_blocking(&g3, move || {
+            run_gated_blocking(&g3, "verify", move || {
                 let _ = s3.send(3);
                 Ok(())
             })
@@ -321,6 +432,37 @@ mod tests {
         h2.await.expect("join h2").expect("h2 ok");
         h3.await.expect("join h3").expect("h3 ok");
         assert_eq!(gate.available_permits(), 2);
+    }
+
+    #[test]
+    fn argon2_config_validates_bounds_and_encodes_phc() {
+        assert!(Argon2Config::new(2048, 2, 1, 2).is_err());
+        assert!(Argon2Config::new(4096, 0, 1, 2).is_err());
+        assert!(Argon2Config::new(4096, 2, 0, 2).is_err());
+        assert!(Argon2Config::new(4096, 2, 1, 0).is_err());
+        assert!(Argon2Config::new(4096, 2, 1, 9).is_err());
+
+        let cfg = Argon2Config::new(4096, 2, 1, 3).expect("valid config");
+        let dummy = cfg.dummy_phc();
+        assert!(dummy.starts_with("$argon2id$v=19$m=4096,t=2,p=1$"));
+        let parsed = PasswordHash::new(&dummy).expect("parse dummy");
+        assert!(cfg.hasher().verify_password(b"wrong", &parsed).is_err());
+
+        let mut salt = [0u8; 16];
+        rand::rng().fill_bytes(&mut salt);
+        let salt = SaltString::encode_b64(&salt).expect("salt");
+        let hashed = cfg
+            .hasher()
+            .hash_password(b"secret-pass", &salt)
+            .expect("hash")
+            .to_string();
+        assert!(hashed.starts_with("$argon2id$v=19$m=4096,t=2,p=1$"));
+        let parsed_real = PasswordHash::new(&hashed).expect("parse real");
+        assert!(
+            cfg.hasher()
+                .verify_password(b"secret-pass", &parsed_real)
+                .is_ok()
+        );
     }
 }
 

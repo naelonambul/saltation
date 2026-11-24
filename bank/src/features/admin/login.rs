@@ -21,7 +21,6 @@ const SELECT: SqlStmt = sql_stmt!("admin.select_analyst", "sql/select_analyst.sq
 const INSERT_TOKEN: SqlStmt = sql_stmt!("admin.insert_token", "sql/insert_token.sql");
 const TOKEN_TTL: Duration = Duration::minutes(30);
 const MAX_BATCH: usize = 100;
-const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGF0aW9uLWR1bW15IQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 #[derive(Deserialize)]
 pub(super) struct Credentials {
@@ -144,7 +143,7 @@ pub(super) async fn login(
         .map_err(|e| db_error(&ctx, &e))?;
     let (analyst_id, hash) = match known {
         Some((id, hash)) => (Some(id), hash),
-        None => (None, DUMMY_HASH.to_owned()),
+        None => (None, auth::dummy_hash().to_owned()),
     };
     let verified = auth::verify_secret(hash, password)
         .await

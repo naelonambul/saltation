@@ -19,7 +19,6 @@ use chrono::{DateTime, Duration, FixedOffset, TimeZone, Timelike};
 use serde::Deserialize;
 use serde_json::json;
 
-const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdGF0aW9uLWR1bW15IQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const PIN_HASH: SqlStmt = sql_stmt!("atm.pin_hash", "sql/pin_hash.sql");
 const LOCK_TERMINAL: SqlStmt = sql_stmt!("atm.lock_terminal", "sql/lock_terminal.sql");
 const TERMINAL: SqlStmt = sql_stmt!("atm.terminal", "sql/terminal.sql");
@@ -197,7 +196,7 @@ async fn start(
         .run_in(&stats, move |s| s.query_opt(&PIN_HASH, &[&account]))
         .await
         .map_err(|e| db_error(&ctx, e))?;
-    let correct = auth::verify_secret(hash.unwrap_or_else(|| DUMMY_HASH.into()), req.pin)
+    let correct = auth::verify_secret(hash.unwrap_or_else(|| auth::dummy_hash().into()), req.pin)
         .await
         .map_err(|_| ApiError::internal(&ctx))?;
     let (token, hash) = auth::new_token();

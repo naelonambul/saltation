@@ -74,10 +74,18 @@ fn mongo_uri() -> Result<String, std::env::VarError> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let limits = bank::shared::limits::Limits::from_env()?;
+    let argon2 = bank::shared::auth::init_argon2_from_env().context("argon2 configuration")?;
     let log_dir =
         std::env::var("SALTATION_LOG_DIR").unwrap_or_else(|_| "/var/log/saltation".to_owned());
     let _log_guard = telemetry::init_logging(&log_dir).context("app.log")?;
     let metrics = telemetry::metrics_handle();
+    tracing::info!(
+        m_kib = argon2.m_kib,
+        t_cost = argon2.t_cost,
+        p_cost = argon2.p_cost,
+        concurrency = argon2.concurrency,
+        "argon2 configured"
+    );
 
     let db = Db::connect(&DbConfig::from_env().context("database configuration")?)
         .context("connect to Oracle")?;
