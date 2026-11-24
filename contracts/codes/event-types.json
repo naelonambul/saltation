@@ -18,6 +18,8 @@
     "atm.session_started": "ATM session started; payload: terminal_id, region, latitude, longitude, account_no, request_id, session_id",
     "atm.session_rejected": "ATM session rejected; payload: terminal_id, region, latitude, longitude, account_no, request_id, bank_rsp_code, locked",
     "atm.session_ended": "ATM session ended; payload: terminal_id, region, latitude, longitude, account_no, request_id, reason, session_id, start_request_id, ended_at",
-    "atm.operation": "ATM operation; payload: terminal_id, region, latitude, longitude, account_no, request_id, operation (withdraw, deposit, balance), outcome (approved, rejected), amount, rsp_code, bank_rsp_code"
+    "atm.operation": "ATM operation; payload: terminal_id, region, latitude, longitude, account_no, request_id, operation (withdraw, deposit, balance), outcome (approved, rejected), amount, rsp_code, bank_rsp_code",
+    "card.authorized": "debit card payment authorized; payload: card_no, account_no, amount_krw, original_amount, original_currency, merchant_name, mcc, country, entry_mode",
+    "card.declined": "debit card payment declined; payload: card_no, account_no, amount_krw, original_amount, original_currency, merchant_name, mcc, country, entry_mode, decline_reason"
   }
 }

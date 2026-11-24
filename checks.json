@@ -19,9 +19,15 @@
         ".claude/**",
         ".agents/**",
         "AGENTS.md",
+        "REVIEW.md",
+        "README.md",
+        "README.ko.md",
+        "LICENSE",
+        "docs/**",
         "intent.md",
         "spec.md",
-        ".gitattributes"
+        ".gitattributes",
+        ".gitignore"
       ],
       "requires": [
         "python3",
@@ -72,6 +78,28 @@
       ]
     },
     {
+      "id": "ops-compose-budget-tests",
+      "group": "python",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/ops/test_compose_budget.py",
+        "-v"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 300,
+      "paths": [
+        "infra/compose/**",
+        "scripts/ops/check_compose_budget.py",
+        "scripts/ops/test_compose_budget.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3"
+      ]
+    },
+    {
       "id": "rust-fmt",
       "group": "rust",
       "argv": [
@@ -98,7 +126,9 @@
       "cwd": ".",
       "timeout_seconds": 1800,
       "paths": [
-        "bank/**"
+        "bank/**",
+        "contracts/**",
+        "scripts/dev/ci-rust.sh"
       ],
       "requires": [
         "bash",
@@ -116,7 +146,8 @@
       "timeout_seconds": 1800,
       "paths": [
         "bank/**",
-        "contracts/**"
+        "contracts/**",
+        "scripts/dev/**"
       ],
       "requires": [
         "bash",
@@ -134,7 +165,8 @@
       "timeout_seconds": 1800,
       "paths": [
         "web/**",
-        "contracts/**"
+        "contracts/**",
+        "scripts/dev/ci-web.sh"
       ],
       "requires": [
         "bash",
@@ -152,7 +184,8 @@
       "timeout_seconds": 1800,
       "paths": [
         "web/**",
-        "contracts/**"
+        "contracts/**",
+        "scripts/dev/ci-web.sh"
       ],
       "requires": [
         "bash",
@@ -170,7 +203,8 @@
       "timeout_seconds": 1800,
       "paths": [
         "web/**",
-        "contracts/**"
+        "contracts/**",
+        "scripts/dev/ci-web.sh"
       ],
       "requires": [
         "bash",
@@ -188,7 +222,8 @@
       "timeout_seconds": 1800,
       "paths": [
         "web/**",
-        "contracts/**"
+        "contracts/**",
+        "scripts/dev/ci-web.sh"
       ],
       "requires": [
         "bash",
@@ -205,7 +240,8 @@
       "cwd": ".",
       "timeout_seconds": 1800,
       "paths": [
-        "generator/**"
+        "generator/**",
+        "scripts/dev/ci-py.sh"
       ],
       "requires": [
         "bash",
@@ -222,7 +258,8 @@
       "cwd": ".",
       "timeout_seconds": 1800,
       "paths": [
-        "generator/**"
+        "generator/**",
+        "scripts/dev/ci-py.sh"
       ],
       "requires": [
         "bash",
@@ -345,7 +382,14 @@
       "timeout_seconds": 3600,
       "paths": [
         "web/apps/mobile/**",
+        "web/packages/**",
+        "web/pnpm-lock.yaml",
+        "web/Dockerfile",
+        "contracts/openapi/public.yaml",
         "bank/src/features/accounts/**",
+        "bank/src/features/auth/**",
+        "bank/src/features/transfers/**",
+        "infra/nginx/**",
         "scripts/dev/it-oracle.sh"
       ],
       "requires": [

@@ -16,12 +16,12 @@ cargo_container() {
     return 0
   }
   _cargo_cleanup() {
-    local cid="" remaining warned=no
+    local cid="" remaining warned=no attempts=0
     [ ! -s "$cargo_state/cid" ] || cid=$(cat "$cargo_state/cid")
     if [[ "$cid" =~ ^[0-9a-f]{64}$ ]]; then
       # A failed removal or unavailable daemon cannot establish teardown.
-      # Retain identity and keep retrying rather than release a cache writer.
-      while :; do
+      # Retry up to 60s before surfacing a bounded diagnostic rather than hanging forever.
+      while [ "$attempts" -lt 300 ]; do
         docker rm -f "$cid" >/dev/null 2>&1 || true
         if remaining=$(docker ps -aq --no-trunc --filter "id=$cid") && [ -z "$remaining" ]; then
           break
@@ -30,8 +30,12 @@ cargo_container() {
           echo 'cargo-container: waiting to confirm invocation container removal' >&2
           warned=yes
         fi
+        attempts=$((attempts + 1))
         sleep .2
       done
+      if [ "$attempts" -ge 300 ]; then
+        echo "cargo-container: timed out after 60s removing container $cid" >&2
+      fi
     fi
     rm -f "$cargo_state/cid" "$cargo_state/create-output"
     rmdir "$cargo_state" || true

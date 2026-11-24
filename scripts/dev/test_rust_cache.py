@@ -173,6 +173,14 @@ class Freshness(unittest.TestCase):
         )
         self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
         self.assertIn('invalidated=yes', third.stderr)
+        # Switching `--bins` / `CARGO_BUILD_JOBS` does not invalidate the cache.
+        fourth_env = dict(self.env, CARGO_BUILD_JOBS='2')
+        fourth = subprocess.run(
+            [*self.command(verb='test'), '--bins', '--', '--nocapture'],
+            env=fourth_env, text=True, capture_output=True,
+        )
+        self.assertEqual(fourth.returncode, 0, fourth.stdout + fourth.stderr)
+        self.assertIn('invalidated=no', fourth.stderr)
 
 
 if __name__ == '__main__':

@@ -138,8 +138,10 @@ def compile_env():
              'PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'SOURCE_DATE_EPOCH'}
     prefixes = ('CARGO_PROFILE_', 'CARGO_BUILD_', 'CARGO_TARGET_', 'CARGO_CFG_',
                 'CC_', 'CXX_', 'AR_', 'CFLAGS_', 'CXXFLAGS_', 'PKG_CONFIG_')
+    excluded = {'CARGO_BUILD_JOBS'}
     return digest_parts([item for key in sorted(os.environ)
-                         if (key in exact or key.startswith(prefixes))
+                         if key not in excluded
+                         and (key in exact or key.startswith(prefixes))
                          and not any(word in key.upper() for word in ('TOKEN', 'PASSWORD', 'SECRET', 'CREDENTIAL'))
                          for item in (key, os.environ[key])])
 
@@ -191,7 +193,7 @@ def _cargo_fingerprint_args(cmd):
         if arg == '--test':
             index += 2
             continue
-        if arg.startswith('--test=') or arg in ('--tests', '--no-run'):
+        if arg.startswith('--test=') or arg in ('--tests', '--no-run', '--lib', '--bins'):
             index += 1
             continue
         filtered.append(arg)
@@ -202,10 +204,7 @@ def _cargo_fingerprint_args(cmd):
 def fingerprint(bank, contracts, config, cmd, children, env):
     parts = [str(bank), str(contracts), compile_env()]
     parts.extend(file_parts(Path(__file__).resolve()))
-    for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain', 'rust-toolchain.toml', 'build.rs'):
-        parts.extend(file_parts(bank / name))
-    for name in ('src', 'migrations', 'tests', 'benches', 'examples'):
-        parts.extend(tree_parts(bank / name))
+    parts.extend(tree_parts(bank))
     parts.extend(tree_parts(contracts))
     for path in config:
         parts.extend(file_parts(path))
@@ -260,15 +259,17 @@ def main(children):
             except BlockingIOError:
                 time.sleep(.05)
         config = config_paths(bank)
+        subcmd_bucket = 'clippy' if len(command) > 1 and command[1] == 'clippy' else 'build'
         selector = digest_parts([*targets, os.environ.get('CARGO_BUILD_TARGET', ''),
                                  *[part for path in config for part in file_parts(path)]])
-        key = digest_parts([profile, selector])
-        marker = state / (digest_parts([profile]) + '-' + key + '.json')
+        profile_scope = f'{profile}-{subcmd_bucket}'
+        key = digest_parts([profile_scope, selector])
+        marker = state / (digest_parts([profile_scope]) + '-' + key + '.json')
         source = fingerprint(bank, contracts, config, command, children, env)
         invalidated = not trusted(marker, source)
         # Config selectors may designate the same physical output directory.
         # Conservatively retire sibling selectors of this output profile too.
-        for sibling in state.glob(digest_parts([profile]) + '-*.json'):
+        for sibling in state.glob(digest_parts([profile_scope]) + '-*.json'):
             if sibling != marker:
                 atomic_marker(sibling, {'version': 1, 'trusted': False})
         atomic_marker(marker, {'version': 1, 'trusted': False})

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "ci-hardening-p2-coverage",
+  "kind": "repository",
+  "title": "Fix event catalog drift, checks.json routing, rust-cache keys, cargo cleanup bound, and workflow test coverage",
+  "base": {
+    "ref": "main",
+    "commit": "a79bda8e26a3b12bc5f590364a7d469cf1f253e0"
+  },
+  "baseline": {},
+  "write_scope": [
+    "contracts/codes/event-types.json",
+    "checks.json",
+    "scripts/dev/rust-cache.py",
+    "scripts/dev/test_rust_cache.py",
+    "scripts/dev/it-oracle.sh",
+    "scripts/dev/cargo-container.sh",
+    "scripts/tests/test_workflow.py",
+    "infra/compose/compose.yml"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:af7ebc77b0dd20c87c200280c4f455334d372846244ef8843bb289cb5b2f8892",
+      "by": "ckh",
+      "at": "2026-11-24T12:39:47Z",
+      "write_scope_sha256": "sha256:99a787117eb7e13bdd7a1a489f168b348603bc0675ac2560071e000ba224a278",
+      "note": "Owner approved revised plan with Grafana preinstall/WAL fix: \uc2b9\uc778"
+    }
+  ]
+}
