@@ -48,12 +48,18 @@ python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX)'
 # Anything that only runs when the volumes are created is part of the key; a
 # different key recreates the test volumes so setup changes are always proven.
 image_id=$(docker image inspect -f '{{.Id}}' saltation/oracle-ee:19.19 2>/dev/null || echo missing)
-setup_key=$(python3 - "$root" "$image_id" <<'PY'
-import hashlib, pathlib, sys
+mongo_image_id=$(docker image inspect -f '{{.Id}}' mongo:8.0.38 2>/dev/null || echo missing)
+setup_key=$(python3 - "$root" "$image_id" "$mongo_image_id" <<'PY'
+import hashlib, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
-h = hashlib.sha256(sys.argv[2].encode())
+h = hashlib.sha256((sys.argv[2] + "\n" + sys.argv[3]).encode())
+compose_text = (root / "infra/compose/compose.yml").read_text()
+for line in compose_text.splitlines():
+    if re.search(r"\bINIT_(SGA|PGA)_SIZE\b", line):
+        h.update(line.strip().encode())
 for p in sorted([*root.glob("infra/oracle/setup/*"), *root.glob("infra/mongo/init/*"), root / "infra/oracle/build.sh"]):
-    h.update(p.name.encode()); h.update(p.read_bytes())
+    if p.is_file():
+        h.update(p.name.encode()); h.update(p.read_bytes())
 print(h.hexdigest())
 PY
 )
@@ -732,11 +738,16 @@ db_pool_isolated() {
   [ "$((SECONDS - started))" -le 5 ] || { echo "db-pool close process exceeded 5 s" >&2; return 1; }
 }
 
-# Plan test-speed step 1: show host load in CI logs.
+# Plan test-speed step 1: show host load in CI logs (project-scoped containers only).
 host_load() {
   echo "it-oracle: host load ($1)"
   uptime || true
-  docker stats --no-stream || true
+  local cids
+  cids=$(docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null || true)
+  if [ -n "$cids" ]; then
+    # shellcheck disable=SC2086
+    docker stats --no-stream $cids || true
+  fi
 }
 
 run_target() {

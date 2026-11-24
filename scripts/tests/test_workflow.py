@@ -53,10 +53,27 @@ class WorkflowInvariants(unittest.TestCase):
         self.assertTrue({"opened", "reopened", "synchronize", "edited"} <= {t.strip() for t in types.split(",")})
 
     def test_actions_are_pinned_to_commit_shas(self):
-        uses = re.findall(r"uses:\s*(\S+)", self.text)
-        self.assertTrue(uses)
-        for ref in uses:
-            self.assertRegex(ref, r"@[0-9a-f]{40}$", ref)
+        for wf in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = wf.read_text()
+            uses = re.findall(r"uses:\s*(\S+)", text)
+            self.assertTrue(uses, wf.name)
+            for ref in uses:
+                self.assertRegex(ref, r"@[0-9a-f]{40}$", f"{wf.name}: {ref}")
+
+    def test_all_workflows_disable_checkout_credential_persistence_and_read_only_permissions(self):
+        for wf in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = wf.read_text()
+            checkouts = text.count("uses: actions/checkout@")
+            self.assertEqual(
+                checkouts,
+                len(re.findall(r"persist-credentials:\s*false\b", text)),
+                f"{wf.name}: every checkout must set persist-credentials: false",
+            )
+            self.assertRegex(
+                text,
+                r"(?m)^permissions:\n  contents: read\b",
+                f"{wf.name}: top-level permissions must be contents: read",
+            )
 
     def test_every_checkout_fetches_full_history(self):
         checkouts = self.text.count("uses: actions/checkout@")

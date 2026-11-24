@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "ci-hardening-p2-coverage",
+  "kind": "repository",
+  "title": "Fix event catalog drift, checks.json routing, rust-cache keys, cargo cleanup bound, and workflow test coverage",
+  "base": {
+    "ref": "main",
+    "commit": "a79bda8e26a3b12bc5f590364a7d469cf1f253e0"
+  },
+  "baseline": {},
+  "write_scope": [
+    "contracts/codes/event-types.json",
+    "checks.json",
+    "scripts/dev/rust-cache.py",
+    "scripts/dev/test_rust_cache.py",
+    "scripts/dev/it-oracle.sh",
+    "scripts/dev/cargo-container.sh",
+    "scripts/tests/test_workflow.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:015c45e88870c39b5ac7ffb93e89ae3e38ae1d477f1a02061c0f783bcf13a0d6",
+      "by": "ckh",
+      "at": "2026-11-24T11:28:42Z",
+      "write_scope_sha256": "sha256:8652a03501009c0bec27b3ebab3ba642bee96f3d8cdc6d9ae451d036758cc734",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}
