@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "ci-oracle-hygiene-speed",
+  "kind": "repository",
+  "title": "Harden Oracle CI DB hygiene, fix Grafana readiness race, and eliminate redundant Cargo cleans",
+  "base": {
+    "ref": "main",
+    "commit": "ab742da3ce3c61cce7840f2417128f59e2fdac4b"
+  },
+  "baseline": {},
+  "write_scope": [
+    "scripts/dev/rust-cache.py",
+    "scripts/dev/test_rust_cache.py",
+    "scripts/dev/it-oracle.sh",
+    "infra/oracle/reset_schema.sql"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:86b02712ffb5b8809fbdc5a43c359230b574b7371bbff425a4df6aef0b4e3b6b",
+      "by": "ckh",
+      "at": "2026-11-24T09:38:47Z",
+      "write_scope_sha256": "sha256:fd5ba4a751b5d63ae25886558b1495b78f00625091ae01f7e59e04700a8d270e",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}

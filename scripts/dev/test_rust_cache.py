@@ -143,6 +143,37 @@ class Freshness(unittest.TestCase):
         self.run_guard('A')
         self.assertNotEqual(stamp, artifact.stat().st_mtime_ns)
 
+    def test_alternating_test_targets_reuse_cache_and_source_change_invalidates(self):
+        tests_dir = self.bank / 'tests'
+        tests_dir.mkdir()
+        (tests_dir / 'alpha.rs').write_text('#[test] fn a() { assert!(true); }\n')
+        (tests_dir / 'beta.rs').write_text('#[test] fn b() { assert!(true); }\n')
+        first = subprocess.run(
+            [*self.command(verb='test'), '--test', 'alpha', '--', '--nocapture'],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('invalidated=yes', first.stderr)
+        alpha_bins = list((self.root / 'target/debug/deps').glob('alpha-*'))
+        self.assertTrue(alpha_bins)
+        stamps = {p: p.stat().st_mtime_ns for p in alpha_bins if p.is_file()}
+        # Switching `--test` target names must not invalidate or clean the cache.
+        second = subprocess.run(
+            [*self.command(verb='test'), '--test', 'beta', '--', '--nocapture'],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn('invalidated=no', second.stderr)
+        self.assertEqual(stamps, {p: p.stat().st_mtime_ns for p in stamps})
+        # Changing a source file with an older mtime still invalidates and cleans.
+        self.source('B')
+        third = subprocess.run(
+            [*self.command(verb='test'), '--test', 'beta', '--', '--nocapture'],
+            env=self.env, text=True, capture_output=True,
+        )
+        self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+        self.assertIn('invalidated=yes', third.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
