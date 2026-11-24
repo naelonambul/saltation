@@ -305,6 +305,47 @@ async def _begin_live(clock: BackfillClock, planned: datetime, stop: asyncio.Eve
     return True
 
 
+_BACKFILL_CHUNK_LIMIT = 256
+
+
+async def _advance_backfill(clock: BackfillClock, at: datetime) -> None:
+    if hasattr(clock, "advance_backfill"):
+        await clock.advance_backfill(at)
+    else:
+        await clock.move_clock(at, gated=True)
+
+
+def _is_normal_wave(wave: list[Due]) -> bool:
+    return all(item.episode.kind.startswith("normal_") for item in wave)
+
+
+def _partition_bucket_waves(
+    bucket_waves: list[tuple[int, datetime, list[Due]]], *, allow_batch: bool
+) -> list[tuple[bool, list[tuple[int, datetime, list[Due]]]]]:
+    """Group consecutive normal-only backfill waves into bounded chunks."""
+    segments: list[tuple[bool, list[tuple[int, datetime, list[Due]]]]] = []
+    chunk: list[tuple[int, datetime, list[Due]]] = []
+    chunk_ops = 0
+    for entry in bucket_waves:
+        _index, _at, wave = entry
+        if allow_batch and _is_normal_wave(wave):
+            if chunk and chunk_ops + len(wave) > _BACKFILL_CHUNK_LIMIT:
+                segments.append((True, chunk))
+                chunk = []
+                chunk_ops = 0
+            chunk.append(entry)
+            chunk_ops += len(wave)
+        else:
+            if chunk:
+                segments.append((True, chunk))
+                chunk = []
+                chunk_ops = 0
+            segments.append((False, [entry]))
+    if chunk:
+        segments.append((True, chunk))
+    return segments
+
+
 async def _due(
     items: list[Due],
     phase: str,
@@ -321,6 +362,9 @@ async def _due(
     date_key = f"{phase}:{day.isoformat()}"
     offset = clock.progress.get("wave_offset", 0) if clock.progress.get("wave_date") == date_key else 0
     live_end = live_started + timedelta(seconds=run.live_seconds) if live_started else None
+    can_batch = (
+        phase == "backfill" and hasattr(executor, "prepare_chunk") and hasattr(executor, "execute_wave")
+    )
     # Preserve the contracted second for ATM/session TTLs and ledger dates. A
     # bucket bounds preparation and backpressure checks; only one wave is admitted.
     buckets: dict[int, dict[datetime, list[Due]]] = {}
@@ -329,17 +373,50 @@ async def _due(
         buckets.setdefault(bucket, {}).setdefault(item.at, []).append(item)
     index = 0
     for times in buckets.values():
+        bucket_waves: list[tuple[int, datetime, list[Due]]] = []
         for at, same_time in times.items():
             for wave in _waves(same_time, run.workers):
                 index += 1
                 if index <= offset:
                     continue
+                bucket_waves.append((index, at, wave))
+        for is_batch, segment in _partition_bucket_waves(bucket_waves, allow_batch=can_batch):
+            if is_batch:
+                if stop.is_set():
+                    return False
+                if not await _gate(clock, stop):
+                    return False
+                chunk_items = [
+                    (item.episode, item.step, at) for _wave_idx, at, wave in segment for item in wave
+                ]
+                prepared_map = await executor.prepare_chunk(chunk_items)
+                last_done: int | None = None
+                for wave_idx, at, wave in segment:
+                    if stop.is_set():
+                        if last_done is not None:
+                            await clock.save(wave_date=date_key, wave_offset=last_done)
+                        return False
+                    if all(
+                        prepared_map[(item.episode.id, item.step.name)]["state"] in {"succeeded", "declined"}
+                        for item in wave
+                    ):
+                        last_done = wave_idx
+                        continue
+                    await _advance_backfill(clock, at)
+                    await executor.execute_wave(
+                        [(item.episode, item.step, at) for item in wave], prepared_map
+                    )
+                    last_done = wave_idx
+                if last_done is not None:
+                    await clock.save(wave_date=date_key, wave_offset=last_done)
+                continue
+            for wave_idx, at, wave in segment:
                 if stop.is_set():
                     return False
                 if not await _gate(clock, stop):
                     return False
                 if phase == "backfill":
-                    await clock.move_clock(at, gated=True)
+                    await _advance_backfill(clock, at)
                     now = at
                 else:
                     while True:
@@ -361,7 +438,7 @@ async def _due(
                 for result in outcomes:
                     if isinstance(result, BaseException):
                         raise result
-                await clock.save(wave_date=date_key, wave_offset=index)
+                await clock.save(wave_date=date_key, wave_offset=wave_idx)
     return True
 
 

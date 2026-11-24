@@ -16,6 +16,7 @@ class BackfillClock:
         self.bank = bank
         self.journal = journal
         self.progress = progress
+        self._confirmed: datetime | None = None
 
     async def save(self, **fields) -> None:
         progress = self.progress | fields
@@ -62,7 +63,44 @@ class BackfillClock:
             if intended is None:
                 await self.save(intended=target.isoformat())
             if observed != target:
-                await self.bank.clock_set(target.isoformat())
-                if await self.clock() != target:
+                state = await self.bank.clock_set(target.isoformat())
+                if not _matches_backfill_clock(state, target) and await self.clock() != target:
                     raise RecoveryError("bank clock advance does not match the intended instant")
             await self.save(current=target.isoformat(), intended=None)
+        self._confirmed = target
+
+    async def advance_backfill(self, target: datetime) -> None:
+        """Advance an exclusively leased BACKFILL clock without redundant GET /clock round-trips."""
+        current = datetime.fromisoformat(self.progress["current"])
+        intended = self.progress.get("intended")
+        if target < current or (intended and datetime.fromisoformat(intended) != target):
+            raise RecoveryError("clock checkpoint does not match the next planned action")
+        if target == current and intended is None:
+            if self._confirmed == current:
+                return
+            observed = await self.clock()
+            if observed != current:
+                raise RecoveryError("bank clock changed outside the fixture")
+            self._confirmed = current
+            return
+        if intended is not None or self._confirmed != current:
+            await self.move_clock(target, gated=True)
+            return
+        await self.save(intended=target.isoformat())
+        state = await self.bank.clock_set(target.isoformat())
+        if not _matches_backfill_clock(state, target) and await self.clock() != target:
+            raise RecoveryError("bank clock advance does not match the intended instant")
+        await self.save(current=target.isoformat(), intended=None)
+        self._confirmed = target
+
+
+def _matches_backfill_clock(state: Any, target: datetime) -> bool:
+    if not isinstance(state, dict) or state.get("mode") != "BACKFILL":
+        return False
+    raw = state.get("business_time")
+    if not isinstance(raw, str):
+        return False
+    try:
+        return datetime.fromisoformat(raw).astimezone(KST) == target
+    except ValueError:
+        return False

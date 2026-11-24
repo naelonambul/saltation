@@ -240,3 +240,46 @@ async def test_due_waits_for_oracle_anchor_when_bank_wall_clock_is_behind():
     clock.bank.clock.return_value["business_time"] = AT.isoformat()
     assert await running
     executor.execute.assert_awaited_once_with(episode, due.step, AT)
+
+
+async def test_chunked_normal_backfill_skips_completed_waves_before_clock_advance():
+    at1 = AT
+    at2 = AT + timedelta(seconds=12)
+    ep1 = Episode("norm-1", "normal_card", at1, {"actor": "a"}, "annual")
+    ep2 = Episode("norm-2", "normal_card", at2, {"actor": "b"}, "annual")
+    due = [
+        Due(at1, ep1, Step("card", "card", "a"), True),
+        Due(at2, ep2, Step("card", "card", "b"), True),
+    ]
+    clock = Clock()
+    clock.progress["current"] = at1.isoformat()
+    dispatched = []
+    clock_moves = []
+
+    async def move_clock(target, *, gated=False):
+        clock_moves.append(target)
+        clock.progress["current"] = target.isoformat()
+
+    clock.move_clock = AsyncMock(side_effect=move_clock)
+
+    # Simulate resume after wave 1 already succeeded and clock already moved to at2,
+    # before wave_offset was persisted at the end of the chunk.
+    prepared_rows = {
+        ("norm-1", "card"): {"state": "succeeded"},
+        ("norm-2", "card"): {"state": "prepared"},
+    }
+
+    async def prepare_chunk(items):
+        return prepared_rows
+
+    async def execute_wave(wave_items, prepared_map):
+        for ep, step, at in wave_items:
+            dispatched.append((ep.id, step.name, at))
+            prepared_map[(ep.id, step.name)]["state"] = "succeeded"
+
+    executor = SimpleNamespace(prepare_chunk=prepare_chunk, execute_wave=execute_wave)
+    assert await _due(due, "backfill", clock, RunConfig(DAY), executor, SimpleNamespace(), asyncio.Event())
+    # Wave 1 was skipped before clock advance (no backward clock move to at1!).
+    assert clock_moves == [at2]
+    assert dispatched == [("norm-2", "card", at2)]
+    assert clock.progress["wave_offset"] == 2

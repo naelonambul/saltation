@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "id": "stage6-backfill-throughput",
+  "kind": "implementation",
+  "title": "Batch Stage 6 backfill journaling, clock checks, and outbox relay delivery",
+  "base": {
+    "ref": "main",
+    "commit": "1db0fd354cef54422eb69de78ebfcece89cf2751"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "generator/saltation_gen/drivers/stage6.py",
+    "generator/saltation_gen/drivers/backfill_clock.py",
+    "generator/saltation_gen/drivers/stage6_execute.py",
+    "generator/saltation_gen/truth/stage6.py",
+    "generator/saltation_gen/truth/recovery.py",
+    "generator/tests/test_stage6_journal.py",
+    "generator/tests/test_stage6_run.py",
+    "bank/src/features/outbox_relay/mod.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:02b9846b4a522e91e4c21d2c8826b9927894fb6e24c130d4245632081f4378ff",
+      "by": "ckh",
+      "at": "2026-11-24T06:01:49Z",
+      "write_scope_sha256": "sha256:0a530cb62f688889ef3842538c75f6caf31f2631ee737ea972d26aa183450b2c",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}

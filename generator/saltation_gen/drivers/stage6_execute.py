@@ -72,6 +72,9 @@ class Stage6Executor:
         self.network_tokens: dict[str, tuple[str, datetime]] = {}
         self.sms_codes: dict[str, str] = {}
         self.network_lock = asyncio.Lock()
+        self._home_contexts: dict[str, Context] = {}
+        self._network_credentials: dict[str, dict] = {}
+        self._backfill_clock_owned: bool = False
 
     async def execute(self, episode: Episode, step: Step, now: datetime) -> None:
         previous = await self.journal.get_operation(episode.id, step.name)
@@ -148,10 +151,13 @@ class Stage6Executor:
     def _context(self, step: Step) -> Context:
         if step.op in CARD_CONTEXT:
             return NETWORK_CONTEXT
-        base = home_context(self.people[step.actor])
+        base = self._home_contexts.get(step.actor)
+        if base is None:
+            base = home_context(self.people[step.actor])
+            self._home_contexts[step.actor] = base
         if step.op == "atm_start" or step.op in ATM_CASH:
             base = replace(base, region=ATM["region"])
-        return replace(base, **step.context)
+        return replace(base, **step.context) if step.context else base
 
     def _labels(self, episode: Episode, step: Step, rid: str, product: dict | None) -> list[dict]:
         row = self.people[step.actor]
@@ -247,6 +253,108 @@ class Stage6Executor:
         await self.journal.transition(episode.id, step.name, "unconfirmed", terminal, result)
         if terminal == "declined" and not episode.kind.startswith("normal_"):
             raise RecoveryError(f"required operation declined for {episode.id}/{step.name}")
+
+    def _build_prepared_record(
+        self, episode: Episode, step: Step, now: datetime, context: Context, product: dict | None
+    ) -> dict:
+        rid = new_ulid()
+        labels = self._labels(episode, step, rid, product)
+        return {
+            "request_id": rid,
+            "state": "prepared",
+            "episode_kind": episode.kind,
+            "scenario_class": labels[0]["label"],
+            "persona": self.profiles.get(step.actor, "unclassified"),
+            "window": episode.window,
+            "carry_in": episode.carry_in,
+            "prior_to_live": episode.carry_in and step.offset < 172_800,
+            "operation": step.op,
+            "endpoint": ENDPOINTS[step.op],
+            "actor": step.actor,
+            "peer": step.peer,
+            "context": asdict(context),
+            "args": dict(step.args),
+            "dependency": product,
+            "request_key": atm_idempotency_key() if step.op in ATM_CASH | {"card"} else bank_tran_id(),
+            "business_time": now.isoformat(),
+            "labels": labels,
+        }
+
+    async def prepare_chunk(
+        self, chunk_items: list[tuple[Episode, Step, datetime]]
+    ) -> dict[tuple[str, str], dict]:
+        """Batch-prepare and batch-label a chunk of normal backfill operations before dispatch."""
+        batch: list[tuple[str, str, dict]] = []
+        for episode, step, at in chunk_items:
+            context = self._context(step)
+            record = self._build_prepared_record(episode, step, at, context, None)
+            batch.append((episode.id, step.name, record))
+        prepared = await self.journal.prepare_batch(batch)
+        labels_by_rid = {
+            row["request_id"]: row["labels"] for row in prepared.values() if row["state"] == "prepared"
+        }
+        await self.truth_labels.ensure_labels_batch(labels_by_rid)
+        return prepared
+
+    async def execute_wave(
+        self,
+        wave_items: list[tuple[Episode, Step, datetime]],
+        prepared_map: dict[tuple[str, str], dict],
+    ) -> None:
+        """Fence, concurrently dispatch, and batch-complete a wave of pre-prepared normal operations."""
+        to_send: list[tuple[Episode, Step, datetime, Context, dict]] = []
+        for episode, step, now in wave_items:
+            record = prepared_map[(episode.id, step.name)]
+            if record["state"] in {"succeeded", "declined"}:
+                continue
+            if record["state"] != "prepared":
+                raise RecoveryError(f"unresolved stage 6 operation {episode.id}/{step.name}")
+            context = self._context(step)
+            if (
+                record["context"] != asdict(context)
+                or record["args"] != step.args
+                or record.get("dependency") is not None
+                or record["labels"] != self._labels(episode, step, record["request_id"], None)
+            ):
+                raise RecoveryError(f"prepared operation changed for {episode.id}/{step.name}")
+            if step.op in AUTHENTICATED and not self._customer_token(step.actor, now, context):
+                await self._refresh(episode, step, now, "login")
+            if step.op in ATM_CASH and not self._atm_token(step.actor, now, margin=2):
+                await self._refresh(episode, step, now, "atm_start")
+                if not self._atm_token(step.actor, now, margin=2):
+                    raise RecoveryError("fresh ATM session expired before dispatch")
+            to_send.append((episode, step, now, context, record))
+        if not to_send:
+            return
+        await self.journal.mark_unconfirmed_wave([entry[4] for entry in to_send])
+        previous_owned = self._backfill_clock_owned
+        self._backfill_clock_owned = True
+        try:
+            raw_results = await asyncio.gather(
+                *(
+                    self._send(ep, step, self.people[step.actor], now, ctx, rec, None)
+                    for ep, step, now, ctx, rec in to_send
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            self._backfill_clock_owned = previous_owned
+        confirmed: list[tuple[str, str, str, dict]] = []
+        first_error: BaseException | None = None
+        for (ep, step, _now, _ctx, _rec), outcome in zip(to_send, raw_results, strict=True):
+            if isinstance(outcome, BaseException):
+                if first_error is None:
+                    if isinstance(outcome, (BankError, httpx.HTTPError, KeyError, TypeError, ValueError)):
+                        first_error = RecoveryError(f"unconfirmed outcome for {ep.id}/{step.name}")
+                    else:
+                        first_error = outcome
+                continue
+            terminal = "declined" if outcome["decision"] == "rejected" else "succeeded"
+            confirmed.append((ep.id, step.name, terminal, outcome))
+        if confirmed:
+            await self.journal.complete_wave(confirmed)
+        if first_error is not None:
+            raise first_error
 
     async def _send(
         self,
@@ -398,6 +506,8 @@ class Stage6Executor:
         return _movement(await cash(rid, token, key, step.args["amount"], ctx))
 
     async def _cash_time(self, expected: datetime) -> datetime:
+        if self._backfill_clock_owned:
+            return expected
         observed = await self.bank.clock()
         now = datetime.fromisoformat(observed["business_time"])
         if observed["mode"] == "BACKFILL" and now != expected:
@@ -411,9 +521,12 @@ class Stage6Executor:
     ) -> dict:
         card = step.op == "card"
         client_id = CARD_CLIENT_ID if card else OOB_CLIENT_ID
-        credential = await self.truth.card_networks.find_one({"_id": client_id})
-        if not credential or not credential.get("client_secret"):
-            raise RecoveryError("synthetic network authorization is missing")
+        credential = self._network_credentials.get(client_id)
+        if credential is None:
+            credential = await self.truth.card_networks.find_one({"_id": client_id})
+            if not credential or not credential.get("client_secret"):
+                raise RecoveryError("synthetic network authorization is missing")
+            self._network_credentials[client_id] = credential
         token = await self._network_token(
             client_id, credential["client_secret"], "card" if card else "oob", now
         )
