@@ -703,6 +703,10 @@ class PullRequestGate(RepoCase):
         self.commit("draft")
         self.assertFailed(self.pr(), "before the change is ready")
 
+    def test_unapproved_packet_only_pr_fails(self):
+        self.commit("packet only draft")
+        self.assertFailed(self.pr(), "not ready")
+
     def test_ready_packet_passes_without_any_closure_record(self):
         self.ready()
         self.write("src/a.txt", "x\n")

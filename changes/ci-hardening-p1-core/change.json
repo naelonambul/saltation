@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "ci-hardening-p1-core",
+  "kind": "repository",
+  "title": "Harden CI failure logs, timeout cleanup, PR readiness gate, Playwright isolation, and midnight guard",
+  "base": {
+    "ref": "main",
+    "commit": "abafa9f7185c1bef2be7dcb2074198410417be0a"
+  },
+  "baseline": {},
+  "write_scope": [
+    "scripts/repo.py",
+    "scripts/tests/test_status.py",
+    "scripts/tests/test_verify.py",
+    "scripts/dev/it-oracle.sh",
+    "generator/tests/stage6_lifecycle_harness.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a065685f83afcd879e745897008b7af5810624cc9c95c933132b1b490d8eaf34",
+      "by": "ckh",
+      "at": "2026-11-24T10:33:43Z",
+      "write_scope_sha256": "sha256:bf39fc5e18bfb29d493c8bbd18f2fad120a3bbd5c64f6286fab8ad48644d5c5b",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}

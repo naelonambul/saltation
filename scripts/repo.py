@@ -806,10 +806,17 @@ def run_check(ctx: Context, check: dict, log_path: Path) -> dict:
         except subprocess.TimeoutExpired:
             timed_out = True
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            code = proc.wait()
+            try:
+                code = proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                code = proc.wait()
     record["duration_seconds"] = round(time.monotonic() - started, 3)
     record["exit_code"] = None if timed_out else code
     record["log"] = log_path.relative_to(ctx.root).as_posix() if log_path.is_relative_to(ctx.root) else str(log_path)
@@ -956,9 +963,15 @@ def cmd_verify(args) -> int:
         print()
     else:
         for r in results:
-            print(f"{r['status']:>14}  {r['id']}  ({r['reason']})")
+            dur = f", {r['duration_seconds']:.1f}s" if r.get("duration_seconds") is not None else ""
+            print(f"{r['status']:>14}  {r['id']}  ({r['reason']}{dur})")
             if r["status"] in ("failed", "blocked") and r.get("log"):
                 print(f"{'':>16}log: {r['log']}")
+                tail = format_log_tail(ctx.root / r["log"])
+                if tail:
+                    print(f"--- tail of {r['log']} ---")
+                    print(tail)
+                    print(f"--- end tail of {r['log']} ---")
         not_run = [r["id"] for r in results if r["status"] == "not-run"]
         if not_run:
             print(f"INCOMPLETE: {len(not_run)} check(s) not run: {not_run}")
@@ -992,13 +1005,30 @@ def read_pr_body(args) -> str | None:
     return Path(args.pr_body).read_text() if args.pr_body != "-" else sys.stdin.read()
 
 
-def pull_request_failures(ctx: Context, st: ChangeStatus) -> list[str]:
-    """The final gate: a pull request merges its accepted intent/spec copies into the root.
+def format_log_tail(path: Path, max_lines: int = 150, max_bytes: int = 32768) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ""
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[-max_bytes:]
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+        truncated = True
+    body = "\n".join(lines)
+    if truncated and body:
+        return f"... (truncated; showing tail of {path.name})\n{body}"
+    return body
 
-    Readiness and scope are already failures of the active change; merging the pull
-    request is what closes it.
-    """
+
+def pull_request_failures(ctx: Context, st: ChangeStatus) -> list[str]:
+    """The final gate: a pull request requires readiness and merges accepted copies into the root."""
     failures = []
+    if st.readiness != "ready":
+        failures.append(f"{st.id}: pull request change is not ready (readiness={st.readiness})")
     packet_dir = ctx.root / CHANGES / st.id
     for name in BASELINE:
         local = file_digest(packet_dir / name)
