@@ -4,8 +4,9 @@ use crate::shared::api::{self, ApiError, codes, fields};
 use crate::shared::auth::{self, AuthClient};
 use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, Session, SqlStmt};
-use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
+use crate::shared::ledger::{self, Kind, Leg, Movement};
 use crate::shared::outbox::{self, Event};
+use crate::shared::outcome::{self, StoredResolution};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 use axum::extract::{
@@ -45,12 +46,7 @@ fn forbidden(ctx: &RequestContext) -> ApiError {
     ApiError::new(ctx, StatusCode::FORBIDDEN, FORBIDDEN, "권한이 없습니다")
 }
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
-    tracing::warn!(request_id = %ctx.request_id, error = %e, "inbound database failure");
-    if matches!(e, DbError::Busy) || matches!(e.ora_code(), Some(30006 | 1653 | 1654 | 1691)) {
-        ApiError::busy(ctx)
-    } else {
-        ApiError::internal(ctx)
-    }
+    outcome::map_db_error(ctx, "inbound", e)
 }
 #[derive(Deserialize)]
 struct TokenRequest {
@@ -191,7 +187,8 @@ struct Outcome {
 }
 enum Attempt {
     Done(Outcome),
-    Stored(String, String, String, Option<String>),
+    Stored(String, String, Option<String>),
+    Conflict,
     InvalidSender,
 }
 fn finish(
@@ -267,30 +264,27 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
         s.rollback()?;
         let row: Option<(String, String, String, Option<String>)> =
             s.query_opt(&SELECT_STORED, &[&p.scope, &item.bank_tran_id])?;
-        let row = if crate::shared::outcome::claimed_elsewhere(
-            s,
-            &p.ctx.request_id,
-            &p.scope,
-            &item.bank_tran_id,
-        )? {
-            None
-        } else {
-            row
+        let claimed =
+            outcome::claimed_elsewhere(s, &p.ctx.request_id, &p.scope, &item.bank_tran_id)?;
+        let row = row.map(|(hash, status, code, body)| (hash, (status, code, body)));
+        return match outcome::resolve_stored(claimed, row, &p.hash) {
+            StoredResolution::Replay((status, code, body)) => {
+                Ok(Attempt::Stored(status, code, body))
+            }
+            StoredResolution::Conflict => {
+                outcome::conflict(
+                    s,
+                    &p.ctx,
+                    p.now,
+                    "INBOUND",
+                    "EXTERNAL",
+                    &item.bank_tran_id,
+                    (None, None),
+                    None,
+                )?;
+                Ok(Attempt::Conflict)
+            }
         };
-        if row.as_ref().is_none_or(|row| row.0 != p.hash) {
-            crate::shared::outcome::conflict(
-                s,
-                &p.ctx,
-                p.now,
-                "INBOUND",
-                "EXTERNAL",
-                &item.bank_tran_id,
-                (None, None),
-                None,
-            )?;
-        }
-        let (hash, status, code, body) = row.unwrap_or_default();
-        return Ok(Attempt::Stored(hash, status, code, body));
     }
     let sender: Option<(String, String)> = s.query_opt(
         &SELECT_SENDER,
@@ -377,12 +371,8 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             transfer_out: 0,
         }],
     };
-    let posted = ledger::post(s, locks.as_mut().expect("receiver locked"), &movement).map_err(
-        |e| match e {
-            LedgerError::Db(e) => e,
-            e => DbError::Config(e.to_string()),
-        },
-    )?;
+    let posted = ledger::post(s, locks.as_mut().expect("receiver locked"), &movement)
+        .map_err(outcome::ledger_error)?;
     finish(s, p, body, "000", who, Some(posted.transfer_id))
 }
 async fn deposit(
@@ -390,7 +380,7 @@ async fn deposit(
     State(state): State<AppState>,
     ctx: RequestContext,
     Extension(stats): Extension<RequestStats>,
-    Extension(identity): Extension<crate::shared::outcome::IdentitySlot>,
+    Extension(identity): Extension<outcome::IdentitySlot>,
     who: AuthClient,
     body: Result<Json<DepositRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -408,31 +398,20 @@ async fn deposit(
         ctx: ctx.clone(),
         now,
     });
-    let mut retries = 0;
-    let result = loop {
-        let p = p.clone();
-        match state.db.run_in(&stats, move |s| attempt(s, &p)).await {
-            Ok(a) => break a,
-            Err(e) if e.ora_code() == Some(60) && retries < 2 => {
-                retries += 1;
-                metrics::counter!("bank_deadlock_retries_total").increment(1);
-                tokio::time::sleep(std::time::Duration::from_millis(10 * retries)).await;
-            }
-            Err(e) => return Err(db_error(&ctx, &e)),
-        }
-    };
+    let plan = p.clone();
+    let result = outcome::run_with_deadlock_retry(&state.db, &stats, move |s| attempt(s, &plan))
+        .await
+        .map_err(|e| db_error(&ctx, &e))?;
     match result {
         Attempt::InvalidSender => Err(invalid(&ctx)),
         Attempt::Done(o) => Ok(api::respond(&ctx, o.status, o.code, o.message, o.body)),
-        Attempt::Stored(hash, status, code, response) => {
-            if hash != p.hash {
-                return Err(ApiError::new(
-                    &ctx,
-                    StatusCode::CONFLICT,
-                    codes::DUPLICATE_REQUEST,
-                    "같은 거래고유번호로 다른 요청이 이미 처리되었습니다",
-                ));
-            }
+        Attempt::Conflict => Err(ApiError::new(
+            &ctx,
+            StatusCode::CONFLICT,
+            codes::DUPLICATE_REQUEST,
+            "같은 거래고유번호로 다른 요청이 이미 처리되었습니다",
+        )),
+        Attempt::Stored(status, code, response) => {
             let stored: Value = response
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
@@ -454,7 +433,7 @@ async fn deposit(
                 stored["rsp_message"].as_str().unwrap_or(""),
                 stored["body"].clone(),
             );
-            crate::shared::outcome::annotate(
+            outcome::annotate(
                 &mut response,
                 stored["account_no"].as_str().map(str::to_owned),
                 Some("INBOUND".into()),

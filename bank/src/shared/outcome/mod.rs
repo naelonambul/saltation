@@ -10,6 +10,8 @@ use chrono::{DateTime, FixedOffset};
 use crate::app::AppState;
 use crate::shared::api::ApiError;
 use crate::shared::context::RequestContext;
+use crate::shared::db::{Db, DbError, Session};
+use crate::shared::ledger::LedgerError;
 use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 
@@ -356,4 +358,160 @@ pub fn claimed_elsewhere(
     Ok(row.is_some_and(|(stored_scope, stored_key)| {
         stored_scope.as_deref() != Some(scope) || stored_key.as_deref() != Some(key)
     }))
+}
+
+/// Whether an ORA- code means the database is contended or out of space, so a
+/// retry later may succeed: deadlock, lock wait expired, or a full tablespace
+/// (outbox fullness is counted in `outbox::record`).
+fn busy_code(code: Option<i32>) -> bool {
+    matches!(code, Some(60 | 30006 | 1653 | 1654 | 1691))
+}
+
+/// Maps a monetary feature's database failure to its API error: contention and
+/// capacity failures are `busy`, everything else is `internal`.
+pub fn map_db_error(ctx: &RequestContext, feature: &'static str, error: &DbError) -> ApiError {
+    tracing::warn!(request_id = %ctx.request_id, error = %error, feature, "database failure");
+    if matches!(error, DbError::Busy) || busy_code(error.ora_code()) {
+        ApiError::busy(ctx)
+    } else {
+        tracing::error!(request_id = %ctx.request_id, error = %error, feature, "database error");
+        ApiError::internal(ctx)
+    }
+}
+
+/// Unwraps a ledger failure into the database error its caller returns.
+pub fn ledger_error(error: LedgerError) -> DbError {
+    match error {
+        LedgerError::Db(e) => e,
+        e => DbError::Config(e.to_string()),
+    }
+}
+
+const DEADLOCK_RETRIES: u64 = 2;
+
+/// Runs one monetary attempt, retrying an `ORA-00060` deadlock up to twice.
+pub async fn run_with_deadlock_retry<T, F>(
+    db: &Db,
+    stats: &RequestStats,
+    op: F,
+) -> Result<T, DbError>
+where
+    T: Send + 'static,
+    F: FnMut(&mut Session) -> Result<T, DbError> + Clone + Send + 'static,
+{
+    let mut retries = 0;
+    loop {
+        match db.run_in(stats, op.clone()).await {
+            Err(e) if e.ora_code() == Some(60) && retries < DEADLOCK_RETRIES => {
+                retries += 1;
+                metrics::counter!("bank_deadlock_retries_total").increment(1);
+                tracing::warn!(retries, "deadlock, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(10 * retries)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// How a duplicate-key insert resolves against the stored request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoredResolution<T> {
+    /// The stored request has the same hash: answer with its stored outcome.
+    Replay(T),
+    /// A different request owns the key or request ID: answer 409.
+    Conflict,
+}
+
+/// Decides replay versus conflict for a request whose key already exists.
+/// `stored` is the key's stored `(request_hash, outcome)`, if any.
+pub fn resolve_stored<T>(
+    claimed_elsewhere: bool,
+    stored: Option<(String, T)>,
+    request_hash: &str,
+) -> StoredResolution<T> {
+    match stored {
+        Some((hash, value)) if !claimed_elsewhere && hash == request_hash => {
+            StoredResolution::Replay(value)
+        }
+        _ => StoredResolution::Conflict,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::context::Listener;
+
+    fn ctx() -> RequestContext {
+        RequestContext {
+            request_id: "req-1".into(),
+            listener: Listener::Public,
+            ip: None,
+            region: None,
+            device_id: None,
+            human: false,
+        }
+    }
+
+    #[test]
+    fn busy_codes_are_contention_and_tablespace() {
+        for code in [60, 30006, 1653, 1654, 1691] {
+            assert!(busy_code(Some(code)), "ORA-{code}");
+        }
+        for code in [Some(1), Some(942), Some(2291), None] {
+            assert!(!busy_code(code), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn map_db_error_busy_pool_is_service_unavailable() {
+        let e = map_db_error(&ctx(), "test", &DbError::Busy);
+        assert_eq!(e.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn map_db_error_unexpected_is_internal() {
+        for error in [DbError::Config("x".into()), DbError::Closed] {
+            let e = map_db_error(&ctx(), "test", &error);
+            assert_eq!(e.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[test]
+    fn ledger_error_unwraps_db_and_wraps_the_rest() {
+        assert!(matches!(
+            ledger_error(LedgerError::Db(DbError::Busy)),
+            DbError::Busy
+        ));
+        assert!(matches!(
+            ledger_error(LedgerError::Negative(7)),
+            DbError::Config(m) if m.contains('7')
+        ));
+    }
+
+    #[test]
+    fn matching_hash_replays() {
+        let r = resolve_stored(false, Some(("h".to_string(), 5)), "h");
+        assert_eq!(r, StoredResolution::Replay(5));
+    }
+
+    #[test]
+    fn mismatched_hash_conflicts() {
+        let r = resolve_stored(false, Some(("other".to_string(), 5)), "h");
+        assert_eq!(r, StoredResolution::Conflict);
+    }
+
+    #[test]
+    fn missing_row_conflicts() {
+        assert_eq!(
+            resolve_stored::<i32>(false, None, "h"),
+            StoredResolution::Conflict
+        );
+    }
+
+    #[test]
+    fn claimed_elsewhere_conflicts_even_with_matching_hash() {
+        let r = resolve_stored(true, Some(("h".to_string(), 5)), "h");
+        assert_eq!(r, StoredResolution::Conflict);
+    }
 }

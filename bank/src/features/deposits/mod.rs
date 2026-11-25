@@ -104,18 +104,10 @@ fn invalid(ctx: &RequestContext) -> ApiError {
     )
 }
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
-    tracing::warn!(request_id = %ctx.request_id, error = %e, "deposit database failure");
-    if matches!(e, DbError::Busy) || matches!(e.ora_code(), Some(30006 | 1653 | 1654 | 1691)) {
-        ApiError::busy(ctx)
-    } else {
-        ApiError::internal(ctx)
-    }
+    crate::shared::outcome::map_db_error(ctx, "deposit", e)
 }
 fn ledger_error(e: ledger::LedgerError) -> DbError {
-    match e {
-        ledger::LedgerError::Db(e) => e,
-        e => DbError::Config(e.to_string()),
-    }
+    crate::shared::outcome::ledger_error(e)
 }
 fn numeric(v: &str) -> bool {
     !v.is_empty() && v.len() <= 12 && v.bytes().all(|c| c.is_ascii_digit())
@@ -374,28 +366,30 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&p.scope, &p.key])?;
-            let stored = if crate::shared::outcome::claimed_elsewhere(
-                s,
-                &p.ctx.request_id,
-                &p.scope,
-                &p.key,
-            )? {
-                None
-            } else {
-                stored
+            let claimed =
+                crate::shared::outcome::claimed_elsewhere(s, &p.ctx.request_id, &p.scope, &p.key)?;
+            let stored = match crate::shared::outcome::resolve_stored(
+                claimed,
+                stored.map(|(h, st, c, r)| (h, (st, c, r))),
+                &p.hash,
+            ) {
+                crate::shared::outcome::StoredResolution::Replay((st, c, r)) => {
+                    Some((p.hash.clone(), st, c, r))
+                }
+                crate::shared::outcome::StoredResolution::Conflict => {
+                    crate::shared::outcome::conflict(
+                        s,
+                        &p.ctx,
+                        p.now,
+                        p.request_type(),
+                        "MOBILE",
+                        &p.key,
+                        (Some(&p.customer_no), Some(&p.session)),
+                        None,
+                    )?;
+                    None
+                }
             };
-            if stored.as_ref().is_none_or(|row| row.0 != p.hash) {
-                crate::shared::outcome::conflict(
-                    s,
-                    &p.ctx,
-                    p.now,
-                    p.request_type(),
-                    "MOBILE",
-                    &p.key,
-                    (Some(&p.customer_no), Some(&p.session)),
-                    None,
-                )?;
-            }
             return Ok(Attempt::Stored(stored));
         }
         return Err(e);
@@ -541,56 +535,50 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<Attempt, DbError> {
 
 async fn execute(state: AppState, stats: RequestStats, p: Plan) -> Result<Response, ApiError> {
     let p = std::sync::Arc::new(p);
-    let mut retries = 0;
-    loop {
-        let plan = p.clone();
-        match state.db.run_in(&stats, move |s| attempt(s, &plan)).await {
-            Ok(Attempt::Done(o)) => {
-                return Ok(api::respond(&p.ctx, o.status, o.code, o.message, o.body));
-            }
-            Ok(Attempt::Stored(row)) => {
-                let Some((_, status, code, response)) = row.filter(|r| r.0 == p.hash) else {
-                    return Err(ApiError::new(
-                        &p.ctx,
-                        StatusCode::CONFLICT,
-                        codes::DUPLICATE_REQUEST,
-                        "중복 요청",
-                    ));
-                };
-                let stored: Value = response
-                    .as_deref()
-                    .and_then(|r| serde_json::from_str(r).ok())
-                    .unwrap_or(Value::Null);
-                let code = codes::known(&code).unwrap_or(codes::SYSTEM_ERROR);
-                let http = if status == "DONE" {
-                    StatusCode::OK
-                } else if code == codes::NOT_FOUND {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                };
-                let mut response = api::respond(
+    let plan = p.clone();
+    match crate::shared::outcome::run_with_deadlock_retry(&state.db, &stats, move |s| {
+        attempt(s, &plan)
+    })
+    .await
+    {
+        Ok(Attempt::Done(o)) => Ok(api::respond(&p.ctx, o.status, o.code, o.message, o.body)),
+        Ok(Attempt::Stored(row)) => {
+            let Some((_, status, code, response)) = row else {
+                return Err(ApiError::new(
                     &p.ctx,
-                    http,
-                    code,
-                    stored["rsp_message"].as_str().unwrap_or(""),
-                    stored["body"].clone(),
-                );
-                crate::shared::outcome::annotate(
-                    &mut response,
-                    stored["account_no"].as_str().map(str::to_owned),
-                    Some(p.request_type().into()),
-                    Some(true),
-                );
-                return Ok(response);
-            }
-            Err(e) if e.ora_code() == Some(60) && retries < 2 => {
-                retries += 1;
-                metrics::counter!("bank_deadlock_retries_total").increment(1);
-                tokio::time::sleep(std::time::Duration::from_millis(10 * retries)).await;
-            }
-            Err(e) => return Err(db_error(&p.ctx, &e)),
+                    StatusCode::CONFLICT,
+                    codes::DUPLICATE_REQUEST,
+                    "중복 요청",
+                ));
+            };
+            let stored: Value = response
+                .as_deref()
+                .and_then(|r| serde_json::from_str(r).ok())
+                .unwrap_or(Value::Null);
+            let code = codes::known(&code).unwrap_or(codes::SYSTEM_ERROR);
+            let http = if status == "DONE" {
+                StatusCode::OK
+            } else if code == codes::NOT_FOUND {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            let mut response = api::respond(
+                &p.ctx,
+                http,
+                code,
+                stored["rsp_message"].as_str().unwrap_or(""),
+                stored["body"].clone(),
+            );
+            crate::shared::outcome::annotate(
+                &mut response,
+                stored["account_no"].as_str().map(str::to_owned),
+                Some(p.request_type().into()),
+                Some(true),
+            );
+            Ok(response)
         }
+        Err(e) => Err(db_error(&p.ctx, &e)),
     }
 }
 fn plan(
