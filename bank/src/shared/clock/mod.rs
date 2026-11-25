@@ -59,12 +59,40 @@ pub struct Ticket {
     _guard: OwnedRwLockReadGuard<()>,
 }
 
+#[derive(Clone, Copy)]
+struct CachedClock {
+    mode: ClockMode,
+    stored: DateTime<FixedOffset>,
+    last_advanced: DateTime<FixedOffset>,
+    rolled_through: NaiveDate,
+    pending_rollover: bool,
+}
+
+impl CachedClock {
+    fn to_state(self) -> ClockState {
+        let business_time = match self.mode {
+            ClockMode::Live => Utc::now().with_timezone(&kst()),
+            ClockMode::Backfill => self.stored.with_timezone(&kst()),
+        };
+        ClockState {
+            mode: self.mode,
+            business_time,
+            // Once LIVE, the last advance is the committed switch, not wall time.
+            live_started_at: (self.mode == ClockMode::Live)
+                .then(|| self.last_advanced.with_timezone(&kst())),
+            rolled_through: self.rolled_through,
+            pending_rollover: self.pending_rollover,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Clock {
     db: Db,
     registry: Registry,
     barrier: Arc<RwLock<()>>,
     barrier_wait: Duration,
+    cache: Arc<std::sync::RwLock<Option<CachedClock>>>,
 }
 
 impl Clock {
@@ -80,6 +108,7 @@ impl Clock {
             registry,
             barrier: Arc::new(RwLock::new(())),
             barrier_wait: Duration::from_secs(10),
+            cache: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -88,7 +117,12 @@ impl Clock {
         self
     }
 
-    pub async fn state(&self) -> Result<ClockState, DbError> {
+    /// Clears the in-memory `sim_clock` cache so the next read queries Oracle.
+    pub fn invalidate_cache(&self) {
+        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    async fn state_uncached(&self) -> Result<ClockState, DbError> {
         type ClockRow = (
             String,
             DateTime<FixedOffset>,
@@ -103,20 +137,24 @@ impl Clock {
         } else {
             ClockMode::Live
         };
-        let business_time = match mode {
-            ClockMode::Live => Utc::now().with_timezone(&kst()),
-            ClockMode::Backfill => stored.with_timezone(&kst()),
-        };
         let rolled_through = NaiveDate::parse_from_str(&rolled, "%Y-%m-%d")
             .map_err(|e| DbError::Config(format!("rolled_through: {e}")))?;
-        Ok(ClockState {
+        let cached = CachedClock {
             mode,
-            business_time,
-            // Once LIVE, the last advance is the committed switch, not wall time.
-            live_started_at: (mode == ClockMode::Live).then(|| last_advanced.with_timezone(&kst())),
+            stored,
+            last_advanced,
             rolled_through,
             pending_rollover: pending > 0,
-        })
+        };
+        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+        Ok(cached.to_state())
+    }
+
+    pub async fn state(&self) -> Result<ClockState, DbError> {
+        if let Some(cached) = *self.cache.read().unwrap_or_else(|e| e.into_inner()) {
+            return Ok(cached.to_state());
+        }
+        self.state_uncached().await
     }
 
     pub async fn enter(&self) -> Result<Ticket, DbError> {
@@ -210,6 +248,7 @@ impl Clock {
         state: ClockState,
         to: DateTime<FixedOffset>,
     ) -> Result<ClockState, ClockError> {
+        self.invalidate_cache();
         if to < state.business_time {
             let customers: i64 = self.db.run(|s| s.query_row(&HAS_CUSTOMER, &[])).await?;
             if customers > 0 {
@@ -232,14 +271,14 @@ impl Clock {
                 })
                 .await?;
         }
-        Ok(self.state().await?)
+        Ok(self.state_uncached().await?)
     }
 
     pub async fn go_live(&self) -> Result<ClockState, ClockError> {
         let clock = self.clone();
         tokio::spawn(async move {
             let _guard = clock.barrier.write().await;
-            let state = clock.state().await?;
+            let state = clock.state_uncached().await?;
             if state.mode == ClockMode::Live {
                 return Ok(state);
             }
@@ -247,6 +286,7 @@ impl Clock {
             if !live_switch_allowed(state.business_time, wall) {
                 return Err(ClockError::WallBehind);
             }
+            clock.invalidate_cache();
             clock.roll_to(state.rolled_through, wall).await?;
             clock
                 .db
@@ -255,7 +295,7 @@ impl Clock {
                     s.commit()
                 })
                 .await?;
-            Ok(clock.state().await?)
+            Ok(clock.state_uncached().await?)
         })
         .await
         .map_err(|_| ClockError::Db(DbError::Config("clock task failed".into())))?
@@ -276,11 +316,13 @@ impl Clock {
                 return Ok(());
             }
             let _guard = clock.barrier.write().await;
-            let state = clock.state().await?;
+            let state = clock.state_uncached().await?;
             if state.mode == ClockMode::Live {
+                clock.invalidate_cache();
                 clock
                     .roll_to(state.rolled_through, Utc::now().with_timezone(&kst()))
                     .await?;
+                let _ = clock.state_uncached().await?;
             }
             Ok(())
         })

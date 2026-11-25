@@ -338,6 +338,7 @@ async fn clock_set(api: &Api, mode: String, time: Wall, rolled: NaiveDate) {
         })
         .await
         .unwrap();
+    api.state.clock.invalidate_cache();
 }
 
 #[tokio::test]

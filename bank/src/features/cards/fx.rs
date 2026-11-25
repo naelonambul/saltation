@@ -85,13 +85,26 @@ pub(super) fn validate(message: &Value) -> Result<Validated, &'static str> {
     if mcc.len() != 4 || !digits(mcc) {
         return Err("mcc");
     }
-    static COUNTRIES: OnceLock<Vec<String>> = OnceLock::new();
+    static COUNTRIES: OnceLock<[bool; 676]> = OnceLock::new();
     let countries = COUNTRIES.get_or_init(|| {
-        serde_json::from_str(include_str!("countries.json")).expect("country codes")
+        let list: Vec<String> =
+            serde_json::from_str(include_str!("countries.json")).expect("country codes");
+        let mut table = [false; 676];
+        for code in list {
+            let b = code.as_bytes();
+            assert!(
+                b.len() == 2 && b[0].is_ascii_uppercase() && b[1].is_ascii_uppercase(),
+                "invalid ISO-3166 alpha-2 code: {code}"
+            );
+            table[((b[0] - b'A') as usize) * 26 + ((b[1] - b'A') as usize)] = true;
+        }
+        table
     });
-    if !countries
-        .iter()
-        .any(|c| c == text(message, "country").unwrap_or(""))
+    let country = text(message, "country")?.as_bytes();
+    if country.len() != 2
+        || !country[0].is_ascii_uppercase()
+        || !country[1].is_ascii_uppercase()
+        || !countries[((country[0] - b'A') as usize) * 26 + ((country[1] - b'A') as usize)]
     {
         return Err("country");
     }
