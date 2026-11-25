@@ -646,6 +646,56 @@ mod tests {
         assert_eq!(hex(&[]), "");
         assert_eq!(hex(&[0x00, 0x09, 0x0a, 0x1f, 0xab, 0xff]), "00090a1fabff");
     }
+
+    #[tokio::test]
+    async fn argon2_pool_handles_concurrent_callers_exceeding_slot_count() {
+        let cfg = Argon2Config::new(4096, 1, 1, 2).expect("cfg");
+        let pool = Arc::new(Argon2Pool::new(cfg, true));
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..6 {
+            let pool = Arc::clone(&pool);
+            set.spawn(async move {
+                let secret = format!("secret-{i}");
+                let hash = {
+                    let p = Arc::clone(&pool);
+                    let s = secret.clone();
+                    run_gated_blocking(&pool.gate, "hash", move || {
+                        let mut slot = p.checkout();
+                        hash_with_memory(cfg, s.as_bytes(), slot.as_mut_slice())
+                    })
+                    .await
+                    .expect("hash")
+                };
+                let ok = {
+                    let p = Arc::clone(&pool);
+                    let h = hash.clone();
+                    let s = secret.clone();
+                    run_gated_blocking(&pool.gate, "verify", move || {
+                        let mut slot = p.checkout();
+                        verify_with_memory(&h, s.as_bytes(), slot.as_mut_slice())
+                    })
+                    .await
+                    .expect("verify")
+                };
+                assert!(ok, "secret-{i} must verify");
+                let bad = {
+                    let p = Arc::clone(&pool);
+                    run_gated_blocking(&pool.gate, "verify", move || {
+                        let mut slot = p.checkout();
+                        verify_with_memory(&hash, b"wrong", slot.as_mut_slice())
+                    })
+                    .await
+                    .expect("verify wrong")
+                };
+                assert!(!bad, "wrong secret must reject");
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            res.expect("task ok");
+        }
+        assert_eq!(pool.gate.available_permits(), 2);
+        assert_eq!(pool.slots.lock().unwrap().len(), 2);
+    }
 }
 
 /// A live counterparty token; no customer session is touched or extended.

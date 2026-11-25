@@ -86,13 +86,59 @@ impl CachedClock {
     }
 }
 
+#[derive(Default)]
+struct ClockCache {
+    generation: u64,
+    entry: Option<CachedClock>,
+}
+
+impl ClockCache {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.entry = None;
+    }
+
+    fn publish(&mut self, observed_gen: u64, cached: CachedClock) -> bool {
+        if self.generation == observed_gen {
+            self.entry = Some(cached);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct InvalidateOnDrop<'a> {
+    clock: &'a Clock,
+    armed: bool,
+}
+
+impl<'a> InvalidateOnDrop<'a> {
+    fn new(clock: &'a Clock) -> Self {
+        clock.invalidate_cache();
+        Self { clock, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InvalidateOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.clock.invalidate_cache();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Clock {
     db: Db,
     registry: Registry,
     barrier: Arc<RwLock<()>>,
     barrier_wait: Duration,
-    cache: Arc<std::sync::RwLock<Option<CachedClock>>>,
+    cache: Arc<std::sync::RwLock<ClockCache>>,
 }
 
 impl Clock {
@@ -108,7 +154,7 @@ impl Clock {
             registry,
             barrier: Arc::new(RwLock::new(())),
             barrier_wait: Duration::from_secs(10),
-            cache: Arc::new(std::sync::RwLock::new(None)),
+            cache: Arc::new(std::sync::RwLock::new(ClockCache::default())),
         })
     }
 
@@ -117,12 +163,16 @@ impl Clock {
         self
     }
 
-    /// Clears the in-memory `sim_clock` cache so the next read queries Oracle.
+    /// Clears the in-memory `sim_clock` cache and advances its generation so
+    /// in-flight reads cannot write stale rows back.
     pub fn invalidate_cache(&self) {
-        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
+        self.cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate();
     }
 
-    async fn state_uncached(&self) -> Result<ClockState, DbError> {
+    async fn fetch_row(&self) -> Result<CachedClock, DbError> {
         type ClockRow = (
             String,
             DateTime<FixedOffset>,
@@ -139,19 +189,51 @@ impl Clock {
         };
         let rolled_through = NaiveDate::parse_from_str(&rolled, "%Y-%m-%d")
             .map_err(|e| DbError::Config(format!("rolled_through: {e}")))?;
-        let cached = CachedClock {
+        Ok(CachedClock {
             mode,
             stored,
             last_advanced,
             rolled_through,
             pending_rollover: pending > 0,
-        };
-        *self.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+        })
+    }
+
+    async fn state_uncached(&self) -> Result<ClockState, DbError> {
+        let observed_gen = self
+            .cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        let cached = self.fetch_row().await?;
+        // Never publish while a writer holds the exclusive barrier or after a
+        // concurrent invalidation bumped the generation.
+        if self.barrier.try_read().is_ok() {
+            self.cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .publish(observed_gen, cached);
+        }
+        Ok(cached.to_state())
+    }
+
+    /// Reads Oracle while the caller already holds `self.barrier.write()` and
+    /// publishes the fresh row under the current generation.
+    async fn refresh_under_writer(&self) -> Result<ClockState, DbError> {
+        let observed_gen = self
+            .cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        let cached = self.fetch_row().await?;
+        self.cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .publish(observed_gen, cached);
         Ok(cached.to_state())
     }
 
     pub async fn state(&self) -> Result<ClockState, DbError> {
-        if let Some(cached) = *self.cache.read().unwrap_or_else(|e| e.into_inner()) {
+        if let Some(cached) = self.cache.read().unwrap_or_else(|e| e.into_inner()).entry {
             return Ok(cached.to_state());
         }
         self.state_uncached().await
@@ -209,7 +291,7 @@ impl Clock {
             let _guard = tokio::time::timeout(clock.barrier_wait, clock.barrier.write())
                 .await
                 .map_err(|_| ClockError::Busy)?;
-            let state = clock.state().await?;
+            let state = clock.fetch_row().await?.to_state();
             if state.mode != ClockMode::Backfill {
                 return Err(ClockError::NotBackfill);
             }
@@ -233,7 +315,7 @@ impl Clock {
             let _guard = tokio::time::timeout(clock.barrier_wait, clock.barrier.write())
                 .await
                 .map_err(|_| ClockError::Busy)?;
-            let state = clock.state().await?;
+            let state = clock.fetch_row().await?.to_state();
             if state.mode != ClockMode::Backfill {
                 return Err(ClockError::NotBackfill);
             }
@@ -248,7 +330,7 @@ impl Clock {
         state: ClockState,
         to: DateTime<FixedOffset>,
     ) -> Result<ClockState, ClockError> {
-        self.invalidate_cache();
+        let inv = InvalidateOnDrop::new(self);
         if to < state.business_time {
             let customers: i64 = self.db.run(|s| s.query_row(&HAS_CUSTOMER, &[])).await?;
             if customers > 0 {
@@ -271,14 +353,17 @@ impl Clock {
                 })
                 .await?;
         }
-        Ok(self.state_uncached().await?)
+        self.invalidate_cache();
+        let fresh = self.refresh_under_writer().await?;
+        inv.disarm();
+        Ok(fresh)
     }
 
     pub async fn go_live(&self) -> Result<ClockState, ClockError> {
         let clock = self.clone();
         tokio::spawn(async move {
             let _guard = clock.barrier.write().await;
-            let state = clock.state_uncached().await?;
+            let state = clock.fetch_row().await?.to_state();
             if state.mode == ClockMode::Live {
                 return Ok(state);
             }
@@ -286,7 +371,7 @@ impl Clock {
             if !live_switch_allowed(state.business_time, wall) {
                 return Err(ClockError::WallBehind);
             }
-            clock.invalidate_cache();
+            let inv = InvalidateOnDrop::new(&clock);
             clock.roll_to(state.rolled_through, wall).await?;
             clock
                 .db
@@ -295,7 +380,10 @@ impl Clock {
                     s.commit()
                 })
                 .await?;
-            Ok(clock.state_uncached().await?)
+            clock.invalidate_cache();
+            let fresh = clock.refresh_under_writer().await?;
+            inv.disarm();
+            Ok(fresh)
         })
         .await
         .map_err(|_| ClockError::Db(DbError::Config("clock task failed".into())))?
@@ -316,13 +404,17 @@ impl Clock {
                 return Ok(());
             }
             let _guard = clock.barrier.write().await;
-            let state = clock.state_uncached().await?;
-            if state.mode == ClockMode::Live {
-                clock.invalidate_cache();
+            let state = clock.fetch_row().await?.to_state();
+            let overdue =
+                business_date(state.business_time) > state.rolled_through.succ_opt().expect("date");
+            if state.mode == ClockMode::Live && (state.pending_rollover || overdue) {
+                let inv = InvalidateOnDrop::new(&clock);
                 clock
                     .roll_to(state.rolled_through, Utc::now().with_timezone(&kst()))
                     .await?;
-                let _ = clock.state_uncached().await?;
+                clock.invalidate_cache();
+                let _ = clock.refresh_under_writer().await?;
+                inv.disarm();
             }
             Ok(())
         })
@@ -383,5 +475,31 @@ mod tests {
             crate::shared::rollover::last_instant(date).to_rfc3339(),
             "2026-03-01T23:59:59.999999+09:00"
         );
+    }
+
+    #[test]
+    fn clock_cache_rejects_stale_generation_publish() {
+        let t = DateTime::parse_from_rfc3339("2026-03-01T12:00:00+09:00").expect("time");
+        let row = CachedClock {
+            mode: ClockMode::Backfill,
+            stored: t,
+            last_advanced: t,
+            rolled_through: NaiveDate::from_ymd_opt(2026, 2, 28).expect("date"),
+            pending_rollover: false,
+        };
+        let mut cache = ClockCache::default();
+        let gen0 = cache.generation;
+        cache.invalidate();
+        assert!(
+            !cache.publish(gen0, row),
+            "stale read from before invalidation must not overwrite cache"
+        );
+        assert!(cache.entry.is_none());
+
+        let gen1 = cache.generation;
+        assert!(cache.publish(gen1, row));
+        assert!(cache.entry.is_some());
+        cache.invalidate();
+        assert!(cache.entry.is_none());
     }
 }

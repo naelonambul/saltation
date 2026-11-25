@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "bank-argon2-pool-hotpath-cache",
   "kind": "implementation",
-  "title": "Pre-allocate Argon2id scratch pool, parallelize seeding, and cache hot-path clock/client-token state",
+  "title": "Pre-allocate Argon2id scratch pool, parallelize seeding, and cache hot-path clock state",
   "base": {
     "ref": "main",
     "commit": "501c63b46f02a776bbf72d9de3dbaee3761a29b2"
@@ -13,7 +13,6 @@
   },
   "write_scope": [
     "bank/Cargo.toml",
-    "bank/src/app.rs",
     "bank/src/shared/auth/**",
     "bank/src/shared/clock/**",
     "bank/src/features/internal/mod.rs",
@@ -23,11 +22,11 @@
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:4dd40aa937bf8e8e107ae10886470b8ba305bcbf8807bdfab2854bf109c5f01c",
+      "sha256": "sha256:8f41d3df027924a88c0660033471ca971021c0bab35618f18dc509185c45a960",
       "by": "ckh",
-      "at": "2026-11-25T00:04:14Z",
-      "write_scope_sha256": "sha256:6b14ee52a76d01c3db9466a9e4932a850b198fc9bccaa347f1eda949396e4f7c",
-      "note": "Owner approved in chat: \uc2b9\uc778"
+      "at": "2026-11-25T02:11:18Z",
+      "write_scope_sha256": "sha256:beb491c2fc2fc356223eb999cb3d2ba11003e68179d421fd54e75843d2f79a51",
+      "note": "Owner approved revised plan in chat: \uc2b9\uc778"
     }
   ]
 }
