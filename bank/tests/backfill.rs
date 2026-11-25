@@ -1122,11 +1122,14 @@ async fn daily_maintenance_window(api: &Api) {
     assert_eq!(events[0]["payload"]["http_status"], 503);
     assert_eq!(events[0]["payload"]["request_type"], "TRANSFER");
 
-    // Read-only balance inquiry remains available during maintenance.
+    // 00:15:00 KST -> read-only balance inquiry remains available during maintenance
+    // (and extends the F-2 30-minute session past 00:30:00).
+    api.state.clock.advance(900).await.expect("advance 900s");
     let balance_uri = format!(
-        "/v2.0/account/balance/fin_num?bank_tran_id=M000000001U{}&fintech_use_num={}&tran_dtime=20260101000000",
+        "/v2.0/account/balance/fin_num?bank_tran_id=M000000001U{}&fintech_use_num={}&tran_dtime={}",
         common::unique_digits(9),
-        sender_fin
+        sender_fin,
+        tran_dtime
     );
     let (bal_status, bal_body) = call(
         &maint_public,
@@ -1140,7 +1143,7 @@ async fn daily_maintenance_window(api: &Api) {
     assert_eq!(bal_status, StatusCode::OK, "{bal_body}");
 
     // 00:29:59 KST -> still blocked with Retry-After: 1
-    api.state.clock.advance(1799).await.expect("advance 1799s");
+    api.state.clock.advance(899).await.expect("advance 899s");
     let req2 = Request::builder()
         .method("POST")
         .uri("/v2.0/transfer/withdraw/fin_num")
