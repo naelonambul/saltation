@@ -11,6 +11,7 @@ use crate::sql_stmt;
 
 const CANDIDATES: SqlStmt = sql_stmt!("accounts_lifecycle.candidates", "sql/candidates.sql");
 const ELIGIBLE: SqlStmt = sql_stmt!("accounts_lifecycle.eligible", "sql/eligible.sql");
+const DORMANCY_BATCH_SIZE: usize = 200;
 
 pub struct DormancyJob;
 
@@ -28,18 +29,21 @@ impl RolloverJob for DormancyJob {
             let ids: Vec<i64> = db
                 .run(move |s| s.query_all(&CANDIDATES, &[&cutoff]))
                 .await?;
-            for id in ids {
+            for chunk in ids.chunks(DORMANCY_BATCH_SIZE) {
+                let batch = chunk.to_vec();
                 db.run(move |s| {
-                    let mut locks = ledger::lock_accounts(s, &[id])?;
-                    let eligible: i64 = s.query_row(&ELIGIBLE, &[&id, &cutoff])?;
-                    if eligible == 1 {
-                        ledger::set_status(
-                            s, &mut locks, id, "DORMANT", "dormancy", at, None, "SYSTEM",
-                        )
-                        .map_err(|e| match e {
-                            ledger::LedgerError::Db(e) => e,
-                            other => DbError::Config(other.to_string()),
-                        })?;
+                    for id in batch {
+                        let mut locks = ledger::lock_accounts(s, &[id])?;
+                        let eligible: i64 = s.query_row(&ELIGIBLE, &[&id, &cutoff])?;
+                        if eligible == 1 {
+                            ledger::set_status(
+                                s, &mut locks, id, "DORMANT", "dormancy", at, None, "SYSTEM",
+                            )
+                            .map_err(|e| match e {
+                                ledger::LedgerError::Db(e) => e,
+                                other => DbError::Config(other.to_string()),
+                            })?;
+                        }
                     }
                     s.commit()
                 })
