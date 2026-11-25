@@ -1,10 +1,11 @@
 //! Synthetic debit card seeding and card network authorizations.
-use std::io::{self, Read};
+use std::io;
 use std::sync::Arc;
 
 use axum::{
     Extension, Router, extract::State, http::StatusCode, response::Response, routing::post,
 };
+use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -51,16 +52,12 @@ fn valid_number(number: &str) -> bool {
         && luhn_sum(number).is_multiple_of(10)
 }
 
-/// Operating-system randomness, rejection-sampled to avoid biased decimal digits.
+/// Cryptographic randomness via `rand::rng()` (same CSPRNG used by auth/password reset).
 pub fn random_number() -> io::Result<String> {
-    let mut source = std::fs::File::open("/dev/urandom")?;
+    let mut rng = rand::rng();
     let mut number = PREFIX.to_owned();
     while number.len() < 15 {
-        let mut byte = [0];
-        source.read_exact(&mut byte)?;
-        if byte[0] < 250 {
-            number.push(char::from(b'0' + byte[0] % 10));
-        }
+        number.push(char::from(b'0' + rng.random_range(0..10u8)));
     }
     number.push('0');
     let check = (10 - luhn_sum(&number) % 10) % 10;
@@ -154,4 +151,17 @@ async fn seed(
         }
     })?.ok_or_else(|| invalid(&ctx))?;
     Ok(api::ok(&ctx, json!({"cards": created})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_number_produces_valid_luhn_synthetic_cards() {
+        for _ in 0..32 {
+            let number = random_number().expect("random card number");
+            assert!(valid_number(&number), "invalid card number: {number}");
+        }
+    }
 }

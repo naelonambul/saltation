@@ -47,7 +47,7 @@ DECLARE
 BEGIN
   SELECT COUNT(*) INTO v_cnt FROM dba_tablespaces WHERE tablespace_name = 'SALTATION_DATA';
   IF v_cnt = 0 THEN
-    EXECUTE IMMEDIATE q'[CREATE TABLESPACE saltation_data DATAFILE '/opt/oracle/oradata/ORCLCDB/ORCLPDB1/saltation_data01.dbf' SIZE 1G AUTOEXTEND ON NEXT 512M MAXSIZE UNLIMITED]';
+    EXECUTE IMMEDIATE q'[CREATE TABLESPACE saltation_data DATAFILE '/opt/oracle/oradata/ORCLCDB/ORCLPDB1/saltation_data01.dbf' SIZE 1G AUTOEXTEND ON NEXT 512M MAXSIZE 30G]';
   END IF;
   SELECT COUNT(*) INTO v_cnt FROM dba_tablespaces WHERE tablespace_name = 'OUTBOX_TS';
   IF v_cnt = 0 THEN

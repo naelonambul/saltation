@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "p1-config-and-cards-cleanup",
+  "kind": "implementation",
+  "title": "Sync lab Oracle MAXSIZE 30G, use rand CSPRNG for card numbers, and add countries.json sync test",
+  "base": {
+    "ref": "main",
+    "commit": "0c02df44ce1c09bc65778247a9814deb69b0d42b"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:bb4eea805cb0f02198053828490e4ada191500021aae632d4cd9b9fa580d4734"
+  },
+  "write_scope": [
+    "infra/lab/ansible/oracle-init.sql",
+    "bank/src/features/cards/mod.rs",
+    "bank/src/features/cards/fx.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:29f6fa63c2120552301fe614624c8dc210b025f3dbd927c9e1f080723ae042b8",
+      "by": "ckh",
+      "at": "2026-11-25T10:52:39Z",
+      "write_scope_sha256": "sha256:e1674cc81729c93e79ac4847a5bdc08edbba35030990ea568dd65cc391aae9ec"
+    }
+  ]
+}
