@@ -43,7 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/atm/v1/balance", get(operations::balance))
 }
 fn db_error(ctx: &RequestContext, error: DbError) -> ApiError {
-    if matches!(error, DbError::Busy) {
+    if matches!(error, DbError::Busy) || matches!(error.ora_code(), Some(60 | 30006)) {
         ApiError::busy(ctx)
     } else {
         ApiError::internal(ctx)

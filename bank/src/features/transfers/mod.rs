@@ -114,14 +114,8 @@ fn invalid(ctx: &RequestContext, message: &str) -> ApiError {
 fn map_db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
     tracing::warn!(request_id = %ctx.request_id, error = %e, "transfer database failure");
     match e.ora_code() {
-        // Lock wait expired, or the outbox tablespace is full (spec F-36a).
-        Some(30006) | Some(1653) | Some(1654) | Some(1691) => {
-            if e.ora_code() != Some(30006) {
-                metrics::counter!("bank_outbox_full_total").increment(1);
-                tracing::error!(request_id = %ctx.request_id, error = %e, "outbox tablespace full");
-            }
-            ApiError::busy(ctx)
-        }
+        // Lock wait expired, or a tablespace is full (outbox fullness is counted in outbox::record).
+        Some(30006) | Some(1653) | Some(1654) | Some(1691) => ApiError::busy(ctx),
         _ if matches!(e, DbError::Busy) => ApiError::busy(ctx),
         _ => {
             tracing::error!(request_id = %ctx.request_id, error = %e, "transfer database error");
