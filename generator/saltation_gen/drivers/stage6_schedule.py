@@ -48,7 +48,7 @@ def _avoid_maintenance(start: datetime, actions: list, maint: int) -> datetime:
         bad = [
             at
             for action in actions
-            if action.op in MONETARY_OPS
+            if action.op not in {"sms", "term_identity"}
             and in_maintenance_window(at := start + timedelta(seconds=action.offset), maint)
         ]
         if not bad:

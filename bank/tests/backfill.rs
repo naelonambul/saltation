@@ -1060,20 +1060,21 @@ async fn daily_maintenance_window(api: &Api) {
         .as_str()
         .expect("sender fin")
         .to_owned();
-    let (status, login_body) = call(
-        &maint_public,
+
+    // Seed an analyst to prove /admin/* remains available during maintenance.
+    let analyst_no = format!("A{}", common::unique_digits(8));
+    let (status, body) = call(
+        &maint_gen,
         "POST",
-        "/v2.0/ext/auth/login",
+        "/internal/v1/seed/analysts",
         &new_id(),
         None,
-        Some(json!({"phone": sender_phone, "password": "maint-password"})),
+        Some(json!({"analysts": [
+            {"analyst_no": analyst_no, "name": "점검분석가", "password": "maint-admin-password"},
+        ]})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{login_body}");
-    let token = login_body["access_token"]
-        .as_str()
-        .expect("token")
-        .to_owned();
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     let tran_id = format!("M000000001U{}", common::unique_digits(9));
     let tran_dtime = midnight.format("%Y%m%d%H%M%S").to_string();
@@ -1092,13 +1093,47 @@ async fn daily_maintenance_window(api: &Api) {
         "recv_client_account_num": recv_acct,
     });
 
-    // 00:00:00 KST -> blocked with 503 A0013 and Retry-After: 1800
+    // 00:00:00 KST -> customer login, balance inquiry, and transfer are ALL blocked with 503 A0013 + Retry-After: 1800.
+    let (login_status, login_blocked) = call(
+        &maint_public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(json!({"phone": sender_phone, "password": "maint-password"})),
+    )
+    .await;
+    assert_eq!(
+        login_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{login_blocked}"
+    );
+    assert_eq!(login_blocked["rsp_code"], "A0013");
+
+    let balance_uri = format!(
+        "/v2.0/account/balance/fin_num?bank_tran_id=M000000001U{}&fintech_use_num={}&tran_dtime={}",
+        common::unique_digits(9),
+        sender_fin,
+        tran_dtime
+    );
+    let (bal_status, bal_body) = call(
+        &maint_public,
+        "GET",
+        &balance_uri,
+        &new_id(),
+        Some("dummy-token"),
+        None,
+    )
+    .await;
+    assert_eq!(bal_status, StatusCode::SERVICE_UNAVAILABLE, "{bal_body}");
+    assert_eq!(bal_body["rsp_code"], "A0013");
+
     let blocked_id = new_id();
     let req = Request::builder()
         .method("POST")
         .uri("/v2.0/transfer/withdraw/fin_num")
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {token}"))
+        .header("authorization", "Bearer dummy-token")
         .header("x-request-id", &blocked_id)
         .body(Body::from(transfer_body.to_string()))
         .expect("request");
@@ -1122,25 +1157,31 @@ async fn daily_maintenance_window(api: &Api) {
     assert_eq!(events[0]["payload"]["http_status"], 503);
     assert_eq!(events[0]["payload"]["request_type"], "TRANSFER");
 
-    // 00:15:00 KST -> read-only balance inquiry remains available during maintenance
-    // (and extends the F-2 30-minute session past 00:30:00).
+    // 00:15:00 KST -> /admin/* (operational monitoring) remains available during maintenance.
     api.state.clock.advance(900).await.expect("advance 900s");
-    let balance_uri = format!(
-        "/v2.0/account/balance/fin_num?bank_tran_id=M000000001U{}&fintech_use_num={}&tran_dtime={}",
-        common::unique_digits(9),
-        sender_fin,
-        tran_dtime
-    );
-    let (bal_status, bal_body) = call(
+    let (admin_login_status, admin_login_body) = call(
+        &maint_public,
+        "POST",
+        "/admin/v1/login",
+        &new_id(),
+        None,
+        Some(json!({"analyst_no": analyst_no, "password": "maint-admin-password"})),
+    )
+    .await;
+    assert_eq!(admin_login_status, StatusCode::OK, "{admin_login_body}");
+    let admin_token = admin_login_body["access_token"]
+        .as_str()
+        .expect("admin token");
+    let (admin_read_status, admin_read_body) = call(
         &maint_public,
         "GET",
-        &balance_uri,
+        &format!("/admin/v1/customers/{sender_no}"),
         &new_id(),
-        Some(&token),
+        Some(admin_token),
         None,
     )
     .await;
-    assert_eq!(bal_status, StatusCode::OK, "{bal_body}");
+    assert_eq!(admin_read_status, StatusCode::OK, "{admin_read_body}");
 
     // 00:29:59 KST -> still blocked with Retry-After: 1
     api.state.clock.advance(899).await.expect("advance 899s");
@@ -1148,7 +1189,7 @@ async fn daily_maintenance_window(api: &Api) {
         .method("POST")
         .uri("/v2.0/transfer/withdraw/fin_num")
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {token}"))
+        .header("authorization", "Bearer dummy-token")
         .header("x-request-id", &new_id())
         .body(Body::from(transfer_body.to_string()))
         .expect("request");
@@ -1161,8 +1202,22 @@ async fn daily_maintenance_window(api: &Api) {
         Some("1")
     );
 
-    // 00:30:00 KST -> same bank_tran_id succeeds (idempotency key was not claimed during maintenance)
+    // 00:30:00 KST -> customer login and same bank_tran_id transfer succeed (idempotency key was not claimed).
     api.state.clock.advance(1).await.expect("advance 1s");
+    let (status, login_body) = call(
+        &maint_public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(json!({"phone": sender_phone, "password": "maint-password"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{login_body}");
+    let token = login_body["access_token"]
+        .as_str()
+        .expect("token")
+        .to_owned();
     let (ok_status, ok_body) = call(
         &maint_public,
         "POST",

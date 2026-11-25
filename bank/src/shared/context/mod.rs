@@ -295,7 +295,9 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
     };
     let now = ticket.now;
     let rejection = rejection.or_else(|| {
-        let (kind, _) = recorder.money_operation()?;
+        if !recorder.is_customer_channel() {
+            return None;
+        }
         let retry_after = maintenance_retry_after(now, state.maintenance_minutes)?;
         let mut response = ApiError::new(
             &ctx,
@@ -309,7 +311,9 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
                 .headers_mut()
                 .insert(axum::http::header::RETRY_AFTER, value);
         }
-        crate::shared::outcome::annotate(&mut response, None, Some(kind.into()), None);
+        if let Some((kind, _)) = recorder.money_operation() {
+            crate::shared::outcome::annotate(&mut response, None, Some(kind.into()), None);
+        }
         Some(response)
     });
     req.extensions_mut().insert(BusinessTime(now));

@@ -38,15 +38,15 @@
   "approvals": [
     {
       "artifact": "spec.md",
-      "sha256": "sha256:bdb4286f6c406765bbf2e78a2eb92e37d9d6f351cc1ba07e2361782d0830b5ce",
+      "sha256": "sha256:bb4eea805cb0f02198053828490e4ada191500021aae632d4cd9b9fa580d4734",
       "by": "ckh",
-      "at": "2026-11-25T08:04:54Z"
+      "at": "2026-11-25T08:44:26Z"
     },
     {
       "artifact": "plan.md",
-      "sha256": "sha256:e16d2da6e20808a8db4f11d43579e10e9f21e1fdbfd9e704987e561becea0838",
+      "sha256": "sha256:12b807293591b7ee87b9ac4b3397396e8dba0569e8a8d84d28ea5f74b78a949c",
       "by": "ckh",
-      "at": "2026-11-25T08:07:01Z",
+      "at": "2026-11-25T08:44:26Z",
       "write_scope_sha256": "sha256:10c64f86de1caff8ac2fb973cf20b3743b87c64880548c6075324a56de1e82a7"
     }
   ]

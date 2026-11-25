@@ -314,7 +314,7 @@ def test_normal_episodes_spread_across_hour_and_scenario_g_includes_declined_car
 
 
 def test_live_monetary_steps_shift_out_of_maintenance_window(monkeypatch):
-    from saltation_gen.drivers.stage6_schedule import MONETARY_OPS, in_maintenance_window
+    from saltation_gen.drivers.stage6_schedule import in_maintenance_window
     from saltation_gen.drivers.stage6_steps import steps
 
     monkeypatch.setenv("SALTATION_MAINTENANCE_MINUTES", "30")
@@ -328,7 +328,7 @@ def test_live_monetary_steps_shift_out_of_maintenance_window(monkeypatch):
             if episode.window != "live":
                 continue
             for action in steps(episode):
-                if action.op in MONETARY_OPS:
+                if action.op not in {"sms", "term_identity"}:
                     at = episode.start + timedelta(seconds=action.offset)
                     assert not in_maintenance_window(at, 30), (
                         f"{episode.id}/{action.name} landed in maintenance: {at}"
