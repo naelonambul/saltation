@@ -4,6 +4,7 @@ Every request carries an opaque request ID (ULID) chosen by the generator, so
 ground truth can be written before the request is sent (spec F-31, F-34).
 """
 
+import asyncio
 import os
 import secrets
 import threading
@@ -62,9 +63,19 @@ class BankError(Exception):
 
 class BankClient:
     def __init__(
-        self, base_url: str, timeout: float = 30.0, *, transport: httpx.AsyncBaseTransport | None = None
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        *,
+        clock_timeout: float = 180.0,
+        retry_503: int = 5,
+        retry_backoff: float = 0.25,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self._http = httpx.AsyncClient(base_url=base_url, timeout=timeout, transport=transport)
+        self._clock_timeout = clock_timeout
+        self._retry_503 = max(0, retry_503)
+        self._retry_backoff = max(0.0, retry_backoff)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -80,17 +91,32 @@ class BankClient:
         accept: tuple[int, ...] = (200,),
         data: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
+        request_timeout: float | None = None,
     ) -> tuple[int, dict[str, Any]]:
         headers = {"X-Request-Id": request_id or new_ulid()}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if ctx:
             headers.update({"X-Sim-Ip": ctx.ip, "X-Sim-Region": ctx.region, "X-Sim-Device": ctx.device})
-        res = await self._http.request(method, path, headers=headers, json=json, data=data, params=params)
-        body = res.json() if res.content else {}
-        if res.status_code not in accept:
-            raise BankError(res.status_code, body)
-        return res.status_code, body
+        req_kwargs: dict[str, Any] = {
+            "headers": headers,
+            "json": json,
+            "data": data,
+            "params": params,
+        }
+        if request_timeout is not None:
+            req_kwargs["timeout"] = request_timeout
+        max_attempts = 1 if (503 in accept or path.startswith("/internal/v1/seed/")) else self._retry_503 + 1
+        for attempt in range(max_attempts):
+            res = await self._http.request(method, path, **req_kwargs)
+            if res.status_code == 503 and attempt + 1 < max_attempts:
+                await asyncio.sleep(self._retry_backoff * (2**attempt))
+                continue
+            body = res.json() if res.content else {}
+            if res.status_code not in accept:
+                raise BankError(res.status_code, body)
+            return res.status_code, body
+        raise AssertionError("unreachable")
 
     async def seed_customers(self, customers: list[dict[str, Any]]) -> None:
         await self._call("POST", "/internal/v1/seed/customers", json={"customers": customers})
@@ -196,15 +222,25 @@ class BankClient:
         return body
 
     async def clock_set(self, business_time: str) -> dict[str, Any]:
-        _, body = await self._call("POST", "/internal/v1/clock/set", json={"business_time": business_time})
+        _, body = await self._call(
+            "POST",
+            "/internal/v1/clock/set",
+            json={"business_time": business_time},
+            request_timeout=self._clock_timeout,
+        )
         return body
 
     async def clock_advance(self, seconds: int) -> dict[str, Any]:
-        _, body = await self._call("POST", "/internal/v1/clock/advance", json={"seconds": seconds})
+        _, body = await self._call(
+            "POST",
+            "/internal/v1/clock/advance",
+            json={"seconds": seconds},
+            request_timeout=self._clock_timeout,
+        )
         return body
 
     async def go_live(self) -> dict[str, Any]:
-        _, body = await self._call("POST", "/internal/v1/mode/live")
+        _, body = await self._call("POST", "/internal/v1/mode/live", request_timeout=self._clock_timeout)
         return body
 
     async def sms(

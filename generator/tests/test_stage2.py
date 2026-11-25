@@ -352,3 +352,57 @@ async def test_new_commands_without_truth(argv, monkeypatch, capsys):
         assert calls == [("terminals",)]
     else:
         assert result == {"counterparties": 5, "counterparty_clients": 3}
+
+
+async def test_bank_client_retries_503_with_backoff_and_uses_clock_timeout():
+    attempts = 0
+    seen_timeouts = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        seen_timeouts.append(req.extensions.get("timeout"))
+        if req.url.path == "/internal/v1/clock/set":
+            return httpx.Response(200, json={"mode": "BACKFILL", "business_time": DT})
+        if attempts <= 2:
+            return httpx.Response(503, json={"rsp_code": "A0013", "rsp_message": "busy"})
+        return httpx.Response(200, json={"undelivered": 0})
+
+    bank = BankClient(
+        "http://bank",
+        timeout=15.0,
+        clock_timeout=180.0,
+        retry_503=3,
+        retry_backoff=0.0,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert await bank.outbox_backlog() == 0
+        assert attempts == 3
+        await bank.clock_set(DT)
+        assert seen_timeouts[-1]["read"] == 180.0
+    finally:
+        await bank.close()
+
+
+async def test_bank_client_does_not_retry_accepted_503_or_non_503_errors():
+    calls = 0
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if req.url.path == "/accepted-503":
+            return httpx.Response(503, json={"rsp_code": "A0013"})
+        return httpx.Response(500, json={"rsp_code": "A9999"})
+
+    bank = BankClient("http://bank", retry_503=3, retry_backoff=0.0, transport=httpx.MockTransport(handler))
+    try:
+        status, _ = await bank._call("GET", "/accepted-503", accept=(200, 503))
+        assert status == 503
+        assert calls == 1
+        with pytest.raises(BankError) as exc:
+            await bank._call("GET", "/boom")
+        assert exc.value.status == 500
+        assert calls == 2
+    finally:
+        await bank.close()

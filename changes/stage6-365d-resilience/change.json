@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "stage6-365d-resilience",
+  "kind": "implementation",
+  "title": "Fix Stage 6 365-day backfill/live resilience blockers (cutover, live_end, 503 retry, journal pruning)",
+  "base": {
+    "ref": "main",
+    "commit": "1f335b2a7a9f737514ca7babfb05868ad817dbb1"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "generator/saltation_gen/client/bank.py",
+    "generator/saltation_gen/drivers/stage6.py",
+    "generator/saltation_gen/truth/stage6.py",
+    "generator/tests/test_stage6_run.py",
+    "generator/tests/test_stage6_journal.py",
+    "generator/tests/test_stage2.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:091582bb0cbe901aae36f3cffcb2322236d3bc795b1b52dbe05f91571b7553b2",
+      "by": "ckh",
+      "at": "2026-11-25T04:41:24Z",
+      "write_scope_sha256": "sha256:ed5af6635efdf02ddf509eaff6a0b96eccb6180d07a1c1bd0f77c47b91de63dd",
+      "note": "Owner approved in chat: \uadf8\ub798 \uc21c\ucc28\uc801\uc73c\ub85c \ud558\uc790 \uc2b9\uc778"
+    }
+  ]
+}

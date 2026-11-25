@@ -283,3 +283,26 @@ async def test_chunked_normal_backfill_skips_completed_waves_before_clock_advanc
     assert clock_moves == [at2]
     assert dispatched == [("norm-2", "card", at2)]
     assert clock.progress["wave_offset"] == 2
+
+
+async def test_live_wave_skips_expired_normal_wave_without_failing():
+    start = AT.replace(hour=23, minute=59, second=55)
+    deadline = start + timedelta(seconds=10)
+    observed = {"mode": "LIVE", "business_time": deadline.isoformat(), "live_started_at": start.isoformat()}
+    clock = Clock()
+    clock.bank.clock.return_value = observed
+    planned = deadline - timedelta(seconds=1)
+    episode = Episode("normal_transfer:2026-01-04:C1", "normal_transfer", planned, {"actor": "a"}, "annual")
+    work = Due(planned, episode, Step("login", "login", "a"), True)
+    executor = SimpleNamespace(execute=AsyncMock())
+    assert await _due(
+        [work],
+        "live",
+        clock,
+        RunConfig(DAY, live_seconds=10),
+        executor,
+        SimpleNamespace(),
+        asyncio.Event(),
+        start,
+    )
+    executor.execute.assert_not_awaited()

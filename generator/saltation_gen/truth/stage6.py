@@ -1,8 +1,10 @@
 """Journal for a stage 6 run against a standalone truth database."""
 
 import asyncio
+import re
 from collections import Counter
 from contextlib import suppress
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +14,39 @@ from pymongo.write_concern import WriteConcern
 
 from .recovery import RecoveryError
 from .store import TruthStore
+
+
+def _compatible_live_attach(existing_inputs: dict, new_inputs: dict, progress: dict) -> bool:
+    """Allow attaching/updating live_at once backfill is finished and before LIVE starts."""
+    if not progress.get("backfill_finished") or progress.get("live_started") is not None:
+        return False
+    existing_run = existing_inputs.get("run")
+    new_run = new_inputs.get("run")
+    if not isinstance(existing_run, dict) or not isinstance(new_run, dict):
+        return False
+    new_live_at = new_run.get("live_at")
+    if not isinstance(new_live_at, str) or not new_live_at:
+        return False
+    if existing_inputs.get("backfill_end") != new_inputs.get("backfill_end"):
+        return False
+    try:
+        if datetime.fromisoformat(new_live_at) < datetime.fromisoformat(existing_inputs["backfill_end"]):
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    if {k: v for k, v in existing_inputs.items() if k != "run"} != {
+        k: v for k, v in new_inputs.items() if k != "run"
+    }:
+        return False
+    return {k: v for k, v in existing_run.items() if k != "live_at"} == {
+        k: v for k, v in new_run.items() if k != "live_at"
+    }
+
+
+def _normal_day_regex(days: list[str]) -> str:
+    joined = "|".join(re.escape(day) for day in days)
+    return f"^normal_[^:]+:({joined}):"
+
 
 _BANK_LEASE = "bank"
 _TERMINAL = ("succeeded", "declined")
@@ -111,8 +146,14 @@ class Stage6Journal:
                 with suppress(DuplicateKeyError):
                     await self._runs.insert_one(self._run_key() | {"inputs": inputs})
                 run = await self._runs.find_one({"_id": self.run_id})
-            if run is None or run.get("kind") != "generator-stage6" or run.get("inputs") != inputs:
+            if run is None or run.get("kind") != "generator-stage6":
                 raise RecoveryError("stage 6 run kind or inputs differ")
+            live_attached = False
+            if run.get("inputs") != inputs:
+                if _compatible_live_attach(run.get("inputs", {}), inputs, run.get("progress", {})):
+                    live_attached = True
+                else:
+                    raise RecoveryError("stage 6 run kind or inputs differ")
             prior_owner = run.get("owner")
             if prior_owner is not None and (
                 lease is None or prior_owner not in (lease["owner"], lease.get("prior_owner"))
@@ -140,6 +181,16 @@ class Stage6Journal:
                 if acquired.matched_count != 1:
                     raise RecoveryError("stage 6 bank lease changed during takeover")
 
+            run_set: dict[str, Any] = {"owner": self.owner, "stage6_claim_id": self._claim_id}
+            run_unset: dict[str, str] = {}
+            if live_attached:
+                run_set["inputs"] = inputs
+                if run.get("completed") and run.get("progress", {}).get("live_started") is None:
+                    run_unset["completed"] = ""
+                    run_unset["summary"] = ""
+            run_update: dict[str, Any] = {"$set": run_set}
+            if run_unset:
+                run_update["$unset"] = run_unset
             claimed = await self._runs.find_one_and_update(
                 self._run_key()
                 | {
@@ -147,7 +198,7 @@ class Stage6Journal:
                     "owner": prior_owner,
                     "stage6_claim_id": run.get("stage6_claim_id"),
                 },
-                {"$set": {"owner": self.owner, "stage6_claim_id": self._claim_id}},
+                run_update,
                 return_document=ReturnDocument.AFTER,
             )
             if claimed is None:
@@ -415,19 +466,73 @@ class Stage6Journal:
                     upsert=True,
                 )
 
+    async def prune_completed_normal_day(self, day_iso: str) -> int:
+        """Archive and delete terminal normal_* operations for a finished backfill day."""
+        filt = {
+            "run_id": self.run_id,
+            "episode_id": {"$regex": _normal_day_regex([day_iso])},
+            "state": {"$in": list(_TERMINAL)},
+        }
+        async with self._lock:
+            await self._require_owner()
+            run = await self._runs.find_one(self._owned_run_key(), {"archived_normal": 1})
+            archived = (run or {}).get("archived_normal") or {}
+            if day_iso not in archived:
+                cursor = await self._operations.aggregate(
+                    [
+                        {"$match": filt},
+                        {
+                            "$group": {
+                                "_id": {
+                                    "class": "$scenario_class",
+                                    "persona": "$persona",
+                                    "state": "$state",
+                                    "carry_in": "$prior_to_live",
+                                },
+                                "count": {"$sum": 1},
+                            }
+                        },
+                    ]
+                )
+                rollup = [
+                    {
+                        "class": row["_id"].get("class", "unclassified"),
+                        "persona": row["_id"].get("persona", "unclassified"),
+                        "state": row["_id"]["state"],
+                        "carry_in": bool(row["_id"].get("carry_in", False)),
+                        "count": row["count"],
+                    }
+                    async for row in cursor
+                ]
+                if rollup:
+                    await self._update_run({"$set": {f"archived_normal.{day_iso}": rollup}})
+            deleted = await self._operations.delete_many(filt)
+            return int(deleted.deleted_count)
+
+    async def _archived_normal(self) -> dict[str, list[dict]]:
+        run = await self._runs.find_one(self._run_key(), {"archived_normal": 1})
+        return (run or {}).get("archived_normal") or {}
+
     async def totals(self) -> dict:
         """Count operation states and distinct credited identities by window and kind."""
+        archived = await self._archived_normal()
+        match: dict[str, Any] = {"run_id": self.run_id}
+        if archived:
+            match["episode_id"] = {"$not": {"$regex": _normal_day_regex(sorted(archived))}}
         cursor = await self._operations.aggregate(
             [
-                {"$match": {"run_id": self.run_id}},
+                {"$match": match},
                 {"$group": {"_id": "$state", "count": {"$sum": 1}}},
             ]
         )
-        states = {row["_id"]: row["count"] async for row in cursor}
+        states = Counter({row["_id"]: row["count"] async for row in cursor})
+        for rows in archived.values():
+            for row in rows:
+                states[row["state"]] += row["count"]
         credit: dict[str, Counter] = {}
         async for row in self._credit.find({"run_id": self.run_id}, {"window": 1, "kind": 1}):
             credit.setdefault(row["window"], Counter())[row["kind"]] += 1
-        return {"states": states, "credit": {window: dict(counts) for window, counts in credit.items()}}
+        return {"states": dict(states), "credit": {window: dict(counts) for window, counts in credit.items()}}
 
     async def scenario_outcomes(self) -> tuple[dict[tuple[str, str], set[str]], set[tuple[str, str, str]]]:
         cursor = await self._operations.aggregate(
@@ -451,9 +556,13 @@ class Stage6Journal:
         return states, credits
 
     async def operation_breakdown(self) -> dict:
+        archived = await self._archived_normal()
+        match: dict[str, Any] = {"run_id": self.run_id}
+        if archived:
+            match["episode_id"] = {"$not": {"$regex": _normal_day_regex(sorted(archived))}}
         rows = await self._operations.aggregate(
             [
-                {"$match": {"run_id": self.run_id}},
+                {"$match": match},
                 {
                     "$group": {
                         "_id": {
@@ -468,26 +577,35 @@ class Stage6Journal:
             ]
         )
         breakdown = {}
-        async for row in rows:
-            key = row["_id"]
-            cls = key.get("class", "unclassified")
-            persona = key.get("persona", "unclassified")
+
+        def _add(cls: str, persona: str, state: str, carry_in: bool, count: int) -> None:
             counts = breakdown.setdefault(cls, {}).setdefault(
                 persona,
                 dict.fromkeys(
                     ("prepared", "attempted", "completed", "rejected", "unresolved", "carried_in"), 0
                 ),
             )
-            count = row["count"]
-            state = key["state"]
             if state == "prepared":
                 counts["prepared"] += count
-                continue
+                return
             counts["attempted"] += count
-            if key.get("carry_in"):
+            if carry_in:
                 counts["carried_in"] += count
             outcome = {"succeeded": "completed", "declined": "rejected"}.get(state, "unresolved")
             counts[outcome] += count
+
+        async for row in rows:
+            key = row["_id"]
+            _add(
+                key.get("class", "unclassified"),
+                key.get("persona", "unclassified"),
+                key["state"],
+                bool(key.get("carry_in")),
+                row["count"],
+            )
+        for day_rows in archived.values():
+            for row in day_rows:
+                _add(row["class"], row["persona"], row["state"], bool(row.get("carry_in")), row["count"])
         return breakdown
 
     async def finish(self, summary: dict) -> None:
