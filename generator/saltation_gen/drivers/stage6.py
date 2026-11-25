@@ -306,6 +306,7 @@ async def _begin_live(clock: BackfillClock, planned: datetime, stop: asyncio.Eve
 
 
 _BACKFILL_CHUNK_LIMIT = 256
+_NORMAL_PRUNE_KEEP_DAYS = 7
 
 
 async def _advance_backfill(clock: BackfillClock, at: datetime) -> None:
@@ -649,7 +650,9 @@ async def _run_phases(
             completed_day = day
             day += timedelta(days=1)
             await clock.save(backfill_day=day.isoformat())
-            await journal.prune_completed_normal_day(completed_day.isoformat())
+            prune_day = completed_day - timedelta(days=_NORMAL_PRUNE_KEEP_DAYS)
+            if prune_day >= run.first:
+                await journal.prune_completed_normal_day(prune_day.isoformat())
         await clock.save(backfill_finished=True)
 
     if phase == "backfill":
