@@ -2,8 +2,7 @@
 //! behind its own small concurrency gate, opaque bearer tokens stored as
 //! SHA-256 hashes, and the customer bearer-token extractor.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use argon2::password_hash::{Output, ParamsString, PasswordHash, SaltString};
@@ -647,26 +646,6 @@ mod tests {
         assert_eq!(hex(&[]), "");
         assert_eq!(hex(&[0x00, 0x09, 0x0a, 0x1f, 0xab, 0xff]), "00090a1fabff");
     }
-
-    #[test]
-    fn client_token_cache_honors_business_time_expiry_and_bound() {
-        let cache = ClientTokenCache::new(2);
-        let t0 = chrono::DateTime::parse_from_rfc3339("2026-03-01T12:00:00+09:00").expect("t0");
-        let exp = t0 + Duration::minutes(30);
-        let c = AuthClient {
-            counterparty_client_id: 1,
-            client_id: "card-net".into(),
-            institution_code: "001".into(),
-            scope: "card".into(),
-        };
-        cache.insert("h1".into(), c.clone(), exp);
-        assert_eq!(cache.get("h1", t0).expect("hit").client_id, "card-net");
-        assert!(cache.get("h1", exp).is_none(), "expired at boundary");
-
-        cache.insert("h2".into(), c.clone(), exp);
-        cache.insert("h3".into(), c, exp);
-        assert!(cache.get("h3", t0).is_some());
-    }
 }
 
 /// A live counterparty token; no customer session is touched or extended.
@@ -682,58 +661,6 @@ impl AuthClient {
         self.scope.split_whitespace().any(|s| s == scope)
     }
 }
-
-const CLIENT_TOKEN_CACHE_CAP: usize = 1024;
-
-#[derive(Clone)]
-struct CachedClientToken {
-    client: AuthClient,
-    expires_at: chrono::DateTime<chrono::FixedOffset>,
-}
-
-struct ClientTokenCache {
-    cap: usize,
-    entries: RwLock<HashMap<String, CachedClientToken>>,
-}
-
-impl ClientTokenCache {
-    fn new(cap: usize) -> Self {
-        Self {
-            cap,
-            entries: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn get(&self, hash: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Option<AuthClient> {
-        let map = self.entries.read().unwrap_or_else(|e| e.into_inner());
-        let entry = map.get(hash)?;
-        if entry.expires_at > now {
-            Some(entry.client.clone())
-        } else {
-            None
-        }
-    }
-
-    fn insert(
-        &self,
-        hash: String,
-        client: AuthClient,
-        expires_at: chrono::DateTime<chrono::FixedOffset>,
-    ) {
-        let mut map = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        if map.len() >= self.cap && !map.contains_key(&hash) {
-            map.clear();
-        }
-        map.insert(hash, CachedClientToken { client, expires_at });
-    }
-}
-
-static CLIENT_TOKEN_CACHE: OnceLock<ClientTokenCache> = OnceLock::new();
-
-fn client_token_cache() -> &'static ClientTokenCache {
-    CLIENT_TOKEN_CACHE.get_or_init(|| ClientTokenCache::new(CLIENT_TOKEN_CACHE_CAP))
-}
-
 const SELECT_CLIENT_TOKEN: SqlStmt =
     sql_stmt!("auth.select_client_token", "sql/select_client_token.sql");
 impl FromRequestParts<AppState> for AuthClient {
@@ -760,40 +687,29 @@ impl FromRequestParts<AppState> for AuthClient {
             .cloned()
             .unwrap_or_default();
         let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
-        let client = if let Some(cached) = client_token_cache().get(&hash, now) {
-            cached
-        } else {
-            let lookup_hash = hash.clone();
-            let row: Option<(
-                i64,
-                String,
-                String,
-                String,
-                chrono::DateTime<chrono::FixedOffset>,
-            )> = state
-                .db
-                .run_in(&stats, move |s| {
-                    s.query_opt(&SELECT_CLIENT_TOKEN, &[&lookup_hash, &now])
-                })
-                .await
-                .map_err(|e| {
-                    if matches!(e, crate::shared::db::DbError::Busy) {
-                        ApiError::busy(&ctx)
-                    } else {
-                        ApiError::internal(&ctx)
-                    }
-                })?;
-            let (counterparty_client_id, client_id, institution_code, scope, expires_at) =
-                row.ok_or_else(unauthorized)?;
-            let client = Self {
-                counterparty_client_id,
-                client_id,
-                institution_code,
-                scope,
-            };
-            client_token_cache().insert(hash, client.clone(), expires_at);
-            client
-        };
+        let row: Option<(i64, String, String, String)> = state
+            .db
+            .run_in(&stats, move |s| {
+                s.query_opt(&SELECT_CLIENT_TOKEN, &[&hash, &now])
+            })
+            .await
+            .map_err(|e| {
+                if matches!(e, crate::shared::db::DbError::Busy) {
+                    ApiError::busy(&ctx)
+                } else {
+                    ApiError::internal(&ctx)
+                }
+            })?;
+        let client = row
+            .map(
+                |(counterparty_client_id, client_id, institution_code, scope)| Self {
+                    counterparty_client_id,
+                    client_id,
+                    institution_code,
+                    scope,
+                },
+            )
+            .ok_or_else(unauthorized)?;
         if let Some(slot) = parts
             .extensions
             .get::<crate::shared::outcome::IdentitySlot>()
