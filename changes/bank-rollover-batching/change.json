@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "bank-rollover-batching",
+  "kind": "implementation",
+  "title": "Batch rollover job transactions in DormancyJob, MaturityJob, and AtmSessionExpiryJob",
+  "base": {
+    "ref": "main",
+    "commit": "a20c4b7fb7ef153e44cc47e23b6c6da065afe2e1"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "bank/src/features/accounts_lifecycle/mod.rs",
+    "bank/src/features/deposits/mod.rs",
+    "bank/src/features/atm/mod.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a84228b4e08dfcc40ba0e82fc656620fa43b8ffe976411bbff3fddd113437d6b",
+      "by": "ckh",
+      "at": "2026-11-25T05:16:42Z",
+      "write_scope_sha256": "sha256:9056617f5f8ea24a170154c19f16486d26e4f46bb35cd2652d6d494c39dbf627",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}

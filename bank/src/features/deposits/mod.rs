@@ -686,6 +686,8 @@ async fn close(
     .await
 }
 
+const MATURITY_BATCH_SIZE: usize = 100;
+
 pub struct MaturityJob;
 impl RolloverJob for MaturityJob {
     fn name(&self) -> &'static str {
@@ -695,37 +697,40 @@ impl RolloverJob for MaturityJob {
         Box::pin(async move {
             let rows: Vec<(i64, i64, i64, String)> =
                 db.run(move |s| s.query_all(&CANDIDATES, &[&date])).await?;
-            for (id, linked, principal, name) in rows {
+            for chunk in rows.chunks(MATURITY_BATCH_SIZE) {
+                let batch = chunk.to_vec();
                 db.run(move |s| {
-                    let mut locks = ledger::lock_accounts(s, &[id, linked])?;
-                    if locks.get(id).expect("term").status != "CLOSED" {
-                        let term_no = locks.get(id).expect("term").account_no.clone();
-                        let linked_no = locks.get(linked).expect("linked").account_no.clone();
-                        ledger::post(
-                            s,
-                            &mut locks,
-                            &Movement {
-                                terminal_id: None,
-                                kind: Kind::TermClose,
-                                payee_registered: None,
-                                request_id: None,
-                                ctx: None,
-                                bank_tran_id: None,
-                                amount: principal,
-                                channel: "SYSTEM",
-                                occurred_at: at,
-                                legs: vec![
-                                    leg(id, -principal, false, &linked_no, &name),
-                                    leg(linked, principal, false, &term_no, &name),
-                                ],
-                            },
-                        )
-                        .map_err(ledger_error)?;
-                        ledger::set_status(
-                            s, &mut locks, id, "CLOSED", "maturity", at, None, "SYSTEM",
-                        )
-                        .map_err(ledger_error)?;
-                        s.execute(&CLOSE_DETAIL, &[&at, &"MATURITY", &id])?;
+                    for (id, linked, principal, name) in batch {
+                        let mut locks = ledger::lock_accounts(s, &[id, linked])?;
+                        if locks.get(id).expect("term").status != "CLOSED" {
+                            let term_no = locks.get(id).expect("term").account_no.clone();
+                            let linked_no = locks.get(linked).expect("linked").account_no.clone();
+                            ledger::post(
+                                s,
+                                &mut locks,
+                                &Movement {
+                                    terminal_id: None,
+                                    kind: Kind::TermClose,
+                                    payee_registered: None,
+                                    request_id: None,
+                                    ctx: None,
+                                    bank_tran_id: None,
+                                    amount: principal,
+                                    channel: "SYSTEM",
+                                    occurred_at: at,
+                                    legs: vec![
+                                        leg(id, -principal, false, &linked_no, &name),
+                                        leg(linked, principal, false, &term_no, &name),
+                                    ],
+                                },
+                            )
+                            .map_err(ledger_error)?;
+                            ledger::set_status(
+                                s, &mut locks, id, "CLOSED", "maturity", at, None, "SYSTEM",
+                            )
+                            .map_err(ledger_error)?;
+                            s.execute(&CLOSE_DETAIL, &[&at, &"MATURITY", &id])?;
+                        }
                     }
                     s.commit()
                 })

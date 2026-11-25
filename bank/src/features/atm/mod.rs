@@ -444,24 +444,38 @@ impl crate::shared::rollover::RolloverJob for AtmSessionExpiryJob {
             const CANDIDATES: SqlStmt =
                 sql_stmt!("atm.expiry_candidates", "sql/expiry_candidates.sql");
             const EXPIRE: SqlStmt = sql_stmt!("atm.expire_session", "sql/expire_session.sql");
+            const EXPIRY_BATCH_SIZE: usize = 200;
             let rows: Vec<(String, String, At, String, String)> =
                 db.run(move |s| s.query_all(&CANDIDATES, &[&at])).await?;
-            for (id, account, expires, start_request, terminal_id) in rows {
+            for chunk in rows.chunks(EXPIRY_BATCH_SIZE) {
+                let batch = chunk.to_vec();
                 db.run(move |s| {
-                    if s.execute(&EXPIRE, &[&id])? == 1 {
-                        let terminal: Terminal = s.query_row(&TERMINAL, &[&terminal_id])?;
-                        let e = Event::system("atm.session_ended", at, "completed")
-                            .account(&account)
-                            .session(&id)
-                            .payload(json!({
-                                "terminal_id": terminal.0, "region": terminal.1,
-                                "latitude": terminal.2, "longitude": terminal.3,
-                                "account_no": account, "request_id": null,
-                                "reason": "expired", "session_id": id,
-                                "start_request_id": start_request,
-                                "ended_at": expires.to_rfc3339()
-                            }));
-                        outbox::record(s, &e)?;
+                    let mut terminals: std::collections::HashMap<String, Terminal> =
+                        std::collections::HashMap::new();
+                    for (id, account, expires, start_request, terminal_id) in batch {
+                        if s.execute(&EXPIRE, &[&id])? == 1 {
+                            let terminal = match terminals.get(&terminal_id) {
+                                Some(cached) => cached.clone(),
+                                None => {
+                                    let fetched: Terminal =
+                                        s.query_row(&TERMINAL, &[&terminal_id])?;
+                                    terminals.insert(terminal_id.clone(), fetched.clone());
+                                    fetched
+                                }
+                            };
+                            let e = Event::system("atm.session_ended", at, "completed")
+                                .account(&account)
+                                .session(&id)
+                                .payload(json!({
+                                    "terminal_id": terminal.0, "region": terminal.1,
+                                    "latitude": terminal.2, "longitude": terminal.3,
+                                    "account_no": account, "request_id": null,
+                                    "reason": "expired", "session_id": id,
+                                    "start_request_id": start_request,
+                                    "ended_at": expires.to_rfc3339()
+                                }));
+                            outbox::record(s, &e)?;
+                        }
                     }
                     s.commit()
                 })
