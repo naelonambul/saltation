@@ -306,3 +306,13 @@ async def test_live_wave_skips_expired_normal_wave_without_failing():
         start,
     )
     executor.execute.assert_not_awaited()
+
+
+def test_waves_parallelize_distinct_regional_atm_terminals():
+    ep1 = Episode("normal_atm:2026-01-04:C1", "normal_atm", AT, {"actor": "C1"}, "annual")
+    ep2 = Episode("normal_atm:2026-01-04:C2", "normal_atm", AT, {"actor": "C2"}, "annual")
+    a = Due(AT, ep1, Step("atm_start", "atm_start", "C1", args={"terminal_id": "ATM-KR-11-01"}), False)
+    b = Due(AT, ep2, Step("atm_start", "atm_start", "C2", args={"terminal_id": "ATM-KR-26-01"}), False)
+    c = Due(AT, ep2, Step("atm_start", "atm_start", "C3", args={"terminal_id": "ATM-KR-11-01"}), False)
+    assert list(_waves([a, b], 8)) == [[a, b]]
+    assert list(_waves([a, c], 8)) == [[a], [c]]

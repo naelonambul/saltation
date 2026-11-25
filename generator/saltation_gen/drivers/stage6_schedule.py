@@ -199,14 +199,21 @@ def normal_episodes(
             if (offset * cadence.annual + activity_phase) % year_days < year_days - cadence.annual:
                 continue
             roles = {"actor": customer}
-            minute = 12 * activity_index
             if kind == "normal_transfer":
                 if len(customers) < 2:
                     continue
                 roles["receiver"] = customers[(index + 1) % len(customers)]
-                minute += 3 * lane
-            elif kind == "normal_income":
-                roles["activity"] = profile.income_activity
+                # Spread transfer pairs across the hour on 0-mod-3 minutes while keeping
+                # adjacent ring senders 3 minutes apart so login + 60s transfer never overlap.
+                bucket = stable_number(seed, day.isoformat(), str(index // 2)) % 6
+                minute = bucket * 9 + 3 * lane
+            else:
+                # Spread non-transfer activities across 1/2-mod-3 minutes so a customer's
+                # activities never share a minute with each other or with normal_transfer.
+                slot = stable_number(seed, customer, day.isoformat()) % 9
+                minute = slot * 6 + (1, 2, 4, 5)[(activity_index - 1) % 4]
+                if kind == "normal_income":
+                    roles["activity"] = profile.income_activity
             start = start_of_day + timedelta(hours=cadence.hour, minutes=minute, seconds=phase % 60)
             episodes.append(Episode(f"{kind}:{day}:{customer}", kind, start, roles, "annual"))
 

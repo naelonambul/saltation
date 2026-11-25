@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "stage6-traffic-quality",
+  "kind": "implementation",
+  "title": "Emit Scenario G card.declined, spread normal episode minutes, and distribute normal ATM terminals",
+  "base": {
+    "ref": "main",
+    "commit": "2bb31b8ea31766085ae2a899c21fa68d8ad905b4"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "generator/saltation_gen/drivers/stage6.py",
+    "generator/saltation_gen/drivers/stage6_schedule.py",
+    "generator/saltation_gen/drivers/stage6_steps.py",
+    "generator/saltation_gen/drivers/stage6_execute.py",
+    "generator/saltation_gen/truth/stage6.py",
+    "generator/tests/test_stage6_run.py",
+    "generator/tests/test_stage6_schedule.py",
+    "generator/tests/test_stage6_steps.py",
+    "generator/tests/test_stage6_journal.py",
+    "bank/tests/generator_lifecycle.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:96f9ca895e07cc1a24665cdbbca859c8d41b4bb52ede18af9dce055b2dfcb4cb",
+      "by": "ckh",
+      "at": "2026-11-25T06:17:23Z",
+      "write_scope_sha256": "sha256:f0a3c50a62c835f286010481cb9c7192d4ec517d0517158403524ec6a694e413",
+      "note": "Owner approved updating generator_lifecycle.rs: \uc2b9\uc778"
+    }
+  ]
+}

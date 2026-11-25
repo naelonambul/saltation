@@ -480,3 +480,24 @@ async def test_claim_allows_attaching_live_at_after_backfill_finished(truth):
     third = Stage6Journal(truth, "run", "owner-3")
     with pytest.raises(RecoveryError, match="kind or inputs differ"):
         await third.claim(bad_inputs)
+
+
+async def test_require_success_validates_expected_declined_steps(truth):
+    journal = Stage6Journal(truth, "run", "owner-1")
+    await journal.claim({"seed": 1})
+    prepared = await journal.prepare_batch(
+        [
+            ("G:1", "small_card", {"scenario_class": "G", "persona": "working"}),
+            ("G:1", "declined_card", {"scenario_class": "G", "persona": "working"}),
+        ]
+    )
+    await journal.mark_unconfirmed_wave(list(prepared.values()))
+    await journal.complete_wave(
+        [
+            ("G:1", "small_card", "succeeded", {"decision": "approved"}),
+            ("G:1", "declined_card", "declined", {"decision": "rejected"}),
+        ]
+    )
+    await journal.require_success("G:1", ["small_card", "declined_card"], expected_declined=["declined_card"])
+    with pytest.raises(RecoveryError, match="every scheduled operation"):
+        await journal.require_success("G:1", ["small_card", "declined_card"])

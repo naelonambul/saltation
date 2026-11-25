@@ -336,7 +336,8 @@ fn expected_http(op: &Operation) -> u64 {
         }
         (_, "succeeded") => ("approved", 200),
         ("card" | "atm_withdraw" | "transfer", "declined")
-            if op.episode_kind.starts_with("normal_") =>
+            if op.episode_kind.starts_with("normal_")
+                || (op.episode_kind == "G" && op.operation == "card") =>
         {
             ("rejected", 422)
         }
@@ -676,7 +677,7 @@ fn assert_episode_shapes(episodes: &BTreeMap<&str, Vec<&Operation>>, fixture: &F
                 ("login", 1),
                 ("atm_start", 1),
                 ("atm_withdraw", 1),
-                ("card", 3),
+                ("card", 4),
             ],
             "trip" => &[("login", 2), ("card", 1)],
             "online" => &[("card", 1)],

@@ -26,8 +26,9 @@ def _card(
     *,
     country: str = "US",
     online: bool = False,
+    expect_declined: bool = False,
 ) -> Step:
-    args = {
+    args: dict[str, object] = {
         "amount": amount,
         "currency": "KRW" if country == "KR" else "USD",
         "merchant_name": merchant,
@@ -38,6 +39,8 @@ def _card(
     if not online:
         latitude, longitude = ("37.566500", "126.978000") if country == "KR" else ("40.712800", "-74.006000")
         args.update(latitude=latitude, longitude=longitude)
+    if expect_declined:
+        args["expect_declined"] = True
     return Step(name, "card", actor, offset, args, label=label)
 
 
@@ -159,6 +162,7 @@ def _foreign_card_misuse(actor: str) -> list[Step]:
         _card("small_card", actor, 3_600, 5, "Harbor Market", "G"),
         _card("large_card", actor, 3_780, 20, "Cedar Grocery", "G"),
         _card("online_card", actor, 3_840, 20, "Union Food Hall", "G", online=True),
+        _card("declined_card", actor, 3_900, 50_000, "Metro Luxury Goods", "G", expect_declined=True),
     ]
 
 

@@ -12,7 +12,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from saltation_gen.client.bank import BankClient, new_ulid
 from saltation_gen.config.stage6 import LOOKALIKE_KINDS, ScheduleConfig
 from saltation_gen.drivers.backfill_clock import KST, BackfillClock
-from saltation_gen.drivers.stage6_execute import Stage6Executor
+from saltation_gen.drivers.stage6_execute import (
+    ATM,
+    TERMINAL_BY_REGION,
+    Stage6Executor,
+)
 from saltation_gen.drivers.stage6_schedule import Schedule, build_schedule, normal_amount, normal_episodes
 from saltation_gen.drivers.stage6_seed import seed_world, world_customer_numbers
 from saltation_gen.drivers.stage6_steps import steps
@@ -97,6 +101,9 @@ def _work_for_day(
                 if not step.op.startswith("atm_"):
                     context["region"] = region
                 step = replace(step, context=context)
+            if episode.kind == "normal_atm" and step.op.startswith("atm_"):
+                terminal = TERMINAL_BY_REGION.get(region, ATM)
+                step = replace(step, args=step.args | {"terminal_id": terminal["terminal_id"]})
             if "amount" in step.args:
                 step = replace(step, args=step.args | {"amount": normal_amount(schedule, episode, seed)})
             due.append(
@@ -108,15 +115,12 @@ def _work_for_day(
 def _waves(items: list[Due], workers: int):
     wave = []
     subjects = set()
+    default_terminal = ATM["terminal_id"]
     for item in items:
+        involved = set(item.subjects)
         if item.step.op.startswith("atm_"):
-            if wave:
-                yield wave
-                wave = []
-                subjects = set()
-            yield [item]
-            continue
-        involved = item.subjects
+            terminal_id = item.step.args.get("terminal_id", default_terminal)
+            involved.add(f"atm:{terminal_id}")
         if len(wave) == workers or subjects & involved:
             yield wave
             wave = []
@@ -185,7 +189,12 @@ async def _execute_one(executor: Stage6Executor, journal: Stage6Journal, item: D
     await executor.execute(episode, item.step, now)
     if not item.final or episode.kind.startswith("normal_"):
         return
-    await journal.require_success(episode.id, [step.name for step in steps(episode)])
+    episode_steps = steps(episode)
+    await journal.require_success(
+        episode.id,
+        [step.name for step in episode_steps],
+        expected_declined=[step.name for step in episode_steps if step.args.get("expect_declined")],
+    )
     if episode.kind == "BC":
         for role, customer in episode.roles.items():
             if role.startswith("victim"):
