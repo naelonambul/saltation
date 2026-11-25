@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "id": "stage8-oci-validation-de0d055",
+  "kind": "implementation",
+  "title": "Record post-hardening (de0d055) OCI loadtest and 3-day OWASP backfill validation outcomes",
+  "base": {
+    "ref": "main",
+    "commit": "de0d055f25689fd7e2566c2823540c3f5612f3f7"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:bb4eea805cb0f02198053828490e4ada191500021aae632d4cd9b9fa580d4734"
+  },
+  "write_scope": [
+    "docs/stage8-oci-sizing-report.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:c25d71996f6e919808763bf52d3fdb83a4b6809d2e6d2b7ced7e960e2d7f0160",
+      "by": "ckh",
+      "at": "2026-11-25T23:54:39Z",
+      "write_scope_sha256": "sha256:8ec420aab41f0d93673be340fb54bcd6e2938995d07545ad0964ed30cf568f98"
+    }
+  ]
+}

@@ -118,10 +118,35 @@ Two complete 3-day Stage 6 backfill slices (`20,000` customers, `amplification=2
   - `oracle` (`1.05 vCPU / 6 GiB`): avg `10.8%`, p95 `51.2%`, cgroup throttled `0.4%`, RAM `4.29 GiB`.
 - **365-day backfill extrapolation under OWASP `19456/2/1`:** Customer seeding is a one-time cost (`~30 min`). Because the 3-day slice compresses all `3,400` annual scenarios into 3 days (raising scenario overhead relative to normal traffic), a full 365-day backfill on Candidate A with OWASP `19456/2/1` is projected at **`~45–55 hours`** (~2 days) of unattended wall time at `~45–57 ops/s` sustained normal-dominant throughput.
 
-## 6. Recommended Follow-Up Changes
+## 6. Post-Hardening OCI Validation (`main` @ `de0d055`, PR #52–#60)
 
-No runtime code or `compose.yml` defaults are modified by this documentation change. Remaining follow-up items:
+Following the PR #52–#60 hardening sequence (`Argon2Pool` + `ClockCache` in PR #52, Candidate A Compose/storage guardrails in PR #53, Stage 6 365-day resilience & traffic quality in PR #54/#56, rollover batching in PR #55, `bank` P1 hardening & monetary outcome unification in PR #57/#59/#60, and F-27a daily midnight maintenance window + F-32 normal mobile session reuse + N-4/N-6 alignment in PR #58), two end-to-end validation runs were executed on the primary OCI Ampere A1 host (`4.00 vCPU / 13.96 GB` Candidate A budget, OWASP `19456/2/1`, `SALTATION_ARGON2_CONCURRENCY=3`, `SALTATION_MAINTENANCE_MINUTES=30`):
 
-1. ~~**Stage 6 backfill journal & wave optimization (`generator/`):**~~ **Completed in PR #46 (`ab742da`)** and validated in Section 5 (`2.3x` exploratory speedup; zero errors/mismatches under OWASP `19456/2/1`).
-2. **N-4 vs N-6 alignment:** decide whether to introduce a versioned normal mobile-visit session reuse model in `generator/` (keeping FDS guardrails intact for Scenarios E and `purchase` while lowering auth share so OWASP `19456/2/1` approaches `200 ops/s`) **or** align N-4's sustained ops/s target with the verified OWASP `19456/2/1` 4-vCPU envelope (`~45–57 ops/s` sustained / `~2 days` for 365-day backfill).
-3. **Static Compose & storage guardrails:** apply validated Candidate A CPU/RAM limits to `infra/compose/compose.yml`, add Prometheus `--storage.tsdb.retention.size=2GB`, and cap `saltation_data01.dbf` at `MAXSIZE 32G` in `infra/oracle/setup/01_saltation.sql` before running formal `loadtest --qualify all` and the 365-day backfill + 24-hour live qualification.
+### 6.1 Transfer Load Test (`saltation-loadtest all`, Exploratory Run `20261125T124225Z-f5d30baecaf7`)
+
+Per the repository's OTN benchmark-disclosure policy (`REVIEW.md`), raw latency and wait measurements stay in the ignored `.evidence/loadtest/` directory; only pass/fail outcomes and stability observations are recorded here:
+
+- **N-1 (50 TPS × 10 min random transfers):** met all latency, lock-wait, and success-rate thresholds (`100.000%` non-business success rate, `0` deadlock retries, `0` daily-close mismatches).
+- **N-2 (50 TPS × 5 min hot account, 219 senders):** met all latency and success-rate thresholds (`100.000%` non-business success rate).
+- **N-3 (25 / 50 / 100 / 200 TPS × 3 min stepped load):** met all thresholds across every step (`100.00%` non-business success rate, `0` deadlock retries, `0` daily-close mismatches, `limiting_resource: none_saturated` through the 200 TPS step).
+- **Container & co-tenant stability (N-7 / N-8):** all 8 Saltation containers and `cloudflared-oci-vpc` remained `healthy` with `0` restarts and `0` OOM events.
+
+### 6.2 Stage 6 3-Day OWASP `19456/2/1` Backfill (`oci-3d-de0d055`)
+
+A clean-volume 3-day Stage 6 backfill (`20,000` customers, `amplification=20`, `workers=8`, `first=2025-01-02`, `days=3`) completed with zero errors:
+
+- **Total wall time (20,000-customer seeding + 3-day backfill):** `49m 56s` (`2,996 s`). Compared to the PR #52 `46m 08s` slice, the `+3m 48s` delta reflects PR #56's hour-wide minute spreading (removing 1-minute burst concentration, `wave_offset: 11,285`) and the `200` new Scenario G `declined_card` operations; PR #58's `normal_visit` 75% session-reuse savings (~10% annual request reduction) take full effect over a 365-day run where normal traffic dominates.
+- **Operations & scenario conformance:** `75,798` succeeded + `200` declined (`200/200` Scenario G `card.declined` generated), `0` unresolved, `0` prepared, `0` daily-close mismatches (`bank_daily_close_mismatches=0`), and `0` undelivered outbox events (`bank_outbox_undelivered=0`). Every annual scenario quota (`A: 200, B: 200, C: 100, D: 100, E: 300, F: 300, G: 200, lookalike: 2,000`) reached 100%.
+- **Observed container memory & health at completion:**
+  - `saltation-bank-1`: `79.0 MiB / 1 GiB` (`healthy`, `0` restarts)
+  - `saltation-mongo-1`: `346.3 MiB / 3 GiB` (`healthy`, `0` restarts)
+  - `saltation-grafana-1`: `105.2 MiB / 256 MiB` (`healthy`, `0` restarts)
+  - `saltation-oracle-1`: `4.27 GiB / 6 GiB` (`healthy`, `0` restarts)
+  - `cloudflared-oci-vpc`: `29.5 MiB / 128 MiB` (`healthy`, `0` restarts)
+
+## 7. Remaining Follow-Up Milestones
+
+1. ~~**Stage 6 backfill journal & wave optimization (`generator/`):**~~ **Completed in PR #46 (`ab742da`)** and validated in Section 5.
+2. ~~**N-4 vs N-6 alignment & normal mobile session reuse:**~~ **Completed in PR #58 (`0c02df4`)** — F-32 `normal_visit` (75%/25% mix), F-27a daily midnight maintenance window, and N-4/N-6 alignment (`>= 55 ops/s`, `<= 48h` under OWASP `19456/2/1` on 4 vCPU).
+3. ~~**Static Compose & storage guardrails:**~~ **Completed in PR #53 (`1f335b2`)** and PR #59 (`6995d3b`) — Candidate A CPU/RAM limits in `infra/compose/compose.yml`, Prometheus `2GB` TSDB cap, and `MAXSIZE 30G` in both `01_saltation.sql` and `oracle-init.sql`.
+4. **Formal qualification & Stage 7 Web UI:** execute formal `saltation-loadtest all --qualify --revision <sha>`, the full 365-day backfill + 24-hour live run on OCI, and complete Stage 7 Web UI (`web/apps/admin` F-39 and remaining `web/apps/mobile` F-38 screens).
