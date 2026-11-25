@@ -286,4 +286,16 @@ mod tests {
         msg.as_object_mut().unwrap().remove("longitude");
         assert!(validate(&msg).is_ok());
     }
+
+    #[test]
+    fn bank_countries_json_matches_contracts_copy() {
+        let dir = std::env::var("CONTRACTS_DIR").unwrap_or_else(|_| "../contracts".into());
+        let contract = std::fs::read_to_string(format!("{dir}/codes/countries.json"))
+            .expect("contracts/codes/countries.json");
+        assert_eq!(
+            contract,
+            include_str!("countries.json"),
+            "bank/src/features/cards/countries.json drifted from contracts/codes/countries.json"
+        );
+    }
 }
