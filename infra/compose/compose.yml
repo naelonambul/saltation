@@ -171,7 +171,7 @@ services:
     depends_on: [loki]
     deploy:
       resources:
-        limits: { cpus: "0.10", memory: 256m }
+        limits: { cpus: "0.05", memory: 256m }
     logging: *logging
 
   loki:
@@ -223,7 +223,6 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
       GF_DATABASE_WAL: "true"
-      GF_DATABASE_MAX_OPEN_CONN: "1"
     volumes:
       - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -236,9 +235,10 @@ services:
       interval: 10s
       timeout: 3s
       retries: 12
+      start_period: 120s
     deploy:
       resources:
-        limits: { cpus: "0.05", memory: 256m }
+        limits: { cpus: "0.10", memory: 256m }
     logging: *logging
 
 networks:
