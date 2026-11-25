@@ -19,7 +19,7 @@ Fix the three Stage 6 traffic-quality and scenario-coverage issues identified as
   - Pass `expected_declined` step names from `_execute_one()` to `journal.require_success()`.
 - `generator/saltation_gen/truth/stage6.py`: extend `require_success(episode_id, names, *, expected_declined=None)` to verify `succeeded` steps are `"succeeded"` and `expected_declined` steps are `"declined"`.
 - `generator/saltation_gen/drivers/stage6_schedule.py`: spread `normal_episodes()` minutes deterministically across the hour while preserving `normal_transfer` ring-neighbor lane spacing.
-- `generator/tests/test_stage6_schedule.py`, `generator/tests/test_stage6_steps.py`, `generator/tests/test_stage6_run.py`, `generator/tests/test_stage6_journal.py`: unit tests verifying Scenario G `declined_card` (7 steps), hour-wide minute spread, regional ATM terminal wave concurrency vs same-terminal serialization, and `require_success` with `expected_declined`.
+- `generator/tests/test_stage6_schedule.py`, `generator/tests/test_stage6_steps.py`, `generator/tests/test_stage6_run.py`, `generator/tests/test_stage6_journal.py`, `bank/tests/generator_lifecycle.rs`: unit and lifecycle-verifier tests verifying Scenario G `declined_card` (7 steps, `state == "declined"` / HTTP 422), hour-wide minute spread, regional ATM terminal wave concurrency vs same-terminal serialization, and `require_success` with `expected_declined`.
 
 ## Order of work
 

@@ -336,7 +336,8 @@ fn expected_http(op: &Operation) -> u64 {
         }
         (_, "succeeded") => ("approved", 200),
         ("card" | "atm_withdraw" | "transfer", "declined")
-            if op.episode_kind.starts_with("normal_") =>
+            if op.episode_kind.starts_with("normal_")
+                || (op.episode_kind == "G" && op.operation == "card") =>
         {
             ("rejected", 422)
         }

@@ -20,16 +20,17 @@
     "generator/tests/test_stage6_run.py",
     "generator/tests/test_stage6_schedule.py",
     "generator/tests/test_stage6_steps.py",
-    "generator/tests/test_stage6_journal.py"
+    "generator/tests/test_stage6_journal.py",
+    "bank/tests/generator_lifecycle.rs"
   ],
   "approvals": [
     {
       "artifact": "plan.md",
-      "sha256": "sha256:a0ac69a32571319c5082dab0c080fc314d1fbcac4be742441397fcba45c888af",
+      "sha256": "sha256:96f9ca895e07cc1a24665cdbbca859c8d41b4bb52ede18af9dce055b2dfcb4cb",
       "by": "ckh",
-      "at": "2026-11-25T06:02:00Z",
-      "write_scope_sha256": "sha256:e69197f156e294e1a0cb1642caac3c2aacd0b383cf17e04773cc7422ed961040",
-      "note": "Owner approved adding test_stage6_steps.py to write_scope: \uc2b9\uc778"
+      "at": "2026-11-25T06:17:23Z",
+      "write_scope_sha256": "sha256:f0a3c50a62c835f286010481cb9c7192d4ec517d0517158403524ec6a694e413",
+      "note": "Owner approved updating generator_lifecycle.rs: \uc2b9\uc778"
     }
   ]
 }
