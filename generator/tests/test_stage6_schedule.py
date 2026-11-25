@@ -91,9 +91,9 @@ def test_default_quota_reservations_and_request_estimate():
     for kind in ("F", "G", "travel", "trip", "online", "new_phone"):
         assert all(set(ep.roles) == {"actor"} for ep in schedule.episodes if ep.kind == kind)
 
-    assert estimate_normal_requests(schedule, config) == pytest.approx(9_500_000, rel=0.10)
+    assert estimate_normal_requests(schedule, config) == pytest.approx(8_550_000, rel=0.05)
     eligible_estimate = estimate_normal_requests(schedule, config, include_reserved=False)
-    assert eligible_estimate == pytest.approx(9_500_000, rel=0.10)
+    assert eligible_estimate == pytest.approx(8_550_000, rel=0.05)
     assert eligible_estimate < estimate_normal_requests(schedule, config)
 
 
@@ -121,7 +121,8 @@ def test_reference_counts_and_override_determinism():
     assert sorted(len(ep.roles) for ep in short.episodes) == [2, 3]
 
 
-def test_d_business_dates_and_cutover_boundary():
+def test_d_business_dates_and_cutover_boundary(monkeypatch):
+    monkeypatch.setenv("SALTATION_MAINTENANCE_MINUTES", "0")
     config = ScheduleConfig(annual={"D": 1}, live={"D": 2, "G": 1})
     cutover = datetime(2024, 1, 3, 15, tzinfo=UTC)
     schedule = build_schedule(config, SEED, FIRST, 3, cutover, roster(9))
@@ -158,7 +159,8 @@ def test_annual_longest_episode_has_room_before_cutover():
         assert all(start + timedelta(seconds=3_840) < cutover for start in starts)
 
 
-def test_live_g_can_cross_midnight_and_d_only_override_is_supported():
+def test_live_g_can_cross_midnight_and_d_only_override_is_supported(monkeypatch):
+    monkeypatch.setenv("SALTATION_MAINTENANCE_MINUTES", "0")
     cutover = datetime(2024, 1, 3, 23, 59, 45, tzinfo=KST)
     g_only = ScheduleConfig(annual={}, live={"G": 1})
     (g,) = build_schedule(g_only, SEED, FIRST, 2, cutover, roster(1)).episodes
@@ -233,7 +235,7 @@ def test_normal_cadences_by_kst_calendar_year_and_request_counts():
             profile = PROFILES[schedule.profiles[actor]]
             assert episode.start.hour == profile.cadence(episode.kind).hour
             subjects = {actor}
-            if episode.kind == "normal_transfer":
+            if episode.kind in {"normal_transfer", "normal_visit"}:
                 assert episode.roles["receiver"] != actor
                 subjects.add(episode.roles["receiver"])
             elif episode.kind == "normal_income":
@@ -252,7 +254,13 @@ def test_normal_cadences_by_kst_calendar_year_and_request_counts():
     for year in (2024, 2025):
         for actor, name in schedule.profiles.items():
             if actor not in schedule.reserved:
-                for kind in REQUESTS_PER_EPISODE:
+                transfer_total = (
+                    customer_year[year, actor, "normal_transfer"] + customer_year[year, actor, "normal_visit"]
+                )
+                assert transfer_total == PROFILES[name].transfer.annual
+                assert customer_year[year, actor, "normal_visit"] > 0
+                assert customer_year[year, actor, "normal_transfer"] > 0
+                for kind in ("normal_income", "normal_card", "normal_atm", "normal_login_balance"):
                     assert customer_year[year, actor, kind] == PROFILES[name].cadence(kind).annual
                 assert customer_year[year, actor, "normal_card"] <= NORMAL_CARD_ANNUAL_CAP
 
@@ -281,7 +289,7 @@ def test_amount_anchors_and_profile_contexts():
         contexts = {profile.context(SEED, "subject", str(i)) for i in range(100)}
         assert {device for device, _ in contexts} == {f"dev-subject-{device}" for device in profile.devices}
         assert len({region for _, region in contexts}) == profile.location_count
-        assert 470 <= PROFILES[name].annual_requests <= 480
+        assert 420 <= PROFILES[name].annual_requests <= 440
 
 
 def test_normal_episodes_spread_across_hour_and_scenario_g_includes_declined_card():
@@ -303,3 +311,25 @@ def test_normal_episodes_spread_across_hour_and_scenario_g_includes_declined_car
     assert "declined_card" in g_steps
     assert g_steps["declined_card"].args.get("expect_declined") is True
     assert g_steps["declined_card"].args["amount"] == 50_000
+
+
+def test_live_monetary_steps_shift_out_of_maintenance_window(monkeypatch):
+    from saltation_gen.drivers.stage6_schedule import MONETARY_OPS, in_maintenance_window
+    from saltation_gen.drivers.stage6_steps import steps
+
+    monkeypatch.setenv("SALTATION_MAINTENANCE_MINUTES", "30")
+    config = ScheduleConfig(annual={}, live={"A": 1, "B": 1, "C": 1, "D": 1, "E": 1, "G": 1, "lookalike": 2})
+    for cutover in (
+        datetime(2024, 1, 5, 0, 5, tzinfo=KST),
+        datetime(2024, 1, 5, 23, 0, tzinfo=KST),
+    ):
+        schedule = build_schedule(config, SEED, FIRST, 5, cutover, roster(40))
+        for episode in schedule.episodes:
+            if episode.window != "live":
+                continue
+            for action in steps(episode):
+                if action.op in MONETARY_OPS:
+                    at = episode.start + timedelta(seconds=action.offset)
+                    assert not in_maintenance_window(at, 30), (
+                        f"{episode.id}/{action.name} landed in maintenance: {at}"
+                    )

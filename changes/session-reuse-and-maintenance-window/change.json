@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "id": "session-reuse-and-maintenance-window",
+  "kind": "behavior",
+  "title": "Add normal mobile session reuse, align N-4 with OWASP 4 vCPU budget, and add daily 00:00-00:30 KST settlement maintenance window",
+  "base": {
+    "ref": "main",
+    "commit": "b29fcab037f07acf1ca24badfbcf64fef697beca"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "spec.md",
+    "bank/src/app.rs",
+    "bank/src/main.rs",
+    "bank/src/shared/context/mod.rs",
+    "bank/src/shared/outcome/mod.rs",
+    "bank/tests/common/mod.rs",
+    "bank/tests/backfill.rs",
+    "bank/tests/listeners.rs",
+    "bank/tests/driver_bench.rs",
+    "generator/saltation_gen/client/bank.py",
+    "generator/saltation_gen/personas/profiles.py",
+    "generator/saltation_gen/drivers/stage6_steps.py",
+    "generator/saltation_gen/drivers/stage6_schedule.py",
+    "generator/saltation_gen/drivers/stage6.py",
+    "generator/tests/test_stage6_schedule.py",
+    "generator/tests/test_stage6_steps.py",
+    "generator/tests/test_card_wire.py",
+    "loadtest/saltation_loadtest/cli.py",
+    "loadtest/tests/test_cli.py",
+    "scripts/dev/it-oracle.sh",
+    "infra/compose/compose.yml",
+    "infra/compose/.env.example"
+  ],
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:bdb4286f6c406765bbf2e78a2eb92e37d9d6f351cc1ba07e2361782d0830b5ce",
+      "by": "ckh",
+      "at": "2026-11-25T08:04:54Z"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:e16d2da6e20808a8db4f11d43579e10e9f21e1fdbfd9e704987e561becea0838",
+      "by": "ckh",
+      "at": "2026-11-25T08:07:01Z",
+      "write_scope_sha256": "sha256:10c64f86de1caff8ac2fb973cf20b3743b87c64880548c6075324a56de1e82a7"
+    }
+  ]
+}

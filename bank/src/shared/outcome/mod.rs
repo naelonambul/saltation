@@ -129,6 +129,10 @@ impl Recorder {
         }
     }
 
+    pub fn money_operation(&self) -> Option<(&'static str, &'static str)> {
+        money_operation(&self.method, &self.endpoint)
+    }
+
     pub fn unrecorded(&self) {
         if !self.excluded {
             metrics::counter!("bank_request_outcomes_unrecorded_total", "listener" => self.ctx.listener.as_str()).increment(1);

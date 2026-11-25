@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -67,6 +67,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", default="25,50,100,200", help="Comma-separated TPS steps for n3")
     p.add_argument("command", choices=["n1", "n2", "n3", "all"], help="Scenario to execute")
     return p
+
+
+KST = timezone(timedelta(hours=9))
+
+
+def maintenance_window_conflict(
+    clock_state: dict | None, duration_seconds: float, maintenance_minutes: int
+) -> str | None:
+    if not clock_state or maintenance_minutes <= 0:
+        return None
+    raw_time = clock_state.get("business_time")
+    if not isinstance(raw_time, str):
+        return None
+    start = datetime.fromisoformat(raw_time).astimezone(KST)
+    mode = str(clock_state.get("mode", "")).upper()
+
+    def in_window(dt: datetime) -> bool:
+        return dt.hour == 0 and dt.minute < maintenance_minutes
+
+    if in_window(start):
+        return (
+            f"bank business_time {start.isoformat()} is inside the daily maintenance window "
+            f"(00:00-00:{maintenance_minutes:02d} KST)"
+        )
+    if mode == "LIVE":
+        end = start + timedelta(seconds=duration_seconds)
+        if in_window(end) or end.date() > start.date():
+            return (
+                f"LIVE loadtest window {start.isoformat()}..{end.isoformat()} overlaps the daily "
+                f"maintenance window (00:00-00:{maintenance_minutes:02d} KST)"
+            )
+    return None
 
 
 def parse_steps(raw: str) -> tuple[int, ...]:
@@ -168,6 +200,34 @@ async def _run(args: argparse.Namespace) -> int:
 
         if not await client.healthz():
             raise RuntimeError("bank health check failed")
+        maint_minutes = int(os.environ.get("SALTATION_MAINTENANCE_MINUTES", "30").strip() or "30")
+        clock_state = None
+        if maint_minutes > 0:
+            clock_getter = getattr(client, "clock_state", None)
+            if callable(clock_getter):
+                clock_state = await clock_getter()
+            elif hasattr(client, "_http"):
+                try:
+                    resp = await client._http.get("/internal/v1/clock")
+                    if resp.status_code == 200:
+                        clock_state = resp.json()
+                except Exception:
+                    clock_state = None
+            planned_secs = sum(
+                (args.duration if args.duration is not None else (10.0 if args.smoke else default_d))
+                * (len(steps) if name == "n3" else 1)
+                for name, default_d in (("n1", 600.0), ("n2", 300.0), ("n3", N3_STEP_SECONDS))
+                if args.command in (name, "all")
+            )
+            conflict = maintenance_window_conflict(clock_state, planned_secs, maint_minutes)
+            if conflict:
+                return write_result(
+                    report_dir,
+                    run_id,
+                    "INCOMPLETE",
+                    errors=[conflict],
+                    revision=args.revision,
+                )
         run_tag = int(time.time()) % 900
         actor_count = max(args.senders, 201 if args.command in ("n2", "all") else 20)
         actors = await prepare_actors(client, count=actor_count, run_tag=run_tag)

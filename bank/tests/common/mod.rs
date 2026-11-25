@@ -67,6 +67,7 @@ pub async fn state() -> AppState {
         db,
         clock,
         limits: Default::default(),
+        maintenance_minutes: 0,
     }
 }
 

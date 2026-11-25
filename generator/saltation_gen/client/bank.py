@@ -109,7 +109,7 @@ class BankClient:
         max_attempts = 1 if (503 in accept or path.startswith("/internal/v1/seed/")) else self._retry_503 + 1
         for attempt in range(max_attempts):
             res = await self._http.request(method, path, **req_kwargs)
-            if res.status_code == 503 and attempt + 1 < max_attempts:
+            if res.status_code == 503 and "retry-after" not in res.headers and attempt + 1 < max_attempts:
                 await asyncio.sleep(self._retry_backoff * (2**attempt))
                 continue
             body = res.json() if res.content else {}
