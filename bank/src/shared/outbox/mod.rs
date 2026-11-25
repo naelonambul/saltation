@@ -158,6 +158,25 @@ pub(crate) fn session_device(session: &mut Session, id: &str) -> Result<Option<S
         .flatten())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertFailure {
+    TablespaceFull,
+    Contended,
+    Unexpected,
+}
+
+fn classify_insert_error(ora_code: Option<i32>, is_busy: bool) -> InsertFailure {
+    if matches!(ora_code, Some(1653 | 1654 | 1691)) {
+        InsertFailure::TablespaceFull
+    } else if is_busy || matches!(ora_code, Some(60 | 2290 | 30006)) {
+        // ORA-02290 on OUTBOX is used by fail-closed audit-refusal check constraints
+        // (event_json is always serialized by serde_json::to_string).
+        InsertFailure::Contended
+    } else {
+        InsertFailure::Unexpected
+    }
+}
+
 /// Inserts the event into `OUTBOX` in the caller's transaction.
 pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
     let mut event = event.clone();
@@ -185,8 +204,36 @@ pub fn record(session: &mut Session, event: &Event) -> Result<(), DbError> {
     let json =
         serde_json::to_string(&event).map_err(|e| DbError::Config(format!("event JSON: {e}")))?;
     if let Err(error) = session.execute(&INSERT_EVENT, &[&event.event_id, &json]) {
-        tracing::warn!(error = %error, request_id = ?event.request_id, event_type = event.event_type, "event insert failed");
-        return Err(DbError::Busy);
+        match classify_insert_error(error.ora_code(), matches!(error, DbError::Busy)) {
+            InsertFailure::TablespaceFull => {
+                metrics::counter!("bank_outbox_full_total").increment(1);
+                tracing::error!(
+                    error = %error,
+                    request_id = ?event.request_id,
+                    event_type = event.event_type,
+                    "outbox tablespace full"
+                );
+                return Err(DbError::Busy);
+            }
+            InsertFailure::Contended => {
+                tracing::warn!(
+                    error = %error,
+                    request_id = ?event.request_id,
+                    event_type = event.event_type,
+                    "event insert contended"
+                );
+                return Err(DbError::Busy);
+            }
+            InsertFailure::Unexpected => {
+                tracing::error!(
+                    error = %error,
+                    request_id = ?event.request_id,
+                    event_type = event.event_type,
+                    "event insert failed"
+                );
+                return Err(error);
+            }
+        }
     }
     if event.event_type == "request.completed" {
         session.note_completion();
@@ -236,5 +283,40 @@ mod tests {
         let a = next_event_id();
         let b = next_event_id();
         assert!(b > a, "{b} should sort after {a}");
+    }
+
+    #[test]
+    fn classifies_tablespace_full_as_busy_full() {
+        for code in [1653, 1654, 1691] {
+            assert_eq!(
+                classify_insert_error(Some(code), false),
+                InsertFailure::TablespaceFull
+            );
+        }
+    }
+
+    #[test]
+    fn classifies_lock_contention_and_busy_as_contended() {
+        for code in [60, 2290, 30006] {
+            assert_eq!(
+                classify_insert_error(Some(code), false),
+                InsertFailure::Contended
+            );
+        }
+        assert_eq!(classify_insert_error(None, true), InsertFailure::Contended);
+    }
+
+    #[test]
+    fn preserves_unexpected_oracle_errors() {
+        for code in [1, 942, 1400, 12899] {
+            assert_eq!(
+                classify_insert_error(Some(code), false),
+                InsertFailure::Unexpected
+            );
+        }
+        assert_eq!(
+            classify_insert_error(None, false),
+            InsertFailure::Unexpected
+        );
     }
 }

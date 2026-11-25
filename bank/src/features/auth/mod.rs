@@ -74,7 +74,7 @@ type LoginRow = (i64, String, String, i64, Option<DateTime<FixedOffset>>);
 
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
     tracing::error!(request_id = %ctx.request_id, error = %e, "auth database error");
-    if matches!(e, DbError::Busy) {
+    if matches!(e, DbError::Busy) || matches!(e.ora_code(), Some(60 | 30006)) {
         ApiError::busy(ctx)
     } else {
         ApiError::internal(ctx)

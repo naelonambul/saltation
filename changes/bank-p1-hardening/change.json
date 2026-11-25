@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "bank-p1-hardening",
+  "kind": "implementation",
+  "title": "Harden outbox error classification, password reset Argon2id hashing, and FOR UPDATE lock waits",
+  "base": {
+    "ref": "main",
+    "commit": "103872872ae9e45a71c2ef16fb4609a7965d6f33"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "bank/src/shared/outbox/mod.rs",
+    "bank/src/features/transfers/mod.rs",
+    "bank/src/features/password_reset/mod.rs",
+    "bank/src/features/password_reset/sql/select_customer.sql",
+    "bank/src/features/password_reset/sql/select_code.sql",
+    "bank/src/features/auth/mod.rs",
+    "bank/src/features/auth/sql/lock_credential.sql",
+    "bank/src/features/atm/mod.rs",
+    "bank/src/features/atm/sql/lock_terminal.sql",
+    "bank/src/features/atm/sql/lock_credential.sql",
+    "bank/src/features/atm/sql/lock_session.sql",
+    "bank/src/features/atm/sql/open_session.sql"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:5a450916f47ccc45455edf52589a22f03d8db4bbb465d290001cc76ad4dec78e",
+      "by": "ckh",
+      "at": "2026-11-25T06:56:14Z",
+      "write_scope_sha256": "sha256:eec9b57eafe257b41385cded82e7ca439aabbb82251d9a529adeca0f7aeb8e64"
+    }
+  ]
+}

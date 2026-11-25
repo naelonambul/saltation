@@ -41,7 +41,7 @@ pub fn sms_router() -> Router<AppState> {
 }
 fn db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
     tracing::error!(request_id = %ctx.request_id, error = %e, "password reset database error");
-    if matches!(e, DbError::Busy) {
+    if matches!(e, DbError::Busy) || matches!(e.ora_code(), Some(60 | 30006)) {
         ApiError::busy(ctx)
     } else {
         ApiError::internal(ctx)
@@ -171,9 +171,15 @@ async fn confirm(
             (None, false)
         }
     };
-    let password_hash = auth::hash_secret(req.new_password)
-        .await
-        .map_err(|_| ApiError::internal(&ctx))?;
+    let password_hash = if verified {
+        Some(
+            auth::hash_secret(req.new_password)
+                .await
+                .map_err(|_| ApiError::internal(&ctx))?,
+        )
+    } else {
+        None
+    };
     let c = ctx.clone();
     let success = state
         .db
@@ -194,10 +200,7 @@ async fn confirm(
                         "expired"
                     } else if failures >= 5 {
                         "voided"
-                    } else if !verified {
-                        s.execute(&FAIL_CODE, &[&reset])?;
-                        "incorrect"
-                    } else {
+                    } else if let Some(password_hash) = password_hash.as_deref() {
                         s.execute(&CHANGE_PASSWORD, &[&password_hash, &now, id])?;
                         s.execute(&USE_CODE, &[&now, &reset])?;
                         // Tokens before sessions: the order the token check locks them in.
@@ -205,6 +208,9 @@ async fn confirm(
                         s.execute(&END_SESSIONS, &[&now, id])?;
                         success = true;
                         "completed"
+                    } else {
+                        s.execute(&FAIL_CODE, &[&reset])?;
+                        "incorrect"
                     };
                 }
             }
