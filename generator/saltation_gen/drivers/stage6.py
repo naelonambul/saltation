@@ -306,6 +306,7 @@ async def _begin_live(clock: BackfillClock, planned: datetime, stop: asyncio.Eve
 
 
 _BACKFILL_CHUNK_LIMIT = 256
+_NORMAL_PRUNE_KEEP_DAYS = 7
 
 
 async def _advance_backfill(clock: BackfillClock, at: datetime) -> None:
@@ -419,10 +420,14 @@ async def _due(
                     await _advance_backfill(clock, at)
                     now = at
                 else:
+                    skip_wave = False
                     while True:
                         observed = await clock.bank.clock()
                         now = _checked_live_time(observed, live_started)
                         if now >= live_end:
+                            if all(item.episode.kind.startswith("normal_") for item in wave):
+                                skip_wave = True
+                                break
                             raise RecoveryError("live measurement window expired before the next operation")
                         admitted_at = max(at, live_started)
                         if admitted_at <= now:
@@ -431,6 +436,8 @@ async def _due(
                             break
                         if not await _wait(admitted_at, now, stop):
                             return False
+                    if skip_wave:
+                        continue
                 outcomes = await asyncio.gather(
                     *(_execute_one(executor, journal, item, now) for item in wave),
                     return_exceptions=True,
@@ -640,8 +647,12 @@ async def _run_phases(
             if not await _gate(clock, stop):
                 return "stopped"
             await clock.move_clock(boundary, gated=True)
+            completed_day = day
             day += timedelta(days=1)
             await clock.save(backfill_day=day.isoformat())
+            prune_day = completed_day - timedelta(days=_NORMAL_PRUNE_KEEP_DAYS)
+            if prune_day >= run.first:
+                await journal.prune_completed_normal_day(prune_day.isoformat())
         await clock.save(backfill_finished=True)
 
     if phase == "backfill":

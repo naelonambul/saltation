@@ -1,6 +1,7 @@
 """Offline Mongo fakes for the stage 6 journal's single-document writes."""
 
 import asyncio
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -29,9 +30,27 @@ def matches(row, query):
             if actual in expected["$nin"]:
                 return False
             continue
+        elif isinstance(expected, dict) and "$regex" in expected:
+            if not isinstance(actual, str) or re.search(expected["$regex"], actual) is None:
+                return False
+            continue
+        elif isinstance(expected, dict) and "$not" in expected and "$regex" in expected["$not"]:
+            if isinstance(actual, str) and re.search(expected["$not"]["$regex"], actual) is not None:
+                return False
+            continue
         if actual != expected:
             return False
     return True
+
+
+def _apply_set(row, fields):
+    for key, value in fields.items():
+        if "." in key:
+            head, tail = key.split(".", 1)
+            target = row.setdefault(head, {})
+            target[tail] = deepcopy(value)
+        else:
+            row[key] = deepcopy(value)
 
 
 class Collection:
@@ -98,18 +117,30 @@ class Collection:
             matched += res.matched_count
         return SimpleNamespace(matched_count=matched)
 
+    async def delete_many(self, query):
+        self.durable()
+        before = len(self.rows)
+        self.rows = [row for row in self.rows if not matches(row, query)]
+        return SimpleNamespace(deleted_count=before - len(self.rows))
+
     async def aggregate(self, pipeline):
         rows = list(self.rows)
         for stage in pipeline:
             if "$match" in stage:
                 rows = [r for r in rows if matches(r, stage["$match"])]
             elif "$group" in stage:
-                field = stage["$group"]["_id"].lstrip("$")
+                id_spec = stage["$group"]["_id"]
                 counts = {}
                 for r in rows:
-                    key = r.get(field)
+                    if isinstance(id_spec, dict):
+                        key = tuple((k, r.get(v.lstrip("$"))) for k, v in id_spec.items())
+                    else:
+                        key = r.get(id_spec.lstrip("$"))
                     counts[key] = counts.get(key, 0) + 1
-                rows = [{"_id": k, "count": v} for k, v in counts.items()]
+                if isinstance(id_spec, dict):
+                    rows = [{"_id": dict(k), "count": v} for k, v in counts.items()]
+                else:
+                    rows = [{"_id": k, "count": v} for k, v in counts.items()]
 
         async def _iter():
             for row in rows:
@@ -138,7 +169,7 @@ class Collection:
             self.change_before_update = None
         for row in self.rows:
             if matches(row, query):
-                row.update(deepcopy(update.get("$set", {})))
+                _apply_set(row, update.get("$set", {}))
                 for key in update.get("$unset", {}):
                     row.pop(key, None)
                 return SimpleNamespace(matched_count=1)
@@ -373,3 +404,79 @@ async def test_batch_prepare_labels_unconfirmed_and_complete_with_resume(truth):
     # Stale owner is fenced out of mark_unconfirmed_wave.
     with pytest.raises(RecoveryError, match="lease is no longer held"):
         await first.mark_unconfirmed_wave([reloaded[("e2", "step2")]])
+
+
+async def test_prune_completed_normal_day_preserves_totals_and_is_idempotent(truth):
+    journal = Stage6Journal(truth, "run", "owner-1")
+    await journal.claim({"seed": 1})
+    prepared = await journal.prepare_batch(
+        [
+            (
+                "normal_transfer:2026-01-01:C1",
+                "transfer",
+                {"scenario_class": "normal", "persona": "working", "prior_to_live": False},
+            ),
+            (
+                "normal_card:2026-01-01:C2",
+                "card",
+                {"scenario_class": "normal", "persona": "student", "prior_to_live": False},
+            ),
+            (
+                "A:2026-01-01:C3",
+                "transfer",
+                {"scenario_class": "A", "persona": "working", "prior_to_live": False},
+            ),
+        ]
+    )
+    await journal.mark_unconfirmed_wave(list(prepared.values()))
+    await journal.complete_wave(
+        [
+            ("normal_transfer:2026-01-01:C1", "transfer", "succeeded", {"status": 200}),
+            ("normal_card:2026-01-01:C2", "card", "declined", {"status": 200}),
+            ("A:2026-01-01:C3", "transfer", "succeeded", {"status": 200}),
+        ]
+    )
+    before_totals = await journal.totals()
+    before_breakdown = await journal.operation_breakdown()
+
+    deleted = await journal.prune_completed_normal_day("2026-01-01")
+    assert deleted == 2
+    # Scenario A row remains intact in stage6_operations.
+    assert len(truth.runs.database["stage6_operations"].rows) == 1
+    assert await journal.totals() == before_totals
+    assert await journal.operation_breakdown() == before_breakdown
+
+    # Re-running prune (e.g. after crash/resume) is idempotent and never double-counts.
+    assert await journal.prune_completed_normal_day("2026-01-01") == 0
+    assert await journal.totals() == before_totals
+    assert await journal.operation_breakdown() == before_breakdown
+
+
+async def test_claim_allows_attaching_live_at_after_backfill_finished(truth):
+    base_inputs = {
+        "version": 1,
+        "seed": 7,
+        "config": {"population": 20},
+        "run": {"first": "2026-01-01", "days": 3, "live_at": None},
+        "backfill_end": "2026-01-04T00:00:00+09:00",
+    }
+    first = Stage6Journal(truth, "run", "owner-1")
+    await first.claim(base_inputs)
+    await first.save_progress({"backfill_finished": True})
+    await first.finish({"status": "completed"})
+    await first.release()
+
+    live_inputs = deepcopy(base_inputs)
+    live_inputs["run"]["live_at"] = "2026-01-06T10:00:00+09:00"
+    second = Stage6Journal(truth, "run", "owner-2")
+    claimed = await second.claim(live_inputs)
+    assert claimed["inputs"]["run"]["live_at"] == "2026-01-06T10:00:00+09:00"
+    assert not claimed.get("completed")
+
+    # Changing non-live_at fields is still rejected.
+    bad_inputs = deepcopy(live_inputs)
+    bad_inputs["seed"] = 8
+    await second.release()
+    third = Stage6Journal(truth, "run", "owner-3")
+    with pytest.raises(RecoveryError, match="kind or inputs differ"):
+        await third.claim(bad_inputs)
