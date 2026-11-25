@@ -58,6 +58,7 @@ def _avoid_maintenance(start: datetime, actions: list, maint: int) -> datetime:
         start += (window_end - earliest) + timedelta(seconds=1)
     return start
 
+
 EXTRA_ROLE = {"A": "receiver", "D": "second", "E": "receiver", "purchase": "receiver", "household": "second"}
 
 

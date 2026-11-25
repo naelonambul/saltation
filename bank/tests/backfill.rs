@@ -1041,6 +1041,8 @@ async fn daily_maintenance_window(api: &Api) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let sender_acct = format!("998{}", common::unique_digits(11));
+    let recv_acct = format!("998{}", common::unique_digits(11));
     let (status, body) = call(
         &maint_gen,
         "POST",
@@ -1048,8 +1050,8 @@ async fn daily_maintenance_window(api: &Api) {
         &new_id(),
         None,
         Some(json!({"accounts": [
-            {"customer_no": sender_no, "balance": 1_000_000},
-            {"customer_no": recv_no, "balance": 0},
+            {"customer_no": sender_no, "atm_pin": common::TEST_ATM_PIN, "account_no": sender_acct, "opening_balance": 1_000_000},
+            {"customer_no": recv_no, "atm_pin": common::TEST_ATM_PIN, "account_no": recv_acct, "opening_balance": 0},
         ]})),
     )
     .await;
@@ -1057,10 +1059,6 @@ async fn daily_maintenance_window(api: &Api) {
     let sender_fin = body["accounts"][0]["fintech_use_num"]
         .as_str()
         .expect("sender fin")
-        .to_owned();
-    let recv_acct = body["accounts"][1]["account_no"]
-        .as_str()
-        .expect("recv acct")
         .to_owned();
     let (status, login_body) = call(
         &maint_public,
@@ -1078,18 +1076,19 @@ async fn daily_maintenance_window(api: &Api) {
         .to_owned();
 
     let tran_id = format!("M000000001U{}", common::unique_digits(9));
+    let tran_dtime = midnight.format("%Y%m%d%H%M%S").to_string();
     let transfer_body = json!({
         "bank_tran_id": tran_id,
         "fintech_use_num": sender_fin,
         "dps_print_content": "정산점검테스트",
         "wd_print_content": "정산점검테스트",
         "tran_amt": "10000",
-        "tran_dtime": "20260101000000",
+        "tran_dtime": tran_dtime,
         "req_client_name": "테스트",
         "req_client_num": "1",
         "transfer_purpose": "TR",
         "recv_client_name": "수취인",
-        "recv_client_bank_code": "099",
+        "recv_client_bank_code": "998",
         "recv_client_account_num": recv_acct,
     });
 
