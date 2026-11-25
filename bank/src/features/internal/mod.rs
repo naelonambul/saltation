@@ -139,13 +139,25 @@ async fn seed_customers(
     if req.customers.iter().any(|c| c.name.chars().count() > 50) {
         return Err(bad_request(&ctx, "name must be at most 50 characters"));
     }
-    let mut rows = Vec::with_capacity(req.customers.len());
-    for c in req.customers {
-        let hash = auth::hash_secret(c.password.clone())
-            .await
-            .map_err(|_| ApiError::internal(&ctx))?;
-        rows.push((ci_hash(&c), hash, c));
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, c) in req.customers.into_iter().enumerate() {
+        set.spawn(async move {
+            let hash = auth::hash_secret(c.password.clone()).await?;
+            Ok::<_, anyhow::Error>((idx, ci_hash(&c), hash, c))
+        });
     }
+    let mut indexed = Vec::with_capacity(set.len());
+    while let Some(joined) = set.join_next().await {
+        let item = joined
+            .map_err(|_| ApiError::internal(&ctx))?
+            .map_err(|_| ApiError::internal(&ctx))?;
+        indexed.push(item);
+    }
+    indexed.sort_by_key(|(idx, _, _, _)| *idx);
+    let rows: Vec<_> = indexed
+        .into_iter()
+        .map(|(_, ci, hash, c)| (ci, hash, c))
+        .collect();
     let created = rows.len();
     state
         .db
@@ -217,13 +229,22 @@ async fn seed_accounts(
     {
         return Err(bad_request(&ctx, "atm_pin must be exactly 4 digits"));
     }
-    let mut accounts = Vec::with_capacity(req.accounts.len());
-    for a in req.accounts {
-        let hash = auth::hash_secret(a.atm_pin.clone())
-            .await
-            .map_err(|_| ApiError::internal(&ctx))?;
-        accounts.push((a, hash));
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, a) in req.accounts.into_iter().enumerate() {
+        set.spawn(async move {
+            let hash = auth::hash_secret(a.atm_pin.clone()).await?;
+            Ok::<_, anyhow::Error>((idx, a, hash))
+        });
     }
+    let mut indexed = Vec::with_capacity(set.len());
+    while let Some(joined) = set.join_next().await {
+        let item = joined
+            .map_err(|_| ApiError::internal(&ctx))?
+            .map_err(|_| ApiError::internal(&ctx))?;
+        indexed.push(item);
+    }
+    indexed.sort_by_key(|(idx, _, _)| *idx);
+    let accounts: Vec<_> = indexed.into_iter().map(|(_, a, hash)| (a, hash)).collect();
     let created = state
         .db
         .run_in(&stats, move |s| {
