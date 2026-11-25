@@ -133,26 +133,27 @@ enum Attempt {
 fn previous(s: &mut Session, p: &Payment, key: &str, hash: &str) -> Result<Attempt, DbError> {
     s.rollback()?;
     let saved: Option<(String, String)> = s.query_opt(&STORED, &[&p.scope, &key])?;
-    if let Some((saved_hash, decision)) = saved
-        && saved_hash == hash
-        && !outcome::claimed_elsewhere(s, &p.ctx.request_id, &p.scope, key)?
-    {
-        let decision = serde_json::from_str(&decision)
-            .map_err(|e| DbError::Config(format!("stored card decision: {e}")))?;
-        return Ok(Attempt::Replay(decision));
+    let claimed = outcome::claimed_elsewhere(s, &p.ctx.request_id, &p.scope, key)?;
+    match outcome::resolve_stored(claimed, saved, hash) {
+        outcome::StoredResolution::Replay(decision) => {
+            let decision = serde_json::from_str(&decision)
+                .map_err(|e| DbError::Config(format!("stored card decision: {e}")))?;
+            Ok(Attempt::Replay(decision))
+        }
+        outcome::StoredResolution::Conflict => {
+            outcome::conflict(
+                s,
+                &p.ctx,
+                p.now,
+                REQUEST_TYPE,
+                CHANNEL,
+                key,
+                (None, None),
+                None,
+            )?;
+            Ok(Attempt::Conflict)
+        }
     }
-
-    outcome::conflict(
-        s,
-        &p.ctx,
-        p.now,
-        REQUEST_TYPE,
-        CHANNEL,
-        key,
-        (None, None),
-        None,
-    )?;
-    Ok(Attempt::Conflict)
 }
 
 fn execute(s: &mut Session, p: &Payment) -> Result<Attempt, DbError> {
@@ -345,27 +346,17 @@ pub(super) async fn authorize(
             format!("요청 항목 오류 ({field})"),
         )
     })?;
-    let p = Payment {
+    let p = std::sync::Arc::new(Payment {
         ctx: ctx.clone(),
         now,
         client_id: client.client_id,
         scope: format!("client:{}", client.counterparty_client_id),
         validated,
-    };
-    let result = state
-        .db
-        .run_in(&stats, move |s| execute(s, &p))
+    });
+    let payment = p.clone();
+    let result = outcome::run_with_deadlock_retry(&state.db, &stats, move |s| execute(s, &payment))
         .await
-        .map_err(|error| {
-            tracing::warn!(request_id = %ctx.request_id, error = %error, "card payment database failure");
-            if matches!(error, DbError::Busy)
-                || matches!(error.ora_code(), Some(60 | 30006 | 1653 | 1654 | 1691))
-            {
-                ApiError::busy(&ctx)
-            } else {
-                ApiError::internal(&ctx)
-            }
-        })?;
+        .map_err(|error| outcome::map_db_error(&ctx, "card payment", &error))?;
     match result {
         Attempt::Executed(result) => Ok(result.respond(&ctx, false)),
         Attempt::Replay(result) => Ok(result.respond(&ctx, true)),

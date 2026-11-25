@@ -414,43 +414,27 @@ fn attempt(s: &mut Session, p: &Plan) -> Result<ResultRow, DbError> {
 }
 async fn run(state: AppState, stats: RequestStats, p: Plan) -> Result<Response, ApiError> {
     let p = std::sync::Arc::new(p);
-    let mut retries = 0;
-    loop {
-        let plan = p.clone();
-        match state.db.run_in(&stats, move |s| attempt(s, &plan)).await {
-            Ok(r) => {
-                let message = match r.code {
-                    codes::SUCCESS => "",
-                    codes::BANK_REJECTED => "참가기관 거부",
-                    codes::INVALID_PARAMETER => "요청 항목 오류",
-                    codes::UNAUTHORIZED => "인증 실패",
-                    codes::DUPLICATE_REQUEST => "중복 요청",
-                    _ => "시스템 오류",
-                };
-                let mut response = api::respond(&p.ctx, r.status, r.code, message, r.body);
-                outcome::annotate(
-                    &mut response,
-                    None,
-                    Some(p.op.kind().into()),
-                    r.replayed.then_some(true),
-                );
-                return Ok(response);
-            }
-            Err(e) if e.ora_code() == Some(60) && retries < 2 => {
-                retries += 1;
-                metrics::counter!("bank_deadlock_retries_total").increment(1);
-                tokio::time::sleep(std::time::Duration::from_millis(10 * retries)).await;
-            }
-            Err(e) => {
-                return Err(
-                    if matches!(e.ora_code(), Some(30006 | 1653 | 1654 | 1691)) {
-                        ApiError::busy(&p.ctx)
-                    } else {
-                        db_error(&p.ctx, e)
-                    },
-                );
-            }
+    let plan = p.clone();
+    match outcome::run_with_deadlock_retry(&state.db, &stats, move |s| attempt(s, &plan)).await {
+        Ok(r) => {
+            let message = match r.code {
+                codes::SUCCESS => "",
+                codes::BANK_REJECTED => "참가기관 거부",
+                codes::INVALID_PARAMETER => "요청 항목 오류",
+                codes::UNAUTHORIZED => "인증 실패",
+                codes::DUPLICATE_REQUEST => "중복 요청",
+                _ => "시스템 오류",
+            };
+            let mut response = api::respond(&p.ctx, r.status, r.code, message, r.body);
+            outcome::annotate(
+                &mut response,
+                None,
+                Some(p.op.kind().into()),
+                r.replayed.then_some(true),
+            );
+            Ok(response)
         }
+        Err(e) => Err(outcome::map_db_error(&p.ctx, "atm", &e)),
     }
 }
 fn token(headers: &HeaderMap) -> Option<String> {

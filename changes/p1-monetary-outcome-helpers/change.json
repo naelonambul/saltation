@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "p1-monetary-outcome-helpers",
+  "kind": "implementation",
+  "title": "Extract shared deadlock retry, DB/ledger error mapping, and idempotency replay helpers into shared::outcome",
+  "base": {
+    "ref": "main",
+    "commit": "6995d3b532c1b51ecb269d781bec20153fd96718"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:bb4eea805cb0f02198053828490e4ada191500021aae632d4cd9b9fa580d4734"
+  },
+  "write_scope": [
+    "bank/src/shared/outcome/mod.rs",
+    "bank/src/features/transfers/mod.rs",
+    "bank/src/features/inbound/mod.rs",
+    "bank/src/features/deposits/mod.rs",
+    "bank/src/features/loans/mod.rs",
+    "bank/src/features/atm/operations.rs",
+    "bank/src/features/cards/payment.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a12cc4a9a8aa40a052a9c4b8fea02ac40b335282c699d42a7b5dd2e18f13a026",
+      "by": "ckh",
+      "at": "2026-11-25T11:35:29Z",
+      "write_scope_sha256": "sha256:be8e5f0a32943d802a905c8a2417c80fa732f4150c59191725d8fd038467e174"
+    }
+  ]
+}

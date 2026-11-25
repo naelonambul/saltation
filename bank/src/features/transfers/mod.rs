@@ -21,8 +21,9 @@ use crate::shared::auth::{self, AuthCustomer};
 use crate::shared::clock::business_date;
 use crate::shared::context::{BusinessTime, RequestContext};
 use crate::shared::db::{DbError, Session, SqlStmt};
-use crate::shared::ledger::{self, Kind, LedgerError, Leg, Movement};
+use crate::shared::ledger::{self, Kind, Leg, Movement};
 use crate::shared::outbox::{self, Event};
+use crate::shared::outcome::{self, StoredResolution};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
@@ -37,7 +38,6 @@ const SELECT_RESULT: SqlStmt = sql_stmt!("transfers.select_result", "sql/select_
 
 const MAX_AMOUNT: i64 = 999_999_999_999;
 const ENDPOINT: &str = "/v2.0/transfer/withdraw/fin_num";
-const DEADLOCK_RETRIES: usize = 2;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -91,11 +91,11 @@ struct Outcome {
 enum Attempt {
     Done(Outcome),
     Replayed {
-        hash: String,
         status: String,
         rsp_code: String,
         response: Option<String>,
     },
+    Conflict,
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
@@ -112,16 +112,7 @@ fn invalid(ctx: &RequestContext, message: &str) -> ApiError {
 }
 
 fn map_db_error(ctx: &RequestContext, e: &DbError) -> ApiError {
-    tracing::warn!(request_id = %ctx.request_id, error = %e, "transfer database failure");
-    match e.ora_code() {
-        // Lock wait expired, or a tablespace is full (outbox fullness is counted in outbox::record).
-        Some(30006) | Some(1653) | Some(1654) | Some(1691) => ApiError::busy(ctx),
-        _ if matches!(e, DbError::Busy) => ApiError::busy(ctx),
-        _ => {
-            tracing::error!(request_id = %ctx.request_id, error = %e, "transfer database error");
-            ApiError::internal(ctx)
-        }
-    }
+    outcome::map_db_error(ctx, "transfer", e)
 }
 
 struct Plan {
@@ -277,42 +268,29 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
             s.rollback()?;
             let stored: Option<(String, String, String, Option<String>)> =
                 s.query_opt(&SELECT_STORED, &[&plan.scope, &req.bank_tran_id])?;
-            let stored = if crate::shared::outcome::claimed_elsewhere(
-                s,
-                &ctx.request_id,
-                &plan.scope,
-                &req.bank_tran_id,
-            )? {
-                None
-            } else {
-                stored
-            };
-            if stored.as_ref().is_none_or(|row| row.0 != plan.hash) {
-                crate::shared::outcome::conflict(
-                    s,
-                    ctx,
-                    plan.now,
-                    "TRANSFER",
-                    "MOBILE",
-                    &req.bank_tran_id,
-                    (Some(&plan.customer_no), Some(&plan.session_id)),
-                    None,
-                )?;
-            }
-            return match stored {
-                Some((hash, status, rsp_code, response)) => Ok(Attempt::Replayed {
-                    hash,
+            let claimed =
+                outcome::claimed_elsewhere(s, &ctx.request_id, &plan.scope, &req.bank_tran_id)?;
+            let stored = stored
+                .map(|(hash, status, rsp_code, response)| (hash, (status, rsp_code, response)));
+            return match outcome::resolve_stored(claimed, stored, &plan.hash) {
+                StoredResolution::Replay((status, rsp_code, response)) => Ok(Attempt::Replayed {
                     status,
                     rsp_code,
                     response,
                 }),
-                // The conflict was on request_id (a reused X-Request-Id with a different key).
-                None => Ok(Attempt::Replayed {
-                    hash: String::new(),
-                    status: String::new(),
-                    rsp_code: String::new(),
-                    response: None,
-                }),
+                StoredResolution::Conflict => {
+                    outcome::conflict(
+                        s,
+                        ctx,
+                        plan.now,
+                        "TRANSFER",
+                        "MOBILE",
+                        &req.bank_tran_id,
+                        (Some(&plan.customer_no), Some(&plan.session_id)),
+                        None,
+                    )?;
+                    Ok(Attempt::Conflict)
+                }
             };
         }
         return Err(e);
@@ -493,11 +471,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     if external {
         movement.legs.truncate(1);
     }
-    let posted = match ledger::post(s, &mut locks, &movement) {
-        Ok(p) => p,
-        Err(LedgerError::Db(e)) => return Err(e),
-        Err(e) => return Err(DbError::Config(e.to_string())),
-    };
+    let posted = ledger::post(s, &mut locks, &movement).map_err(outcome::ledger_error)?;
 
     let mut body = bank_part(req, plan, "000", "");
     if let Some(obj) = body.as_object_mut() {
@@ -550,7 +524,7 @@ fn attempt(s: &mut Session, plan: &Plan) -> Result<Attempt, DbError> {
     }))
 }
 
-fn replay(ctx: &RequestContext, plan_hash: &str, a: Attempt) -> Result<Response, ApiError> {
+fn replay(ctx: &RequestContext, a: Attempt) -> Result<Response, ApiError> {
     match a {
         Attempt::Done(o) => Ok(api::respond(
             ctx,
@@ -559,20 +533,17 @@ fn replay(ctx: &RequestContext, plan_hash: &str, a: Attempt) -> Result<Response,
             o.rsp_message,
             o.body,
         )),
+        Attempt::Conflict => Err(ApiError::new(
+            ctx,
+            StatusCode::CONFLICT,
+            codes::DUPLICATE_REQUEST,
+            "같은 거래고유번호로 다른 요청이 이미 처리되었습니다",
+        )),
         Attempt::Replayed {
-            hash,
             status,
             rsp_code,
             response,
         } => {
-            if hash != plan_hash {
-                return Err(ApiError::new(
-                    ctx,
-                    StatusCode::CONFLICT,
-                    codes::DUPLICATE_REQUEST,
-                    "같은 거래고유번호로 다른 요청이 이미 처리되었습니다",
-                ));
-            }
             let stored: Value = response
                 .as_deref()
                 .and_then(|r| serde_json::from_str(r).ok())
@@ -587,7 +558,7 @@ fn replay(ctx: &RequestContext, plan_hash: &str, a: Attempt) -> Result<Response,
             };
             let message = stored["rsp_message"].as_str().unwrap_or("").to_owned();
             let mut response = api::respond(ctx, http, code, message, stored["body"].clone());
-            crate::shared::outcome::annotate(
+            outcome::annotate(
                 &mut response,
                 stored["account_no"].as_str().map(str::to_owned),
                 Some("TRANSFER".into()),
@@ -653,19 +624,11 @@ async fn withdraw(
         ctx: ctx.clone(),
         now,
     });
-    let mut retries = 0;
-    loop {
-        let p = plan.clone();
-        match state.db.run_in(&stats, move |s| attempt(s, &p)).await {
-            Ok(a) => return replay(&ctx, &plan.hash, a),
-            Err(e) if e.ora_code() == Some(60) && retries < DEADLOCK_RETRIES => {
-                retries += 1;
-                metrics::counter!("bank_deadlock_retries_total").increment(1);
-                tracing::warn!(request_id = %ctx.request_id, retries, "deadlock, retrying");
-                tokio::time::sleep(std::time::Duration::from_millis(10 * retries as u64)).await;
-            }
-            Err(e) => return Err(map_db_error(&ctx, &e)),
-        }
+    let p = plan.clone();
+    let result = outcome::run_with_deadlock_retry(&state.db, &stats, move |s| attempt(s, &p)).await;
+    match result {
+        Ok(a) => replay(&ctx, a),
+        Err(e) => Err(map_db_error(&ctx, &e)),
     }
 }
 
