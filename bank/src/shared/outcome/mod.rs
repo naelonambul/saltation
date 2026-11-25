@@ -129,6 +129,16 @@ impl Recorder {
         }
     }
 
+    pub fn money_operation(&self) -> Option<(&'static str, &'static str)> {
+        money_operation(&self.method, &self.endpoint)
+    }
+
+    /// True for customer/channel endpoints subject to the daily F-27a maintenance window
+    /// (everything except `/admin/*`, `/internal/*`, `/healthz`, `/readyz`, `/metrics`, and `OPTIONS`).
+    pub fn is_customer_channel(&self) -> bool {
+        !self.excluded && self.channel != "ADMIN"
+    }
+
     pub fn unrecorded(&self) {
         if !self.excluded {
             metrics::counter!("bank_request_outcomes_unrecorded_total", "listener" => self.ctx.listener.as_str()).increment(1);

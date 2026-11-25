@@ -98,3 +98,36 @@ async def test_qualification_requires_end_to_end_evidence(
     )
     assert await cli._run(args) == {"PASS": 0, "FAIL": 1, "INCOMPLETE": 2}[expected]
     assert result(tmp_path)["outcome"] == expected
+
+
+def test_maintenance_window_conflict_detects_backfill_and_live_overlap() -> None:
+    assert (
+        cli.maintenance_window_conflict(
+            {"mode": "BACKFILL", "business_time": "2026-01-02T00:10:00+09:00"}, 600.0, 30
+        )
+        is not None
+    )
+    assert (
+        cli.maintenance_window_conflict(
+            {"mode": "BACKFILL", "business_time": "2026-01-02T00:30:00+09:00"}, 600.0, 30
+        )
+        is None
+    )
+    assert (
+        cli.maintenance_window_conflict(
+            {"mode": "LIVE", "business_time": "2026-01-02T23:50:00+09:00"}, 1200.0, 30
+        )
+        is not None
+    )
+    assert (
+        cli.maintenance_window_conflict(
+            {"mode": "LIVE", "business_time": "2026-01-02T14:00:00+09:00"}, 1800.0, 30
+        )
+        is None
+    )
+    assert (
+        cli.maintenance_window_conflict(
+            {"mode": "LIVE", "business_time": "2026-01-02T00:05:00+09:00"}, 600.0, 0
+        )
+        is None
+    )

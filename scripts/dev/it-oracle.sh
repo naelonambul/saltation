@@ -102,6 +102,10 @@ p.write_text("\n".join(lines + [f"{name}={value}"]) + "\n")
 PY
 }
 
+# Keep clock-independent wall-clock CI suites immune to 00:00-00:30 KST; F-27a is proven
+# explicitly with maintenance_minutes=30 in bank/tests/backfill.rs.
+set_env SALTATION_MAINTENANCE_MINUTES "${SALTATION_MAINTENANCE_MINUTES:-0}"
+
 # Identity of the database volumes. Volumes created by anything else (another
 # version of this script, a manual `down -v`) hold other passwords, so a
 # mismatch also recreates them.

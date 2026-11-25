@@ -696,6 +696,7 @@ async fn driver_bench() {
         db: db.clone(),
         clock,
         limits: Default::default(),
+        maintenance_minutes: 0,
     };
     let public = app::public_router(state.clone());
     let generator = app::generator_router(state.clone());

@@ -1,5 +1,6 @@
 """Deterministic KST plan for reserved scenarios and daily normal activity."""
 
+import os
 from calendar import isleap
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -10,13 +11,53 @@ from saltation_gen.config.stage6 import ANNUAL_RATES, LIVE_RATES, LOOKALIKE_KIND
 from saltation_gen.drivers.backfill_clock import KST
 from saltation_gen.drivers.stage6_steps import PRIOR_DAY, steps
 from saltation_gen.drivers.stage6_types import Episode
-from saltation_gen.personas.profiles import PROFILES, REQUESTS_PER_EPISODE, stable_number
+from saltation_gen.personas.profiles import NORMAL_SCHEDULE_KINDS, PROFILES, stable_number
 
 BACKFILL_HOUR = 10
 LIVE_START_OFFSET = timedelta(seconds=1)
 ANNUAL_PHASE_LENGTH = timedelta(minutes=65)
 LIVE_D_MIDNIGHT_MARGIN = timedelta(seconds=30)
 D_PREPARATION = timedelta(days=2)
+MONETARY_OPS = frozenset(
+    {"transfer", "inbound", "card", "atm_withdraw", "atm_deposit", "term_open", "term_close"}
+)
+
+
+def _maintenance_minutes() -> int:
+    raw = os.environ.get("SALTATION_MAINTENANCE_MINUTES", "30").strip()
+    if not raw:
+        return 30
+    minutes = int(raw)
+    if not 0 <= minutes <= 60:
+        raise ValueError(f"SALTATION_MAINTENANCE_MINUTES must be in 0..=60, got {minutes}")
+    return minutes
+
+
+def in_maintenance_window(instant: datetime, minutes: int | None = None) -> bool:
+    window = _maintenance_minutes() if minutes is None else minutes
+    if window <= 0:
+        return False
+    kst_time = instant.astimezone(KST)
+    return kst_time.hour == 0 and kst_time.minute < window
+
+
+def _avoid_maintenance(start: datetime, actions: list, maint: int) -> datetime:
+    if maint <= 0:
+        return start
+    for _ in range(4):
+        bad = [
+            at
+            for action in actions
+            if action.op not in {"sms", "term_identity"}
+            and in_maintenance_window(at := start + timedelta(seconds=action.offset), maint)
+        ]
+        if not bad:
+            return start
+        earliest = min(bad).astimezone(KST)
+        window_end = earliest.replace(hour=0, minute=maint, second=0, microsecond=0)
+        start += (window_end - earliest) + timedelta(seconds=1)
+    return start
+
 
 EXTRA_ROLE = {"A": "receiver", "D": "second", "E": "receiver", "purchase": "receiver", "household": "second"}
 
@@ -136,10 +177,15 @@ def build_schedule(
             if kind == "D":
                 start -= D_PREPARATION
         number = len(schedule.episodes)
-        schedule.episodes.append(Episode(f"{window}-{kind}-{number}", kind, start, roles, window, carry_in))
-        schedule.reserved.update(roles.values())
-        episode = schedule.episodes[-1]
+        episode = Episode(f"{window}-{kind}-{number}", kind, start, roles, window, carry_in)
         actions = steps(episode)
+        if window == "live":
+            shifted = _avoid_maintenance(start, actions, _maintenance_minutes())
+            if shifted != start:
+                start = shifted
+                episode = Episode(f"{window}-{kind}-{number}", kind, start, roles, window, carry_in)
+        schedule.episodes.append(episode)
+        schedule.reserved.update(roles.values())
         begins = (start + timedelta(seconds=actions[0].offset)).date()
         last = (start + timedelta(seconds=actions[-1].offset)).date()
         if begins < first:
@@ -193,7 +239,7 @@ def normal_episodes(
         # Adjacent senders in the ring use lanes three minutes apart, including the wrap.
         # The transfer follows its login by 60 seconds, so both steps fit in a lane.
         lane = 2 if index == len(customers) - 1 and index % 2 == 0 else index % 2
-        for activity_index, kind in enumerate(REQUESTS_PER_EPISODE):
+        for activity_index, kind in enumerate(NORMAL_SCHEDULE_KINDS):
             cadence = profile.cadence(kind)
             activity_phase = (phase + 73 * activity_index) % year_days
             if (offset * cadence.annual + activity_phase) % year_days < year_days - cadence.annual:
@@ -207,6 +253,8 @@ def normal_episodes(
                 # adjacent ring senders 3 minutes apart so login + 60s transfer never overlap.
                 bucket = stable_number(seed, day.isoformat(), str(index // 2)) % 6
                 minute = bucket * 9 + 3 * lane
+                if stable_number(seed, customer, day.isoformat(), "visit") % 4 != 0:
+                    kind = "normal_visit"
             else:
                 # Spread non-transfer activities across 1/2-mod-3 minutes so a customer's
                 # activities never share a minute with each other or with normal_transfer.
@@ -242,7 +290,7 @@ def estimate_normal_requests(
     total = sum(PROFILES[schedule.profiles[customer]].annual_requests for customer in customers)
     if len(customers) == 1:
         profile = PROFILES[schedule.profiles[customers[0]]]
-        total -= profile.transfer.annual * REQUESTS_PER_EPISODE["normal_transfer"]
+        total -= profile.transfer_request_cost
     blocked = sum(
         PROFILES[schedule.profiles[customer]].annual_requests
         for customers_on_day in schedule.blocked_days.values()

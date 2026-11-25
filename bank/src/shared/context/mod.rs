@@ -186,6 +186,35 @@ mod tests {
         assert!(Ulid::from_string(&ctx.request_id).is_ok());
         assert_ne!(ctx.request_id, "not-a-ulid");
     }
+
+    #[test]
+    fn maintenance_window_bounds_kst_midnight() {
+        let parse = |s: &str| DateTime::parse_from_rfc3339(s).expect("timestamp");
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-01T23:59:59.999999+09:00"), 30),
+            None
+        );
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-02T00:00:00+09:00"), 30),
+            Some(1800)
+        );
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-02T00:15:00+09:00"), 30),
+            Some(900)
+        );
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-02T00:29:59.999999+09:00"), 30),
+            Some(1)
+        );
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-02T00:30:00+09:00"), 30),
+            None
+        );
+        assert_eq!(
+            maintenance_retry_after(parse("2026-01-02T00:10:00+09:00"), 0),
+            None
+        );
+    }
 }
 
 /// One immutable business time for authentication and the entire operation.
@@ -205,6 +234,19 @@ impl<S: Send + Sync> FromRequestParts<S> for BusinessTime {
             .copied()
             .ok_or_else(|| ApiError::internal(&ctx))
     }
+}
+
+/// Returns `Retry-After` seconds if `now` falls inside the daily KST midnight
+/// settlement maintenance window `[00:00:00, 00:<minutes>:00)` (spec F-27a).
+pub fn maintenance_retry_after(now: DateTime<FixedOffset>, minutes: u32) -> Option<u64> {
+    use chrono::Timelike;
+    if minutes == 0 {
+        return None;
+    }
+    let kst_now = now.with_timezone(&crate::shared::clock::kst());
+    let window_secs = u64::from(minutes) * 60;
+    let elapsed_secs = u64::from(kst_now.num_seconds_from_midnight());
+    (elapsed_secs < window_secs).then(|| window_secs - elapsed_secs)
 }
 
 pub async fn operation(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
@@ -252,6 +294,28 @@ pub async fn operation(State(state): State<AppState>, mut req: Request, next: Ne
         }
     };
     let now = ticket.now;
+    let rejection = rejection.or_else(|| {
+        if !recorder.is_customer_channel() {
+            return None;
+        }
+        let retry_after = maintenance_retry_after(now, state.maintenance_minutes)?;
+        let mut response = ApiError::new(
+            &ctx,
+            StatusCode::SERVICE_UNAVAILABLE,
+            crate::shared::api::codes::BUSY,
+            "일일 정산 점검 중입니다",
+        )
+        .into_response();
+        if let Ok(value) = HeaderValue::from_str(&retry_after.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        if let Some((kind, _)) = recorder.money_operation() {
+            crate::shared::outcome::annotate(&mut response, None, Some(kind.into()), None);
+        }
+        Some(response)
+    });
     req.extensions_mut().insert(BusinessTime(now));
     let task_recorder = recorder.clone();
     let task_state = state.clone();

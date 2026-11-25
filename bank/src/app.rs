@@ -29,6 +29,8 @@ pub struct AppState {
     pub db: Db,
     pub clock: Clock,
     pub limits: crate::shared::limits::Limits,
+    /// Daily KST midnight settlement maintenance window length in minutes (spec F-27a; 0 disables).
+    pub maintenance_minutes: u32,
 }
 
 async fn readyz(State(state): State<AppState>) -> (StatusCode, axum::Json<serde_json::Value>) {

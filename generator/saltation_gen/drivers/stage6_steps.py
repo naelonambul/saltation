@@ -211,6 +211,21 @@ def _actor_steps(kind: str, actor: str, roles: dict[str, str]) -> list[Step]:
                     "second_login", "login", roles["second"], 60, label="lookalike", context=_HOUSEHOLD.copy()
                 ),
             ]
+        case "normal_visit":
+            return [
+                Step("login", "login", actor, label="normal"),
+                Step("balance", "balance", actor, 10, label="normal"),
+                Step(
+                    "transfer",
+                    "transfer",
+                    actor,
+                    60,
+                    {"amount": 30_000},
+                    peer=roles["receiver"],
+                    label="normal",
+                    peer_label="normal",
+                ),
+            ]
         case "purchase" | "normal_transfer":
             label = "lookalike" if kind == "purchase" else "normal"
             return [

@@ -1001,6 +1001,236 @@ async fn password_reset_code_expires(api: &Api) {
     common::assert_contract("Error", &body);
 }
 
+async fn daily_maintenance_window(api: &Api) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let mut maint_state = api.state.clone();
+    maint_state.maintenance_minutes = 30;
+    let maint_public = app::public_router(maint_state.clone());
+    let maint_gen = app::generator_router(maint_state);
+
+    let now = api.state.clock.state().await.expect("clock").business_time;
+    let next_day = business_date(now).succ_opt().expect("next day");
+    let midnight = kst()
+        .from_local_datetime(&next_day.and_hms_opt(0, 0, 0).expect("midnight"))
+        .single()
+        .expect("kst midnight");
+    api.state
+        .clock
+        .set(midnight)
+        .await
+        .expect("advance to kst midnight");
+
+    let sender_no = format!("M{}", common::unique_digits(10));
+    let recv_no = format!("M{}", common::unique_digits(10));
+    let sender_phone = format!("010{}", common::unique_digits(8));
+    let recv_phone = format!("010{}", common::unique_digits(8));
+    let (status, body) = call(
+        &maint_gen,
+        "POST",
+        "/internal/v1/seed/customers",
+        &new_id(),
+        None,
+        Some(json!({"customers": [
+            {"customer_no": sender_no, "phone": sender_phone, "name": "점검송신", "customer_type": "INDIVIDUAL", "password": "maint-password"},
+            {"customer_no": recv_no, "phone": recv_phone, "name": "점검수신", "customer_type": "INDIVIDUAL", "password": "maint-password"},
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sender_acct = format!("998{}", common::unique_digits(11));
+    let recv_acct = format!("998{}", common::unique_digits(11));
+    let (status, body) = call(
+        &maint_gen,
+        "POST",
+        "/internal/v1/seed/accounts",
+        &new_id(),
+        None,
+        Some(json!({"accounts": [
+            {"customer_no": sender_no, "atm_pin": common::TEST_ATM_PIN, "account_no": sender_acct, "opening_balance": 1_000_000},
+            {"customer_no": recv_no, "atm_pin": common::TEST_ATM_PIN, "account_no": recv_acct, "opening_balance": 0},
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let sender_fin = body["accounts"][0]["fintech_use_num"]
+        .as_str()
+        .expect("sender fin")
+        .to_owned();
+
+    // Seed an analyst to prove /admin/* remains available during maintenance.
+    let analyst_no = format!("A{}", common::unique_digits(8));
+    let (status, body) = call(
+        &maint_gen,
+        "POST",
+        "/internal/v1/seed/analysts",
+        &new_id(),
+        None,
+        Some(json!({"analysts": [
+            {"analyst_no": analyst_no, "name": "점검분석가", "password": "maint-admin-password"},
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let tran_id = format!("M000000001U{}", common::unique_digits(9));
+    let tran_dtime = midnight.format("%Y%m%d%H%M%S").to_string();
+    let transfer_body = json!({
+        "bank_tran_id": tran_id,
+        "fintech_use_num": sender_fin,
+        "dps_print_content": "정산점검테스트",
+        "wd_print_content": "정산점검테스트",
+        "tran_amt": "10000",
+        "tran_dtime": tran_dtime,
+        "req_client_name": "테스트",
+        "req_client_num": "1",
+        "transfer_purpose": "TR",
+        "recv_client_name": "수취인",
+        "recv_client_bank_code": "998",
+        "recv_client_account_num": recv_acct,
+    });
+
+    // 00:00:00 KST -> customer login, balance inquiry, and transfer are ALL blocked with 503 A0013 + Retry-After: 1800.
+    let (login_status, login_blocked) = call(
+        &maint_public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(json!({"phone": sender_phone, "password": "maint-password"})),
+    )
+    .await;
+    assert_eq!(
+        login_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{login_blocked}"
+    );
+    assert_eq!(login_blocked["rsp_code"], "A0013");
+
+    let balance_uri = format!(
+        "/v2.0/account/balance/fin_num?bank_tran_id=M000000001U{}&fintech_use_num={}&tran_dtime={}",
+        common::unique_digits(9),
+        sender_fin,
+        tran_dtime
+    );
+    let (bal_status, bal_body) = call(
+        &maint_public,
+        "GET",
+        &balance_uri,
+        &new_id(),
+        Some("dummy-token"),
+        None,
+    )
+    .await;
+    assert_eq!(bal_status, StatusCode::SERVICE_UNAVAILABLE, "{bal_body}");
+    assert_eq!(bal_body["rsp_code"], "A0013");
+
+    let blocked_id = new_id();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v2.0/transfer/withdraw/fin_num")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer dummy-token")
+        .header("x-request-id", &blocked_id)
+        .body(Body::from(transfer_body.to_string()))
+        .expect("request");
+    let res = maint_public.clone().oneshot(req).await.expect("response");
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        res.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1800")
+    );
+    let body_bytes = res.into_body().collect().await.expect("body").to_bytes();
+    let body: Value = serde_json::from_slice(&body_bytes).expect("json");
+    assert_eq!(body["rsp_code"], "A0013");
+    assert_eq!(body["rsp_message"], "일일 정산 점검 중입니다");
+
+    // Verify request.completed was recorded in OUTBOX for the maintenance rejection.
+    let events = atm_rows(api, ATM_REQUEST_EVENTS, &blocked_id).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["event_type"], "request.completed");
+    assert_eq!(events[0]["payload"]["http_status"], 503);
+    assert_eq!(events[0]["payload"]["request_type"], "TRANSFER");
+
+    // 00:15:00 KST -> /admin/* (operational monitoring) remains available during maintenance.
+    api.state.clock.advance(900).await.expect("advance 900s");
+    let (admin_login_status, admin_login_body) = call(
+        &maint_public,
+        "POST",
+        "/admin/v1/login",
+        &new_id(),
+        None,
+        Some(json!({"analyst_no": analyst_no, "password": "maint-admin-password"})),
+    )
+    .await;
+    assert_eq!(admin_login_status, StatusCode::OK, "{admin_login_body}");
+    let admin_token = admin_login_body["access_token"]
+        .as_str()
+        .expect("admin token");
+    let (admin_read_status, admin_read_body) = call(
+        &maint_public,
+        "GET",
+        &format!("/admin/v1/customers/{sender_no}"),
+        &new_id(),
+        Some(admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(admin_read_status, StatusCode::OK, "{admin_read_body}");
+
+    // 00:29:59 KST -> still blocked with Retry-After: 1
+    api.state.clock.advance(899).await.expect("advance 899s");
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v2.0/transfer/withdraw/fin_num")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer dummy-token")
+        .header("x-request-id", &new_id())
+        .body(Body::from(transfer_body.to_string()))
+        .expect("request");
+    let res2 = maint_public.clone().oneshot(req2).await.expect("response");
+    assert_eq!(res2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        res2.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+
+    // 00:30:00 KST -> customer login and same bank_tran_id transfer succeed (idempotency key was not claimed).
+    api.state.clock.advance(1).await.expect("advance 1s");
+    let (status, login_body) = call(
+        &maint_public,
+        "POST",
+        "/v2.0/ext/auth/login",
+        &new_id(),
+        None,
+        Some(json!({"phone": sender_phone, "password": "maint-password"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{login_body}");
+    let token = login_body["access_token"]
+        .as_str()
+        .expect("token")
+        .to_owned();
+    let (ok_status, ok_body) = call(
+        &maint_public,
+        "POST",
+        "/v2.0/transfer/withdraw/fin_num",
+        &new_id(),
+        Some(&token),
+        Some(transfer_body),
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::OK, "{ok_body}");
+    assert_eq!(ok_body["rsp_code"], "A0000");
+}
+
 async fn live_switch_is_one_way(api: &Api, recording: &Arc<Mutex<Recording>>) {
     let state = api.state.clock.state().await.expect("clock");
     let before = recording.lock().expect("recording").calls.clone();
@@ -1064,6 +1294,7 @@ async fn backfill_sequence() {
         db,
         clock,
         limits: Default::default(),
+        maintenance_minutes: 0,
     };
     let api = Api {
         public: app::public_router(state.clone()),
@@ -1093,6 +1324,7 @@ async fn backfill_sequence() {
     term_deposit_matured(&api, deposits).await;
     password_reset_code_expires(&api).await;
     atm_sessions_in_business_time(&api).await;
+    daily_maintenance_window(&api).await;
     let restoration = daily_close_tests::sequence(&api, &close_logs, &close_metrics).await;
     live_switch_is_one_way(&api, &recording).await;
     daily_close_tests::final_check(&api, &close_logs, restoration).await;

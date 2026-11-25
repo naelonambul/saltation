@@ -232,3 +232,22 @@ async def test_card_fixture_wire_and_roster(bank_for, failure):
         assert roster_matches
         assert bool(truth.saved_secret == truth.seeded_secret)
         assert all("client_secret" not in entry for entry in entries)
+
+
+async def test_bank_client_does_not_retry_503_with_retry_after(bank_for):
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            503,
+            headers={"Retry-After": "900"},
+            json={"rsp_code": "A0013", "rsp_message": "일일 정산 점검 중입니다"},
+        )
+
+    bank = bank_for(handler)
+    with pytest.raises(BankError) as exc:
+        await bank.card_authorize(new_ulid(), TOKEN, CTX, {"idempotency_key": "k-1"})
+    assert exc.value.status == 503
+    assert calls == 1

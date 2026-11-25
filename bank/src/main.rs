@@ -107,10 +107,26 @@ async fn main() -> anyhow::Result<()> {
         .context("initialise the clock")?;
     clock.catch_up().await.context("catch up rollover")?;
     clock.spawn_live_scheduler();
+    let maintenance_minutes = match std::env::var("SALTATION_MAINTENANCE_MINUTES") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let minutes: u32 = raw
+                .trim()
+                .parse()
+                .context("SALTATION_MAINTENANCE_MINUTES must be an integer in 0..=60")?;
+            anyhow::ensure!(
+                minutes <= 60,
+                "SALTATION_MAINTENANCE_MINUTES must be in 0..=60, got {minutes}"
+            );
+            minutes
+        }
+        _ => 30,
+    };
+    tracing::info!(maintenance_minutes, "daily maintenance window configured");
     let state = AppState {
         db: db.clone(),
         clock,
         limits,
+        maintenance_minutes,
     };
     match mongo_uri() {
         Ok(uri) => {
