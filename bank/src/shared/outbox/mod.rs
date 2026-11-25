@@ -168,7 +168,9 @@ enum InsertFailure {
 fn classify_insert_error(ora_code: Option<i32>, is_busy: bool) -> InsertFailure {
     if matches!(ora_code, Some(1653 | 1654 | 1691)) {
         InsertFailure::TablespaceFull
-    } else if is_busy || matches!(ora_code, Some(60 | 30006)) {
+    } else if is_busy || matches!(ora_code, Some(60 | 2290 | 30006)) {
+        // ORA-02290 on OUTBOX is used by fail-closed audit-refusal check constraints
+        // (event_json is always serialized by serde_json::to_string).
         InsertFailure::Contended
     } else {
         InsertFailure::Unexpected
@@ -295,14 +297,12 @@ mod tests {
 
     #[test]
     fn classifies_lock_contention_and_busy_as_contended() {
-        assert_eq!(
-            classify_insert_error(Some(60), false),
-            InsertFailure::Contended
-        );
-        assert_eq!(
-            classify_insert_error(Some(30006), false),
-            InsertFailure::Contended
-        );
+        for code in [60, 2290, 30006] {
+            assert_eq!(
+                classify_insert_error(Some(code), false),
+                InsertFailure::Contended
+            );
+        }
         assert_eq!(classify_insert_error(None, true), InsertFailure::Contended);
     }
 
