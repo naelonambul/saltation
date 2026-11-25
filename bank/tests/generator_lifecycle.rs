@@ -677,7 +677,7 @@ fn assert_episode_shapes(episodes: &BTreeMap<&str, Vec<&Operation>>, fixture: &F
                 ("login", 1),
                 ("atm_start", 1),
                 ("atm_withdraw", 1),
-                ("card", 3),
+                ("card", 4),
             ],
             "trip" => &[("login", 2), ("card", 1)],
             "online" => &[("card", 1)],
