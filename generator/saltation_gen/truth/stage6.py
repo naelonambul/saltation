@@ -433,20 +433,30 @@ class Stage6Journal:
             is not None
         )
 
-    async def require_success(self, episode_id: str, names: list[str]) -> None:
-        successful = {
-            row["name"]
+    async def require_success(
+        self,
+        episode_id: str,
+        names: list[str],
+        *,
+        expected_declined: list[str] | None = None,
+    ) -> None:
+        declined_expected = set(expected_declined or ())
+        succeeded_expected = set(names) - declined_expected
+        actual: dict[str, str] = {
+            row["name"]: row["state"]
             async for row in self._operations.find(
                 {
                     "run_id": self.run_id,
                     "episode_id": episode_id,
-                    "state": "succeeded",
+                    "state": {"$in": list(_TERMINAL)},
                     "name": {"$in": names},
                 },
-                {"name": 1},
+                {"name": 1, "state": 1},
             )
         }
-        if successful != set(names):
+        succeeded_actual = {name for name, state in actual.items() if state == "succeeded"}
+        declined_actual = {name for name, state in actual.items() if state == "declined"}
+        if succeeded_actual != succeeded_expected or declined_actual != declined_expected:
             raise RecoveryError("scenario credit requires every scheduled operation to succeed")
 
     async def credit(self, window: str, kind: str, identity: str, episode_id: str) -> None:

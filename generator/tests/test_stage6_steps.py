@@ -36,7 +36,7 @@ def _episode(kind: str, **roles: str) -> Episode:
         ("D", ["atm_start", "atm_deposit"] * 12, "D"),
         ("E", ["login", "transfer", "transfer", "transfer", "transfer"], "E"),
         ("F", ["login"], "F"),
-        ("G", ["login", "atm_start", "atm_withdraw", "card", "card", "card"], "G"),
+        ("G", ["login", "atm_start", "atm_withdraw", "card", "card", "card", "card"], "G"),
         ("travel", ["login"], "lookalike"),
         ("trip", ["login", "card"], "lookalike"),
         ("online", ["card"], "lookalike"),
@@ -190,10 +190,11 @@ def test_d_splits_totals_across_accounts_and_business_dates():
 
 def test_g_card_modes_match_benign_payments():
     episode = _episode("G", actor=_ACTOR)
-    login, start, withdrawal, small, in_person, online = steps(episode)
+    login, start, withdrawal, small, in_person, online, declined = steps(episode)
     assert all(action.context["region"].startswith("KR-") for action in (login, start, withdrawal))
-    assert withdrawal.offset < small.offset < in_person.offset < online.offset
-    assert small.args["amount"] < in_person.args["amount"] == online.args["amount"]
+    assert withdrawal.offset < small.offset < in_person.offset < online.offset < declined.offset
+    assert small.args["amount"] < in_person.args["amount"] == online.args["amount"] < declined.args["amount"]
+    assert declined.args.get("expect_declined") is True
 
     for card, lookalike_kind, mode in [(in_person, "trip", "in_person"), (online, "online", "online")]:
         lookalike = steps(_episode(lookalike_kind, actor=_RECEIVER))[-1]

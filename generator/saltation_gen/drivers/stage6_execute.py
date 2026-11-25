@@ -27,6 +27,8 @@ CARD_CLIENT_ID = "stage6-card"
 OOB_CLIENT_ID = "stage6-oob"
 NETWORK_CONTEXT = Context("192.0.2.10", "KR-11", "network-client")
 ATM = ATM_TERMINALS[0]
+TERMINAL_BY_REGION = {terminal["region"]: terminal for terminal in ATM_TERMINALS}
+TERMINAL_BY_ID = {terminal["terminal_id"]: terminal for terminal in ATM_TERMINALS}
 CUSTOMER_STEPS = {"login", "bad_login", "reset_request", "sms", "reset_confirm", "payee", "term_identity"}
 AUTHENTICATED = {"payee", "transfer", "balance", "term_open", "term_close", "term_identity"}
 ATM_CASH = {"atm_withdraw", "atm_deposit"}
@@ -156,8 +158,14 @@ class Stage6Executor:
             base = home_context(self.people[step.actor])
             self._home_contexts[step.actor] = base
         if step.op == "atm_start" or step.op in ATM_CASH:
-            base = replace(base, region=ATM["region"])
+            base = replace(base, region=self._terminal_for(step)["region"])
         return replace(base, **step.context) if step.context else base
+
+    def _terminal_for(self, step: Step) -> dict:
+        terminal_id = step.args.get("terminal_id")
+        if isinstance(terminal_id, str) and terminal_id in TERMINAL_BY_ID:
+            return TERMINAL_BY_ID[terminal_id]
+        return ATM
 
     def _labels(self, episode: Episode, step: Step, rid: str, product: dict | None) -> list[dict]:
         row = self.people[step.actor]
@@ -251,7 +259,10 @@ class Stage6Executor:
             raise RecoveryError(f"unconfirmed outcome for {episode.id}/{step.name}") from None
         terminal = "declined" if result["decision"] == "rejected" else "succeeded"
         await self.journal.transition(episode.id, step.name, "unconfirmed", terminal, result)
-        if terminal == "declined" and not episode.kind.startswith("normal_"):
+        expect_declined = bool(step.args.get("expect_declined"))
+        if expect_declined and terminal != "declined":
+            raise RecoveryError(f"expected declined outcome for {episode.id}/{step.name}")
+        if not expect_declined and terminal == "declined" and not episode.kind.startswith("normal_"):
             raise RecoveryError(f"required operation declined for {episode.id}/{step.name}")
 
     def _build_prepared_record(
@@ -493,8 +504,9 @@ class Stage6Executor:
 
     async def _atm(self, step: Step, row: dict, rid: str, ctx: Context, now: datetime, key: str) -> dict:
         if step.op == "atm_start":
+            terminal = self._terminal_for(step)
             result = await self.bank.atm_start_session(
-                rid, ATM["terminal_id"], row["account_no"], row["atm_pin"], ctx
+                rid, terminal["terminal_id"], row["account_no"], row["atm_pin"], ctx
             )
             decision = _accepted(result)
             self.atm_tokens[step.actor] = result[1]["atm_session_token"], now

@@ -282,3 +282,24 @@ def test_amount_anchors_and_profile_contexts():
         assert {device for device, _ in contexts} == {f"dev-subject-{device}" for device in profile.devices}
         assert len({region for _, region in contexts}) == profile.location_count
         assert 470 <= PROFILES[name].annual_requests <= 480
+
+
+def test_normal_episodes_spread_across_hour_and_scenario_g_includes_declined_card():
+    from saltation_gen.drivers.stage6_steps import steps
+    from saltation_gen.drivers.stage6_types import Episode
+
+    config = ScheduleConfig(population=120, amplification=1, annual={}, live={}, normal=True)
+    customers = [f"C{i:08d}" for i in range(1, 121)]
+    schedule = build_schedule(config, SEED, FIRST, 10, None, customers)
+    minutes = {
+        ep.start.minute
+        for day_offset in range(10)
+        for ep in normal_episodes(schedule, config, SEED, FIRST + timedelta(days=day_offset), FIRST)
+    }
+    assert len(minutes) >= 20, f"expected hour-wide minute spread, got {sorted(minutes)}"
+
+    g_ep = Episode("G:test:C1", "G", datetime(2026, 1, 1, 10, 0, tzinfo=KST), {"actor": "C1"}, "annual")
+    g_steps = {step.name: step for step in steps(g_ep)}
+    assert "declined_card" in g_steps
+    assert g_steps["declined_card"].args.get("expect_declined") is True
+    assert g_steps["declined_card"].args["amount"] == 50_000
