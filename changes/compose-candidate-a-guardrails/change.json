@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "compose-candidate-a-guardrails",
+  "kind": "implementation",
+  "title": "Apply validated Candidate A Compose limits and storage guardrails",
+  "base": {
+    "ref": "main",
+    "commit": "c3b0b3b648d3d4f42267d41a5e73332fe0db976d"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:140b924f74a40245c1b46d7fe11a44a241e4a48ab35154e71d77b77f09194ff4"
+  },
+  "write_scope": [
+    "infra/compose/compose.yml",
+    "infra/oracle/setup/01_saltation.sql"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:20be656910d6f843c7664656648b765b17069b7d0f540447d9f041cf0c12f382",
+      "by": "ckh",
+      "at": "2026-11-25T02:37:23Z",
+      "write_scope_sha256": "sha256:a42b383fedd23e2da18883e584bf3f24479a0e3eb470773e4a567096c4885d85",
+      "note": "Owner approved in chat: \uc2b9\uc778"
+    }
+  ]
+}

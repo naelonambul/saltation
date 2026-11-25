@@ -29,7 +29,7 @@ services:
       start_period: 30m
     deploy:
       resources:
-        limits: { cpus: "1.50", memory: 6g }
+        limits: { cpus: "1.05", memory: 6g }
     logging: *logging
 
   mongo:
@@ -54,7 +54,7 @@ services:
       start_period: 30s
     deploy:
       resources:
-        limits: { cpus: "0.40", memory: 3g }
+        limits: { cpus: "0.45", memory: 3g }
     logging: *logging
 
   bank:
@@ -79,7 +79,7 @@ services:
       SALTATION_ARGON2_M_KIB: ${SALTATION_ARGON2_M_KIB:-19456}
       SALTATION_ARGON2_T_COST: ${SALTATION_ARGON2_T_COST:-2}
       SALTATION_ARGON2_P_COST: ${SALTATION_ARGON2_P_COST:-1}
-      SALTATION_ARGON2_CONCURRENCY: ${SALTATION_ARGON2_CONCURRENCY:-2}
+      SALTATION_ARGON2_CONCURRENCY: ${SALTATION_ARGON2_CONCURRENCY:-3}
       RUST_LOG: info
     volumes:
       - applogs:/var/log/saltation
@@ -96,7 +96,7 @@ services:
       start_period: 30s
     deploy:
       resources:
-        limits: { cpus: "0.75", memory: 1g }
+        limits: { cpus: "1.30", memory: 1g }
     logging: *logging
 
   web:
@@ -118,7 +118,7 @@ services:
       retries: 6
     deploy:
       resources:
-        limits: { cpus: "0.10", memory: 128m }
+        limits: { cpus: "0.05", memory: 128m }
     logging: *logging
 
   # On the OCI host, run at most one generator or loadtest container at a time.
@@ -138,7 +138,7 @@ services:
     networks: [internal, data]
     deploy:
       resources:
-        limits: { cpus: "0.50", memory: 768m }
+        limits: { cpus: "0.65", memory: 768m }
     logging: *logging
 
   # Run on demand: docker compose --profile tools run --rm loadtest all
@@ -156,7 +156,7 @@ services:
     networks: [internal, obs]
     deploy:
       resources:
-        limits: { cpus: "0.75", memory: 768m }
+        limits: { cpus: "0.65", memory: 768m }
     logging: *logging
 
   alloy:
@@ -171,7 +171,7 @@ services:
     depends_on: [loki]
     deploy:
       resources:
-        limits: { cpus: "0.10", memory: 256m }
+        limits: { cpus: "0.05", memory: 256m }
     logging: *logging
 
   loki:
@@ -199,6 +199,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
     volumes:
       - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -234,9 +235,10 @@ services:
       interval: 10s
       timeout: 3s
       retries: 12
+      start_period: 120s
     deploy:
       resources:
-        limits: { cpus: "0.05", memory: 256m }
+        limits: { cpus: "0.10", memory: 256m }
     logging: *logging
 
 networks:
