@@ -76,6 +76,28 @@
       ]
     },
     {
+      "id": "ops-event-contracts",
+      "group": "python",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/ops/test_event_contracts.py",
+        "-v"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 300,
+      "paths": [
+        "contracts/**",
+        "bank/src/**",
+        "scripts/ops/test_event_contracts.py",
+        "checks.json"
+      ],
+      "requires": [
+        "python3"
+      ]
+    },
+    {
       "id": "ops-security-negative",
       "group": "python",
       "argv": [
