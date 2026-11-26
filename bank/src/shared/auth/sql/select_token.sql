@@ -7,3 +7,4 @@ WHERE t.token_hash = :token_hash
   AND t.subject_type = 'CUSTOMER'
   AND t.revoked_at IS NULL
   AND t.expires_at > :now
+  AND s.ended_at IS NULL

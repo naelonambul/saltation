@@ -491,6 +491,9 @@ CARD = {
     "entry_mode": "online", "latitude": None, "longitude": None, "decline_reason": None,
 }
 PAYEE = {"payee_id": "7", "bank_code_std": "099", "account_num": "110123456789"}
+SESSION_EXPIRED = {
+    "session_id": SESSION, "ended_at": "2026-11-26T12:30:00+09:00", "end_reason": "expired",
+}
 ATM_ENDED = {
     **TERMINAL, "reason": "expired", "session_id": SESSION,
     "start_request_id": ATTEMPT, "ended_at": OCCURRED,
@@ -566,6 +569,8 @@ FIXTURES = [
     envelope("analyst.login.failed", {"analyst_id": None}, "ADMIN", outcome="rejected"),
     envelope("analyst.login.failed", {"analyst_id": "7"}, "ADMIN", outcome="rejected"),
     envelope("logout", {}, "MOBILE", session_id=SESSION),
+    envelope("session.expired", SESSION_EXPIRED, "SYSTEM", session_id=SESSION, customer_no="C12345678", device_id="test-device"),
+    envelope("session.expired", SESSION_EXPIRED, "MOBILE", session_id=SESSION, customer_no="C12345678", device_id="test-device"),
     envelope("device.new", {}, "MOBILE", session_id=SESSION),
     envelope("password_reset.requested", {"reason": "issued"}, "MOBILE"),
     envelope("password_reset.requested", {"reason": "unknown"}, "MOBILE", outcome="rejected"),
@@ -575,6 +580,7 @@ FIXTURES = [
     envelope("payee.deleted", PAYEE, "MOBILE"),
     envelope("account.status_changed", {"from": "ACTIVE", "to": "DORMANT", "reason": "dormancy"}, "SYSTEM"),
     envelope("rollover.job_completed", {"business_date": "2026-11-26", "job": "atm_session_expiry"}, "SYSTEM"),
+    envelope("rollover.job_completed", {"business_date": "2026-11-26", "job": "auth_session_expiry"}, "SYSTEM"),
     envelope("atm.session_started", {**TERMINAL, "session_id": SESSION}, "ATM", session_id=SESSION),
     envelope("atm.session_rejected", {
         **TERMINAL, "bank_rsp_code": "403", "locked": False,
@@ -651,6 +657,10 @@ class EventContracts(unittest.TestCase):
                 self.validate_event(event)
 
     def test_missing_required_field(self):
+        payload = SESSION_EXPIRED.copy()
+        del payload["session_id"]
+        with self.assertRaisesRegex(ValidationError, r"missing required properties.*session_id"):
+            self.validate_event(envelope("session.expired", payload, "MOBILE"))
         with self.assertRaisesRegex(ValidationError, r"missing required properties.*failed_count"):
             self.validate_event(envelope("login.failed", {"outcome": "LOCKED"}, "MOBILE"))
         for key in ("endpoint", "method", "duration_ms", "http_status"):
@@ -674,6 +684,8 @@ class EventContracts(unittest.TestCase):
         cases = (
             ("login.succeeded", {"failed_count": -1}, r"failed_count: value differs from const"),
             ("login.failed", {"failed_count": -1}, r"failed_count: below minimum"),
+            ("session.expired", {"end_reason": "LOGOUT"}, r"end_reason: value differs from const"),
+            ("session.expired", {"ended_at": "2026-02-30T00:00:00Z"}, r"ended_at: expected date-time with offset"),
             ("rollover.job_completed", {"business_date": "2026-02-31"}, r"business_date: expected calendar date"),
             ("payee.registered", {"bank_code_std": "99"}, r"bank_code_std: value does not match pattern"),
             ("payee.deleted", {"account_num": "123A"}, r"account_num: value does not match pattern"),

@@ -1682,3 +1682,124 @@ async fn card_payment_reconciliation(api: &Api) {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn rollover_materializes_idle_session_expiry_once() {
+    use bank::features::auth::AuthSessionExpiryJob;
+    use bank::shared::auth::{SESSION_IDLE, token_hash};
+    use bank::shared::rollover::last_instant;
+    use chrono::Timelike;
+
+    type At = DateTime<FixedOffset>;
+    type SessionState = (String, String, At, Option<At>, Option<String>);
+
+    async fn session(api: &Api, token: &str) -> SessionState {
+        const SESSION: SqlStmt = SqlStmt {
+            name: "test.rollover_auth_session",
+            sql: "SELECT s.session_id, c.customer_no, s.last_seen, s.ended_at, s.end_reason
+                  FROM access_token t JOIN auth_session s ON t.session_id = s.session_id
+                  JOIN customer c ON c.customer_id = s.customer_id
+                  WHERE t.token_hash = :token_hash",
+        };
+        let hash = token_hash(token);
+        api.state
+            .db
+            .run(move |s| s.query_row(&SESSION, &[&hash]))
+            .await
+            .unwrap()
+    }
+
+    async fn expiry_events(api: &Api, session_id: &str) -> Vec<Value> {
+        const EXPIRY_EVENTS: SqlStmt = SqlStmt {
+            name: "test.rollover_auth_expiry_events",
+            sql: "SELECT JSON_SERIALIZE(event_json RETURNING VARCHAR2(4000)) FROM outbox
+                  WHERE JSON_VALUE(event_json, '$.event_type') = 'session.expired'
+                    AND JSON_VALUE(event_json, '$.session_id') = :session_id",
+        };
+        let session_id = session_id.to_owned();
+        let rows: Vec<String> = api
+            .state
+            .db
+            .run(move |s| s.query_all(&EXPIRY_EVENTS, &[&session_id]))
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|row| serde_json::from_str(row).unwrap())
+            .collect()
+    }
+
+    let mut state = common::state().await;
+    let mut registry = Registry::default();
+    registry.register(Arc::new(AuthSessionExpiryJob));
+    state.clock = Clock::init(state.db.clone(), registry).await.unwrap();
+    let api = Api {
+        public: bank::app::public_router(state.clone()),
+        generator: bank::app::generator_router(state.clone()),
+        state,
+    };
+    let clock = &api.state.clock;
+    let today = business_date(clock.state().await.unwrap().business_time);
+    let date = today.succ_opt().unwrap();
+    let at = last_instant(date);
+    let start = at.with_nanosecond(0).unwrap() - chrono::Duration::minutes(40);
+    clock.set(start).await.unwrap();
+    let idle = common::customer(&api, 0).await;
+    let recently_touched = common::customer(&api, 0).await;
+    let (session_id, customer_no, last_seen, _, _) = session(&api, &idle.token).await;
+
+    clock.advance(20 * 60).await.unwrap();
+    let (status, body) = call(
+        &api.public,
+        "GET",
+        "/v2.0/user/me",
+        &new_id(),
+        Some(&recently_touched.token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let touched = session(&api, &recently_touched.token).await;
+    assert!(touched.2 > at - SESSION_IDLE);
+    let active = common::customer(&api, 0).await;
+    let active_state = session(&api, &active.token).await;
+
+    let advanced = clock.advance(25 * 60).await.unwrap();
+    assert_eq!(advanced.rolled_through, date);
+    let effective_expiry = last_seen + SESSION_IDLE;
+    let closed = session(&api, &idle.token).await;
+    assert_eq!(closed.2, last_seen);
+    assert_eq!(closed.3, Some(effective_expiry));
+    assert_eq!(closed.4.as_deref(), Some("expired"));
+    assert_eq!(session(&api, &recently_touched.token).await, touched);
+    assert_eq!(session(&api, &active.token).await, active_state);
+    assert!(touched.3.is_none() && active_state.3.is_none());
+
+    let recorded = expiry_events(&api, &session_id).await;
+    let [event] = recorded.as_slice() else {
+        panic!("expected one expiry event, got {recorded:?}");
+    };
+    assert_eq!(event["channel"], "SYSTEM");
+    assert_eq!(event["outcome"], "completed");
+    assert!(event["request_id"].is_null());
+    assert_eq!(event["customer_no"], customer_no);
+    assert_eq!(event["device_id"], "payee-test");
+    assert_eq!(event["occurred_at"], at.to_rfc3339());
+    assert_ne!(at, effective_expiry);
+    assert_eq!(
+        event["payload"],
+        json!({
+            "session_id": session_id,
+            "ended_at": effective_expiry.to_rfc3339(),
+            "end_reason": "expired",
+        })
+    );
+
+    AuthSessionExpiryJob
+        .run(&api.state.db, date, at)
+        .await
+        .unwrap();
+    assert_eq!(session(&api, &idle.token).await, closed);
+    assert_eq!(expiry_events(&api, &session_id).await, recorded);
+    assert!(expiry_events(&api, &touched.0).await.is_empty());
+    assert!(expiry_events(&api, &active_state.0).await.is_empty());
+}

@@ -205,7 +205,7 @@ mod deferred_touch {
     use axum::body::Body;
     use axum::extract::{FromRequestParts, Request};
     use axum::response::IntoResponse;
-    use bank::shared::auth::{AuthCustomer, token_hash};
+    use bank::shared::auth::{AuthCustomer, SESSION_IDLE, token_hash};
     use bank::shared::context::{BusinessTime, Listener, RequestContext};
     use bank::shared::db::DbError;
     use bank::shared::outbox::{self, Event};
@@ -242,6 +242,51 @@ mod deferred_touch {
             })
             .await
             .unwrap();
+    }
+
+    async fn expiry_events(api: &common::Api, session_id: &str) -> Vec<serde_json::Value> {
+        const EXPIRY_EVENTS: SqlStmt = SqlStmt {
+            name: "test.auth_expiry_events",
+            sql: "SELECT JSON_SERIALIZE(event_json RETURNING VARCHAR2(4000)) FROM outbox
+                  WHERE JSON_VALUE(event_json, '$.event_type') = 'session.expired'
+                    AND JSON_VALUE(event_json, '$.session_id') = :session_id",
+        };
+        let session_id = session_id.to_owned();
+        let rows: Vec<String> = api
+            .state
+            .db
+            .run(move |s| s.query_all(&EXPIRY_EVENTS, &[&session_id]))
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|row| serde_json::from_str(row).unwrap())
+            .collect()
+    }
+
+    async fn end_reason(api: &common::Api, session_id: &str) -> String {
+        const END_REASON: SqlStmt = SqlStmt {
+            name: "test.auth_end_reason",
+            sql: "SELECT end_reason FROM auth_session WHERE session_id = :session_id",
+        };
+        let session_id = session_id.to_owned();
+        api.state
+            .db
+            .run(move |s| s.query_row(&END_REASON, &[&session_id]))
+            .await
+            .unwrap()
+    }
+
+    async fn assert_unauthorized_at(api: &common::Api, token: &str, at: At) {
+        let (mut parts, _) = Request::builder()
+            .header("authorization", format!("Bearer {token}"))
+            .extension(BusinessTime(at))
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let error = AuthCustomer::from_request_parts(&mut parts, &api.state)
+            .await
+            .unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::UNAUTHORIZED);
     }
 
     fn assert_touched(state: Stored, now: At) {
@@ -323,6 +368,81 @@ mod deferred_touch {
             events(api, &request.recorder.ctx.request_id).await,
             "request.completed"
         );
+    }
+
+    #[tokio::test]
+    async fn expired_bearer_materializes_once_and_deferred_touch_leaves_it_ended() {
+        let api = api().await;
+        let customer = common::customer(&api, 0).await;
+        let now = api
+            .state
+            .clock
+            .state()
+            .await
+            .unwrap()
+            .business_time
+            .with_nanosecond(0)
+            .unwrap();
+        prepare(
+            &api,
+            &customer.token,
+            now - Duration::hours(1),
+            "login inquiry transfer",
+        )
+        .await;
+        let (expires, last_seen, _, _) = stored(&api, &customer.token).await;
+        let at = expires - Duration::seconds(1);
+        let inflight = authenticate(&api, &customer.token, at).await;
+        let session_id = &inflight.who.session_id;
+        let id = new_id();
+        let (status, body) = call(
+            &api.public,
+            "GET",
+            "/v2.0/user/me",
+            &id,
+            Some(&customer.token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let effective_expiry = last_seen + SESSION_IDLE;
+        let closed = (expires, last_seen, None, Some(effective_expiry));
+        assert_eq!(stored(&api, &customer.token).await, closed);
+        assert_eq!(end_reason(&api, session_id).await, "expired");
+        let recorded = expiry_events(&api, session_id).await;
+        let [event] = recorded.as_slice() else {
+            panic!("expected one expiry event, got {recorded:?}");
+        };
+        assert_eq!(event["channel"], "MOBILE");
+        assert_eq!(event["outcome"], "completed");
+        assert_eq!(event["request_id"], id);
+        assert_eq!(event["customer_no"], inflight.who.customer_no);
+        assert_eq!(event["device_id"], "payee-test");
+        assert_eq!(
+            event["payload"],
+            json!({
+                "session_id": session_id,
+                "ended_at": effective_expiry.to_rfc3339(),
+                "end_reason": "expired",
+            })
+        );
+
+        let retry_id = new_id();
+        let (status, _) = call(
+            &api.public,
+            "GET",
+            "/v2.0/user/me",
+            &retry_id,
+            Some(&customer.token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_unauthorized_at(&api, &customer.token, at).await;
+        finish(&api, &inflight, StatusCode::OK).await;
+        assert_eq!(stored(&api, &customer.token).await, closed);
+        assert_eq!(expiry_events(&api, session_id).await, recorded);
+        assert_eq!(events(&api, &retry_id).await, "request.completed");
     }
 
     #[tokio::test]
@@ -535,6 +655,9 @@ mod deferred_touch {
         finish(&api, &stale, StatusCode::OK).await;
         assert_eq!(stored(&api, &customer.token).await, logged_out);
         assert_eq!(events(&api, &id).await, "logout,request.completed");
+        assert_unauthorized_at(&api, &customer.token, logged_out.0 + SESSION_IDLE).await;
+        assert_eq!(end_reason(&api, &stale.who.session_id).await, "LOGOUT");
+        assert!(expiry_events(&api, &stale.who.session_id).await.is_empty());
     }
 
     #[tokio::test]
@@ -644,6 +767,16 @@ mod deferred_touch {
         assert_eq!((reset.0, reset.1), (before.0, before.1));
         finish(&api, &request, StatusCode::OK).await;
         assert_eq!(stored(&api, &customer.token).await, reset);
+        assert_unauthorized_at(&api, &customer.token, reset.0 + SESSION_IDLE).await;
+        assert_eq!(
+            end_reason(&api, &request.who.session_id).await,
+            "password_reset"
+        );
+        assert!(
+            expiry_events(&api, &request.who.session_id)
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
