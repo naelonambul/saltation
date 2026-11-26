@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "qualify-n8-and-loopback-ports",
+  "kind": "behavior",
+  "title": "Remove co-tenant requirement from N-8 and expose bank loopback ports for qualification",
+  "base": {
+    "ref": "main",
+    "commit": "3aec56403fab5c417294396dc412bd5402841343"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:bb4eea805cb0f02198053828490e4ada191500021aae632d4cd9b9fa580d4734"
+  },
+  "write_scope": [
+    "spec.md",
+    "infra/compose/compose.yml",
+    "loadtest/saltation_loadtest/verify_host.py",
+    "loadtest/tests/test_verify_host.py",
+    "loadtest/README.md",
+    "scripts/dev/it-oracle.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:aa3c47f9b1b2b4007b17f421f589f890c1f9e5410f3e06197948eea2e01ea287",
+      "by": "ckh",
+      "at": "2026-11-26T02:09:39Z"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:8e6203329be5cb891c931c8234d0ca15f45c43ddca7624bbdc99ab747c38b789",
+      "by": "ckh",
+      "at": "2026-11-26T02:09:39Z",
+      "write_scope_sha256": "sha256:0653be9b5b23443337e97cd495951b7c482629ae6c493a5dc6a6c3f9e51f7198"
+    }
+  ]
+}

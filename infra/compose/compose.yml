@@ -85,7 +85,10 @@ services:
     volumes:
       - applogs:/var/log/saltation
     networks: [data, edge, internal, obs]
-    ports: ["${BANK_PUBLISH:-127.0.0.1:8080}:8080"]
+    ports:
+      - "${BANK_PUBLISH:-127.0.0.1:8080}:8080"
+      - "${BANK_GENERATOR_PUBLISH:-127.0.0.1:8081}:8081"
+      - "${BANK_METRICS_PUBLISH:-127.0.0.1:9100}:9100"
     depends_on:
       oracle: { condition: service_healthy }
       mongo: { condition: service_healthy }
