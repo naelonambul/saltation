@@ -22,15 +22,15 @@
   "approvals": [
     {
       "artifact": "spec.md",
-      "sha256": "sha256:aa3c47f9b1b2b4007b17f421f589f890c1f9e5410f3e06197948eea2e01ea287",
+      "sha256": "sha256:d8ffc031f0ff1bedee0ff8e62052d87d6096d0a89a5a47da51305f6e9bb681b0",
       "by": "ckh",
-      "at": "2026-11-26T02:09:39Z"
+      "at": "2026-11-26T02:21:17Z"
     },
     {
       "artifact": "plan.md",
       "sha256": "sha256:8e6203329be5cb891c931c8234d0ca15f45c43ddca7624bbdc99ab747c38b789",
       "by": "ckh",
-      "at": "2026-11-26T02:09:39Z",
+      "at": "2026-11-26T02:21:17Z",
       "write_scope_sha256": "sha256:0653be9b5b23443337e97cd495951b7c482629ae6c493a5dc6a6c3f9e51f7198"
     }
   ]
