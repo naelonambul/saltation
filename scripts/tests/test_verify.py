@@ -1,5 +1,3 @@
-"""Fixtures for `repo.py verify`: routing, statuses, evidence."""
-
 import json
 import os
 import subprocess
@@ -135,7 +133,7 @@ class Verify(RepoCase):
 
     def test_digest_binds_a_submodule_commit(self):
         sys.path.insert(0, str(REPO_PY.parent))
-        import repo  # noqa: E402
+        import repo
 
         self.configure(check("src"))
         head = self.git("rev-parse", "HEAD")

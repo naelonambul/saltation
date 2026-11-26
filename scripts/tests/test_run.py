@@ -1,5 +1,3 @@
-"""`scripts/tests/run.py`: a run passes only if unittest finished, ran tests, and reported OK."""
-
 import subprocess
 import sys
 import tempfile
@@ -94,7 +92,7 @@ class Verdict(unittest.TestCase):
     def setUp(self):
         sys.path.insert(0, str(RUN.parent))
         self.addCleanup(sys.path.remove, str(RUN.parent))
-        import run  # noqa: E402
+        import run
 
         self.verdict = run.verdict
 

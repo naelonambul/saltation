@@ -34,7 +34,6 @@ class RetentionTests(unittest.TestCase):
     def test_cutoff_iso_utc_calendar_months(self) -> None:
         now = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
         self.assertEqual(compute_bank_logs_cutoff(now), "2025-05-21T12:00:00.000Z")
-        # Month-end clamping (non-leap and leap February)
         non_leap = datetime(2026, 8, 31, 0, 0, 0, tzinfo=UTC)
         self.assertEqual(compute_bank_logs_cutoff(non_leap), "2025-02-28T00:00:00.000Z")
         leap = datetime(2025, 8, 31, 0, 0, 0, tzinfo=UTC)

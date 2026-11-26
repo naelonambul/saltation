@@ -1,5 +1,3 @@
-"""Tests for the agent-neutral hook guard and its Claude Code adapter."""
-
 from __future__ import annotations
 
 import json

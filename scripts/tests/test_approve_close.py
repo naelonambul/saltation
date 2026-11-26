@@ -1,5 +1,3 @@
-"""`repo.py approve`: mechanical, order-checked, never an authority; `close` no longer exists."""
-
 import json
 
 from scripts.tests.support import UNESTABLISHED, RepoCase, digest

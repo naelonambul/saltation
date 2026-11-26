@@ -1,5 +1,3 @@
-"""Use real Git objects to exercise the Oracle job's routing boundary."""
-
 from __future__ import annotations
 
 import os
@@ -197,7 +195,6 @@ class OraclePrRoute(unittest.TestCase):
         self.git("switch", "-qC", "pr", "main")
         self.write("README.md")
         self.write("bank/src/main.rs")
-        # A candidate-only classifier would unconditionally route this code change away from OCI.
         self.write("scripts/oracle_pr_route.py", "print('docs-only')\n")
         self.write("scripts/repo.py", "raise SystemExit('candidate module must not be imported')\n")
         commits = self.candidate()

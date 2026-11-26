@@ -85,6 +85,7 @@ Add a read-only reviewer, using `references/review-brief.md`, only when at least
 - concurrency;
 - a public interface;
 - a change to verification, tests' oracles, or registered checks;
+- a diff that adds or edits a `comment-exceptions.json` entry or a `none` gate in `checks.json`;
 - an ambiguous spec;
 - a unit that needed a retry;
 - a diff clearly larger than the plan implied.

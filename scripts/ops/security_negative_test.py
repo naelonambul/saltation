@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Stage 8 automated security negative test suite (spec.md Security & Acceptance #12)."""
 
 from __future__ import annotations
 
@@ -166,13 +165,11 @@ def run_suite(
     api = api_url.rstrip("/")
     results: list[NegativeCheck] = []
 
-    # 1. Public health checks
     w_status, _, _ = http_request("GET", f"{web}/healthz")
     results.append(NegativeCheck("web /healthz reachable", w_status == 200, f"HTTP {w_status}"))
     a_status, _, _ = http_request("GET", f"{api}/healthz")
     results.append(NegativeCheck("api /healthz reachable", a_status == 200, f"HTTP {a_status}"))
 
-    # 2. CORS preflight
     c_status, c_headers, _ = http_request(
         "OPTIONS",
         f"{api}/v2.0/ext/auth/login",
@@ -191,16 +188,13 @@ def run_suite(
         )
     )
 
-    # 3. Restricted routes unreachable through tunnel
     for method, path in RESTRICTED_ROUTES:
         st, _, _ = http_request(method, f"{api}{path}")
         results.append(evaluate_restricted_route(method, path, st))
 
-    # 3b. Unauthenticated admin route denied (Cloudflare Access or admin auth)
     admin_status, _, _ = http_request("GET", f"{api}/admin/v1/customers")
     results.append(evaluate_admin_unauthenticated(admin_status))
 
-    # 4. Spoofed X-Sim-* login probe (omit body device_id so X-Sim-Device cannot be masked)
     probe_body = json.dumps(
         {"phone": "010-0000-0000", "password": "invalid-probe-value"}
     ).encode("utf-8")
@@ -235,7 +229,6 @@ def run_suite(
     for k, v in load_env_file(env_file).items():
         env_map.setdefault(k, v)
 
-    # Wait briefly for outbox relay to deliver the probe event
     events: list[dict[str, Any]] = []
     if req_id and env_map.get("MONGO_BANK_PASSWORD"):
         for _ in range(10):
@@ -255,7 +248,6 @@ def run_suite(
             time.sleep(0.5)
     results.append(evaluate_spoofed_event(events))
 
-    # 5. MongoDB RBAC isolation
     bank_to_truth = run_mongo_eval(
         container=mongo_container,
         user="bank",

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Summarize captured Oracle counters using only the standard library."""
 import json
 from pathlib import Path
 import re
@@ -25,8 +23,6 @@ def rate(value, denominator):
 
 
 def session_delta(before, after):
-    # End-only summation loses the work of connections retired during the
-    # window. Never turn that incomplete sample into a measured zero or gain.
     if not before or before.keys() != after.keys():
         return None
     totals = {}

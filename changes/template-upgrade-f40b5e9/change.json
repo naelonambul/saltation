@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "template-upgrade-f40b5e9",
+  "kind": "repository",
+  "title": "Upgrade repository template from 51ca588 to f40b5e9",
+  "base": {
+    "ref": "main",
+    "commit": "93fd4801cfdebbadcd4b053f830e1120a0ecb8e4"
+  },
+  "baseline": {},
+  "write_scope": [
+    ".agents/skills/**",
+    ".claude/skills/template-upgrade",
+    ".github/pull_request_template.md",
+    "AGENTS.md",
+    "REVIEW.md",
+    "changes/README.md",
+    "changes/_template/plan.md",
+    "checks.json",
+    "scripts/**"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ade6e1745269dad45dcb044334b3b4495c880d7d84d42d3a881a2a6c61fa3a5a",
+      "by": "ckh",
+      "at": "2026-11-26T11:36:38Z",
+      "write_scope_sha256": "sha256:0cce2043ef6dd93bcf9d5b85ed25d6f2575808ece0af2c5363c643a12b1b29a8"
+    }
+  ]
+}

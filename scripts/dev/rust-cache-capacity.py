@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Budget a new guarded cache without deleting or changing legacy artifacts."""
 import json
 import os
 from pathlib import Path
@@ -20,8 +18,6 @@ def main():
         return 0
     legacy = Path('/legacy')
     storage = legacy if legacy.exists() else Path('/registry')
-    # The historical cache bounds the new target; reserve another release tree
-    # for the separately named BuildKit cache, plus filesystem headroom.
     historical = allocated(legacy)
     release = allocated(legacy / 'release') if legacy.exists() else 0
     budget = max(historical + release, 8 * 1024**3) + 2 * 1024**3

@@ -5,7 +5,7 @@ description: Establish and run repository-native quality tooling. Use when a pro
 
 # Repository Quality
 
-Treat quality tooling as repository infrastructure. Reuse established tooling; bootstrap only after the product stack is concrete.
+Treat quality tooling as repository infrastructure. Reuse established tooling; bootstrap only after the product stack is concrete. Once any product path is tracked, `repo.py status` fails until every gate is decided (see "Decide the gates").
 
 ## Determine the current state
 
@@ -29,6 +29,50 @@ When the stack is established and suitable quality tooling is absent or material
 8. If the tooling setup would materially depart from the approved change, revise its plan and obtain a fresh owner approval before proceeding.
 9. Run the new checks against the repository and fix starter configuration or source until the setup is genuinely usable. Do not weaken a rule merely to obtain a green result.
 10. Register each gate as a check in `checks.json` (see below). If a stable multi-command wrapper improves reproducibility, put it under `scripts/` and register the wrapper.
+
+## Decide the gates
+
+`checks.json` declares a decision for each of seven roles: `build`, `test`, `lint`, `format`, `types`, `boundaries` and `comments`.
+
+```json
+"gates": {
+  "build": "app-build",
+  "types": {"none": "the compiler is the type checker; app-build fails on type errors"},
+  ...
+}
+```
+
+- A value is a registered check id, or `{"none": "<reason>"}`.
+- `repo.py status` fails with `gates-undecided` when a product path is tracked and a role is missing, and with `checks-missing` when `checks.json` is gone. It fails with `checks-invalid` for an unknown role, an unregistered id, or an empty reason.
+- `none` is acceptable only when the role truly does not apply: a docs-only or data-only product, or a role another gate already covers, in which case the reason names that gate. "Later", "not set up yet" and "too slow" are not reasons; reviewers reject them.
+- `boundaries` registers a native tool that enforces the structure the spec decided (see "Encode recurring mistakes").
+- `comments` registers a check described in "Comments".
+
+## Comments
+
+Comments are off by default. A comment states a fact the code does not enforce, and it drifts. Put the fact in a name, a type, an assertion message, a check or a test, then delete the comment.
+
+The `comments` gate check uses the language's own tokenizer or parser, never a hand-written lexer or regex. It fails on every comment whose `(path, line text with surrounding whitespace stripped)` has no entry in `comment-exceptions.json`. `scripts/tests/test_comments.py` is the worked example for Python.
+
+```json
+{
+  "schema": 1,
+  "exceptions": [
+    {"path": "Package.swift", "text": "// swift-tools-version: 6.0", "category": "directive",
+     "reason": "SwiftPM reads the tools version from this exact comment"}
+  ]
+}
+```
+
+- The categories are closed:
+  - `license`: a legal or SPDX header;
+  - `directive`: a comment a toolchain, interpreter or formatter reads;
+  - `public-api`: a doc comment on an API the product publishes to outside callers;
+  - `external-constraint`: behavior forced by something outside the repository that code cannot express. It needs `evidence` naming the outside source.
+- There is no category for our own code. Workarounds, "for now", "do not remove", complexity notes, history and TODOs are rejected: fix the code, or encode the constraint as a type, check or test.
+- `repo.py status` fails with `comment-exceptions-invalid` on an unknown category, an empty reason, a missing `evidence`, an untracked path, a duplicate, or a stale entry whose text is no longer a line of the file.
+- Each line of a multi-line comment is its own entry. That keeps exceptions expensive, which is intended.
+- An entry is accepted only when reviewers and the owner are convinced. A long reason that explains or defends our own code is a confession, not a justification: remove the comment and fix the code. Never reword the reason to get it accepted.
 
 ## Stack-aware selection guidance
 
@@ -75,6 +119,8 @@ Use a native tool for boundaries, such as Go `internal/`, Cargo workspaces, Swif
 - `paths`, the changed paths that route to it. Unmapped changes run the full suite;
 - `requires`, the executables it needs. A missing executable is `blocked`, never passed.
 
+`gates` maps each role to a check id or `{"none": "<reason>"}` ("Decide the gates").
+
 Keep the generic `core` group dependent only on Python and Git. A check that needs a stack toolchain (Node, JDK, Xcode, …) gets its own group and its own CI job in `.github/workflows/repository.yml`, which installs that toolchain and runs `repo.py verify --group <group>`. Add the job to the summary's `needs`. `repo.py status` fails when groups and jobs disagree. Groups are execution and isolation units only: a group-filtered run reports other checks as `not-run` and its evidence as incomplete, so a group can never stand in for the full required set.
 
 The GitHub App cannot push `.github/workflows/**`, so a new group or CI job is an owner handoff; follow "Workflow changes" in `docs/host-setup.md`. Do not revert the group to silence `checks-unwired`. A check that needs only Python and Git can use `core`.
@@ -91,3 +137,7 @@ Never model a gate that does not apply as a skipped CI job. `repo.py` decides `n
 ## Report evidence
 
 Report the exact commands or checks run, whether they passed, the `.evidence/` path, and any relevant limitation. Do not claim a check ran when it did not. `blocked` and `not-run` are not passes.
+
+---
+
+The comment policy adapts ideas from pstack (MIT, Lauren Tan): `no-comments` (encode the constraint, then delete the comment) and Comment Sicko's keep-list and its rule that a long justification is a confession. The wording is this template's own.

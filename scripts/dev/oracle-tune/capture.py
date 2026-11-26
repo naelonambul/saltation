@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Emit read-only SYSDBA capture SQL, matching production SQL by its file text."""
 import pathlib
 import sys
 
@@ -24,8 +22,6 @@ AND w.workload='{workload}' AND w.concurrency={int(concurrency)}"""
     ]:
         print(f'PROMPT {title}\n{query};')
 else:
-    # Exact complete SQL text, including comments: this is what SqlStmt sends to Oracle.
-    # Capture every executed production statement, a superset of findings 1--8.
     print('PROMPT Production cursors active in the separate STATISTICS_LEVEL=ALL plan run; timing results are separate')
     print("DECLARE n NUMBER; BEGIN")
     for path in sorted((root / 'bank/src').glob('**/sql/*.sql')):

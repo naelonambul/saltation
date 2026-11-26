@@ -10,7 +10,17 @@ Change-ID: replace-with-change-id
 
 ## Verification
 
-<!-- `python3 scripts/repo.py verify --change <id>` result and evidence references. -->
+<!-- Link changes/<id>/review.md and report the result of
+     `python3 scripts/repo.py verify --change <id> --full` on the final PR head.
+     Include material results and link accessible evidence when available. -->
+
+### Performance evidence (if applicable)
+
+<!-- For performance, throughput, or resource improvements, compare the
+     baseline and candidate under the same workload and environment.
+     Record both revisions, conditions, measured values, acceptance criteria,
+     errors and consistency checks, and links to available evidence.
+     For Oracle Database results, follow the OTN benchmark disclosure rule in REVIEW.md. -->
 
 ## Plan deviation
 

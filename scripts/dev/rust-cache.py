@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""Serialize Cargo use and distrust package artifacts when source bytes change.
-
-Only bank is cleaned; registry and dependency artifacts remain reusable. Marker
-files are cache state, never an assertion that Cargo's entire target is fresh.
-"""
 import argparse
 import fcntl
 import hashlib
@@ -32,7 +26,6 @@ def digest_parts(parts):
 
 
 def arguments():
-    # Parse the wrapper separately so application/test arguments stay opaque.
     try:
         split = sys.argv.index('--')
     except ValueError:
@@ -123,7 +116,6 @@ def tree_parts(root):
             if (Path(directory) / name).is_symlink():
                 raise CacheError('symlink input cannot be fingerprinted safely')
         for name in sorted(files):
-            # Never open dotenv or credential stores, including in contracts.
             if name.startswith('.env') or name.lower() in ('credentials', 'credentials.toml'):
                 continue
             parts.extend(file_parts(Path(directory) / name))
@@ -180,9 +172,6 @@ class Children:
 
 
 def _cargo_fingerprint_args(cmd):
-    # Cargo-side flags can change compilation; exclude opaque runtime arguments
-    # and pure `cargo test` target-selection flags so switching `--test <name>`
-    # across suites reuses the trusted `bank` debug artifacts instead of cleaning.
     args = cmd[:cmd.index('--')] if len(cmd) > 1 and cmd[1] in ('test', 'run') and '--' in cmd else list(cmd)
     if len(args) < 2 or args[1] != 'test':
         return args
@@ -267,8 +256,6 @@ def main(children):
         marker = state / (digest_parts([profile_scope]) + '-' + key + '.json')
         source = fingerprint(bank, contracts, config, command, children, env)
         invalidated = not trusted(marker, source)
-        # Config selectors may designate the same physical output directory.
-        # Conservatively retire sibling selectors of this output profile too.
         for sibling in state.glob(digest_parts([profile_scope]) + '-*.json'):
             if sibling != marker:
                 atomic_marker(sibling, {'version': 1, 'trusted': False})
@@ -305,7 +292,6 @@ if __name__ == '__main__':
     try:
         result = main(children)
     except (CacheError, OSError):
-        # Do not echo exceptions, paths, argv or environment (may contain secrets).
         print('rust-cache: interrupted' if children.interrupted else
               'rust-cache: rejected arguments or unavailable/changed inputs; cache not trusted', file=sys.stderr)
         result = 128 + children.interrupted if children.interrupted else 2

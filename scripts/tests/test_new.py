@@ -1,5 +1,3 @@
-"""`repo.py new`: mechanical packet creation."""
-
 from __future__ import annotations
 
 import json
@@ -107,7 +105,9 @@ class CreateTests(NewCase):
 
     def test_implementation_copies_no_artifacts(self):
         self.establish_baseline()
-        self.assertEqual(self.new("impl", "--kind", "implementation", "--title", "Impl").returncode, 0)
+        proc = self.new("impl", "--kind", "implementation", "--title", "Impl")
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("checks.json gate", proc.stdout)
         self.assertEqual(sorted(p.name for p in (self.root / "changes/impl").iterdir()), ["change.json", "plan.md"])
         self.assertEqual(set(self.change("impl")["baseline"]), {"intent.md", "spec.md"})
 
@@ -115,6 +115,8 @@ class CreateTests(NewCase):
         proc = self.new("init", "--kind", "product-init", "--title", "Init")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("unestablished marker", proc.stdout)
+        self.assertIn("vertical slices", proc.stdout)
+        self.assertIn("checks.json gate", proc.stdout)
         self.assertEqual(self.change("init")["baseline"], {})
         self.assertEqual(self.read("changes/init/intent.md"), self.read("intent.md"))
         self.assertEqual(self.read("changes/init/spec.md"), self.read("spec.md"))

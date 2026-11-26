@@ -1,5 +1,3 @@
-"""Classify an exact GitHub pull request candidate for the Oracle CI job."""
-
 from __future__ import annotations
 
 import argparse
@@ -78,7 +76,7 @@ def classify(root: Path, event: str, base: str, head: str, candidate: str, body:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Classify an exact GitHub pull request candidate for the Oracle CI job.')
     for field in ("event", "base", "head", "candidate"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--pr-body", required=True, type=Path)
