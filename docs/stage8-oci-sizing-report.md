@@ -1,6 +1,6 @@
 # Stage 8 OCI Resource Sizing, OWASP Argon2id Analysis, and Stage 6 Bottleneck Report
 
-> **OTN compliance notice (`REVIEW.md`):** This public document records host/container resource budgets, standalone pure-Rust Argon2id CPU microbenchmarks, high-level pass/fail conformance outcomes, and generator/MongoDB bottleneck diagnostics only. Measured Oracle Database throughput, latency, wait-time, and execution-plan statistics are excluded and kept in ignored local `.evidence/` only.
+> **OTN compliance notice (`REVIEW.md`).** This report records host and container resource budgets, standalone pure-Rust Argon2id CPU microbenchmarks, conformance outcomes, and bottleneck diagnostics. Oracle-backed application throughput, latency, wait-time, execution-plan, and benchmark-derived wall-time and extrapolation measurements are excluded and kept only in ignored local `.evidence/`.
 
 ## 1. Investigation Scope & Host Specifications
 
@@ -16,6 +16,8 @@ Following the 24-hour continuous stability run (`docs/stage8-24h-stability-repor
 ## 2. Standalone Argon2id ARM64 Microbenchmark & OWASP Policy (Spec N-6)
 
 Standalone pure-Rust `argon2 0.5.3` (`--release`, no database involvement) verification latency was measured on the OCI Ampere Altra host across OWASP Password Storage Cheat Sheet minimum configurations and exploratory non-OWASP profiles.
+
+The theoretical mixed operation rates and 365-day estimates below use only the standalone Rust timings, the workload's authentication share, and the CPU budget.
 
 ### 2.1 OWASP Password Storage Cheat Sheet Minimum Configurations
 
@@ -41,7 +43,7 @@ Standalone pure-Rust `argon2 0.5.3` (`--release`, no database involvement) verif
 
 Under the current Stage 6 persona workload (`generator/saltation_gen/personas/profiles.py`), 20,000 customers generate ~9.51M annual requests (`475.5` req/customer/yr), of which **`38.7%`** (`184` req/customer/yr = 155 password logins + 29 ATM PIN verifications) invoke Argon2id:
 
-- Reaching N-4's `200 ops/s` sustained target at `38.7%` auth share requires **`77.4` Argon2id verifications/sec**.
+- Reaching the then-current N-4 target of `200 ops/s` sustained at `38.7%` auth share requires **`77.4` Argon2id verifications/sec**.
 - Under OWASP minimum configurations (`19456/2/1` at `30.9/s` per vCPU or `46080/1/1` at `17.5/s` per vCPU), `bank` within a 4 vCPU shared host budget (N-7) cannot physically sustain `77.4` verifications/sec without either:
   1. Reducing the normal-traffic auth share via realistic session token reuse (e.g., `38.7%` → `~10–15%`, which brings `200 ops/s` down to `20–30` verifications/sec), **or**
   2. Revising N-4's sustained ops/s target to align with OWASP Argon2id on 4 vCPU.
@@ -67,7 +69,7 @@ Exploratory stepped-load (N-3: 25/50/100/200 TPS, 60s/step) and hot-account (N-2
 
 - **N-1 / N-3 exploratory transfer latency & error rate**: **PASS** (all steps through 200 TPS stayed well within N-1/N-3 latency and `>= 99.9%` success criteria; `outbox_undelivered = 0`, `daily_close_mismatches = 0`, zero container restarts/OOMs).
 - **N-2 exploratory hot-account probe**: **PASS** (`senders=219 >= 200`, `success_rate=100%`, well within the `<= 500 ms` p95 limit).
-- Raw exploratory reports and server-side timings remain in ignored local `.evidence/` and OCI `/tmp/` only.
+- Raw exploratory reports and server-side timings are kept only in ignored local `.evidence/`.
 
 ## 4. Stage 6 Backfill Secondary Bottleneck Diagnosis
 
@@ -100,23 +102,21 @@ Two complete 3-day Stage 6 backfill slices (`20,000` customers, `amplification=2
 
 | Metric | Pre-PR #46 (`4096/2/1`, `7f6c522`) | Post-PR #46 (`4096/2/1`, `e3a960a`) | Post-PR #46 (**OWASP `19456/2/1`**, `e3a960a`) |
 | --- | --- | --- | --- |
-| **Total wall time (seeding + 3d backfill)** | Day 1 only (~9m; incomplete) | **`23m 40s`** (~5.5m seeding + ~18m backfill) | **`60m 04s`** (`29.4m` seeding + `31.0m` backfill) |
-| **Backfill average business ops/s** | `~46 ops/s` | `~75 ops/s` | **`42.4 ops/s`** (median `44.7 ops/s`) |
-| **Normal-dominant 1m business ops/s** | `~46 ops/s` | **`105.2 ops/s`** (`2.3x` vs pre-PR #46) | **`78.5 ops/s`** peak (`p90: 56.5 ops/s`) |
-| **`/clock` + `/outbox` control calls** | ~20,680 on Day 1 alone | `-83%` overall (`-95%+` on normal chunks) | `14,559` total across all 3 days |
-| **Primary bottleneck** | `generator` (`65.2%/65%`) + `mongo` (`34.8%`) | Balanced (`bank` avg `45.0%`) | **`bank` Argon2id CPU** (avg `90.8%`, p95 `130.6%`) |
+| **Control calls** | Per-wave gating with redundant clock reads | Bucket-level gating with direct clock-set response validation reduced control calls | Same batched control path |
+| **Primary bottleneck** | Serialized journaling saturated `generator` and `mongo` | Load was more balanced after batching | **`bank` Argon2id CPU** |
 | **`bank` resident memory (RSS)** | `~24 MiB` | `24.0 MiB` | **`24.7 MiB`** (`< 2.5%` of `1 GiB` limit) |
-| **Conformance (`rejected` / `unresolved` / `daily_close_mismatches` / `outbox_undelivered`)** | — | `0 / 0 / 0 / 0` (`81,930` succeeded) | **`0 / 0 / 0 / 0`** (`81,930` succeeded, `369` daily closes) |
+| **Conformance (`rejected` / `unresolved` / `daily_close_mismatches` / `outbox_undelivered`)** | Incomplete run | `0 / 0 / 0 / 0` (`81,930` succeeded) | **`0 / 0 / 0 / 0`** (`81,930` succeeded, `369` daily closes) |
 
-### 5.2 OWASP `19456/2/1` Detailed Observations & 365-Day Extrapolation
+### 5.2 OWASP `19456/2/1` Resource Observations
 
-- **Auth share & Argon2id measurements:** Across `82,430` business HTTP requests during the 3-day slice, `/v2.0/ext/auth/login` accounted for **`27,875` requests (`33.8%`)** (average `14.7/s`, peak `27.1/s`). Across `74,353` total Argon2id hash/verify calls (seeding + backfill logins/PINs), mean hash duration was **`52.4 ms`** with mean concurrency-gate wait **`12.6 ms`**.
-- **Container resource headroom (60m full-run averages vs Candidate A limits):**
-  - `bank` (`1.30 vCPU / 1 GiB`): avg `90.8%`, p95 `130.6%`, max `135.8%`, cgroup throttled `22.9%`, RSS `24.7 MiB`.
-  - `mongo` (`0.45 vCPU / 3 GiB`): avg `11.9%`, p95 `44.3%`, cgroup throttled `18.3%`, RAM `341.8 MiB`.
-  - `generator` (`0.65 vCPU / 768 MiB`): avg `13.0%`, p95 `50.9%`, cgroup throttled `2.2%`, RAM `137.5 MiB`.
-  - `oracle` (`1.05 vCPU / 6 GiB`): avg `10.8%`, p95 `51.2%`, cgroup throttled `0.4%`, RAM `4.29 GiB`.
-- **365-day backfill extrapolation under OWASP `19456/2/1`:** Customer seeding is a one-time cost (`~30 min`). Because the 3-day slice compresses all `3,400` annual scenarios into 3 days (raising scenario overhead relative to normal traffic), a full 365-day backfill on Candidate A with OWASP `19456/2/1` is projected at **`~45–55 hours`** (~2 days) of unattended wall time at `~45–57 ops/s` sustained normal-dominant throughput.
+After PR #46 reduced generator and MongoDB serialization, Argon2id hashing during seeding and verification during backfill logins and PIN checks made bank CPU the primary bottleneck under the OWASP profile. Raw timings and rates are kept only in ignored local `.evidence/`.
+
+| Container | Observed memory | Candidate A memory limit |
+| --- | ---: | ---: |
+| `bank` (RSS) | `24.7 MiB` | `1 GiB` |
+| `mongo` | `341.8 MiB` | `3 GiB` |
+| `generator` | `137.5 MiB` | `768 MiB` |
+| `oracle` | `4.29 GiB` | `6 GiB` |
 
 ## 6. Post-Hardening OCI Validation (`main` @ `de0d055`, PR #52–#60)
 
@@ -135,7 +135,7 @@ Per the repository's OTN benchmark-disclosure policy (`REVIEW.md`), raw latency 
 
 A clean-volume 3-day Stage 6 backfill (`20,000` customers, `amplification=20`, `workers=8`, `first=2025-01-02`, `days=3`) completed with zero errors:
 
-- **Total wall time (20,000-customer seeding + 3-day backfill):** `49m 56s` (`2,996 s`). Compared to the PR #52 `46m 08s` slice, the `+3m 48s` delta reflects PR #56's hour-wide minute spreading (removing 1-minute burst concentration, `wave_offset: 11,285`) and the `200` new Scenario G `declined_card` operations; PR #58's `normal_visit` 75% session-reuse savings (~10% annual request reduction) take full effect over a 365-day run where normal traffic dominates.
+- **Workload changes.** PR #56 spread operations across each hour to reduce bursts and added Scenario G declined-card operations. PR #58 introduced session reuse for normal mobile visits to reduce repeated logins, with greater impact on the normal-traffic mix of a full-year run. Raw run timings are kept only in ignored local `.evidence/`.
 - **Operations & scenario conformance:** `75,798` succeeded + `200` declined (`200/200` Scenario G `card.declined` generated), `0` unresolved, `0` prepared, `0` daily-close mismatches (`bank_daily_close_mismatches=0`), and `0` undelivered outbox events (`bank_outbox_undelivered=0`). Every annual scenario quota (`A: 200, B: 200, C: 100, D: 100, E: 300, F: 300, G: 200, lookalike: 2,000`) reached 100%.
 - **Observed container memory & health at completion:**
   - `saltation-bank-1`: `79.0 MiB / 1 GiB` (`healthy`, `0` restarts)

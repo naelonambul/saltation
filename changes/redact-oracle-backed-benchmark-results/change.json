@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "redact-oracle-backed-benchmark-results",
+  "kind": "repository",
+  "title": "Redact Oracle-backed measured throughput and duration figures from tracked Stage 8 reports",
+  "base": {
+    "ref": "main",
+    "commit": "b4626c5512947277b539dbe4016c4529e925f1d0"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/stage8-24h-stability-report.md",
+    "docs/stage8-oci-sizing-report.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:5692fb88545453ed3ee019e17b2f1cf3959385cd9570df0bf81dacda5f586f63",
+      "by": "ckh",
+      "at": "2026-11-26T13:02:59Z",
+      "write_scope_sha256": "sha256:a262a724e7045007a42b08897f01c6314f80fc451a8b5fadfc4f63ffc1103175"
+    }
+  ]
+}
