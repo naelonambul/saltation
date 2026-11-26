@@ -364,12 +364,60 @@ pub fn user_seq_no(customer_id: i64) -> String {
     format!("{customer_id:010}")
 }
 
+fn in_flight_sessions() -> &'static Mutex<std::collections::HashMap<String, usize>> {
+    static SESSIONS: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+struct InFlightSessionGuard {
+    session_id: String,
+}
+
+impl InFlightSessionGuard {
+    fn enter(session_id: &str) -> Arc<Self> {
+        let mut map = in_flight_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *map.entry(session_id.to_owned()).or_insert(0) += 1;
+        Arc::new(Self {
+            session_id: session_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for InFlightSessionGuard {
+    fn drop(&mut self) {
+        let mut map = in_flight_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(&self.session_id) {
+            if *count <= 1 {
+                map.remove(&self.session_id);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
+
+fn has_in_flight_session(session_id: &str) -> bool {
+    in_flight_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(session_id)
+}
+
+fn is_lock_contention(error: &DbError) -> bool {
+    matches!(error, DbError::Busy) || matches!(error.ora_code(), Some(54 | 60 | 30006))
+}
+
 /// Request-local activity, applied only with its committed completion.
 #[derive(Clone)]
 pub struct PendingTouch {
     pub token_hash: String,
     pub session_id: String,
     pub now: chrono::DateTime<chrono::FixedOffset>,
+    _in_flight: Option<Arc<InFlightSessionGuard>>,
 }
 
 impl std::fmt::Debug for PendingTouch {
@@ -379,6 +427,19 @@ impl std::fmt::Debug for PendingTouch {
 }
 
 impl PendingTouch {
+    pub fn detached(
+        token_hash: String,
+        session_id: String,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Self {
+        Self {
+            token_hash,
+            session_id,
+            now,
+            _in_flight: None,
+        }
+    }
+
     pub(crate) fn apply(
         &self,
         session: &mut crate::shared::db::Session,
@@ -391,7 +452,7 @@ impl PendingTouch {
             .map(|_| ())
             .map_err(|error| {
                 // execute/timed records the original Oracle failure before remapping.
-                if error.ora_code() == Some(30006) {
+                if is_lock_contention(&error) {
                     crate::shared::db::DbError::Busy
                 } else {
                     error
@@ -440,6 +501,19 @@ pub(crate) fn expire_session(
     Ok(())
 }
 
+pub(crate) fn expire_session_with_ended_at(
+    s: &mut Session,
+    session_id: &str,
+    cutoff: DateTime<FixedOffset>,
+    ended_at: DateTime<FixedOffset>,
+    event: impl FnOnce() -> Event,
+) -> Result<(), DbError> {
+    if s.execute(&EXPIRE_SESSION, &[&session_id, &cutoff])? == 1 {
+        outbox::record(s, &event().payload(expiry_payload(session_id, ended_at)))?;
+    }
+    Ok(())
+}
+
 fn expiry_payload(session_id: &str, ended_at: DateTime<FixedOffset>) -> serde_json::Value {
     json!({
         "session_id": session_id,
@@ -460,10 +534,14 @@ fn expire_presented_token(
     let Some((session_id, _, _)) = s.query_opt::<Candidate>(&SELECT_EXPIRED_TOKEN, params)? else {
         return Ok(());
     };
+    if has_in_flight_session(&session_id) {
+        return Ok(());
+    }
     if s.query_opt::<String>(&LOCK_EXPIRY_TOKEN, &[&hash])?
         .is_some()
         && s.query_opt::<String>(&LOCK_EXPIRY_SESSION, &[&session_id])?
             .is_some()
+        && !has_in_flight_session(&session_id)
         && let Some((locked_session_id, customer_no, device_id)) =
             s.query_opt::<Candidate>(&SELECT_EXPIRED_TOKEN, params)?
         && locked_session_id == session_id
@@ -524,7 +602,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             })
             .await
             .map_err(|e| {
-                if matches!(e, DbError::Busy) || e.ora_code() == Some(30006) {
+                if is_lock_contention(&e) {
                     ApiError::busy(&ctx)
                 } else {
                     tracing::error!(request_id = %ctx.request_id, error = %e, "customer token lookup failed");
@@ -532,6 +610,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
                 }
             })?;
         let customer = found.ok_or_else(unauthorized)?;
+        let _in_flight = Some(InFlightSessionGuard::enter(&customer.session_id));
         stats
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -539,6 +618,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             token_hash: customer.token_hash.clone(),
             session_id: customer.session_id.clone(),
             now,
+            _in_flight,
         });
         if let Some(slot) = parts
             .extensions
@@ -556,6 +636,24 @@ impl FromRequestParts<AppState> for AuthCustomer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_flight_session_guard_tracks_active_requests() {
+        let sid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert!(!has_in_flight_session(sid));
+        let g1 = InFlightSessionGuard::enter(sid);
+        assert!(has_in_flight_session(sid));
+        let g2 = InFlightSessionGuard::enter(sid);
+        drop(g1);
+        assert!(has_in_flight_session(sid));
+        drop(g2);
+        assert!(!has_in_flight_session(sid));
+    }
+
+    #[test]
+    fn lock_contention_classifier_handles_busy_and_oracle_codes() {
+        assert!(is_lock_contention(&DbError::Busy));
+    }
 
     #[test]
     fn expiry_payload_preserves_effective_time() {

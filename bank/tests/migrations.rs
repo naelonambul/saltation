@@ -27,7 +27,7 @@ async fn migrations_apply_once_and_are_recorded() {
 
     assert_eq!(
         MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>(),
-        (1..=21).collect::<Vec<_>>()
+        (1..=22).collect::<Vec<_>>()
     );
     let first = db.migrate().await.expect("first run");
     assert_eq!(
@@ -317,9 +317,9 @@ async fn populated_admin_upgrade() {
     assert_eq!(before.4, 20);
     assert!(before.0 > 0 && before.1 > 0 && before.3 > 0);
 
-    assert_eq!(db.migrate().await.unwrap(), 1);
+    assert_eq!(db.migrate().await.unwrap(), 2);
     let after: Snapshot = db.run(|s| s.query_row(&ADMIN_SNAPSHOT, &[])).await.unwrap();
-    assert_eq!(after, (before.0, before.1, before.2, before.3, 21));
+    assert_eq!(after, (before.0, before.1, before.2, before.3, 22));
     let current: Vec<Token> = db.run(|s| s.query_all(&ADMIN_TOKENS, &[])).await.unwrap();
     assert!(current == tokens, "existing access tokens changed");
     let objects: (i64, i64) = db.run(|s| s.query_row(&ADMIN_SCHEMA, &[])).await.unwrap();

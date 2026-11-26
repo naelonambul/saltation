@@ -64,13 +64,19 @@ impl RolloverJob for AuthSessionExpiryJob {
                         let rows =
                             s.query_all::<Candidate>(&CANDIDATES, &[&cutoff, &EXPIRY_BATCH_SIZE])?;
                         let count = rows.len();
-                        for (session_id, customer_no, device_id, _) in rows {
-                            auth::expire_session(s, &session_id, cutoff, || {
-                                Event::system("session.expired", at, "completed")
-                                    .customer(customer_no)
-                                    .session(&session_id)
-                                    .device(device_id)
-                            })?;
+                        for (session_id, customer_no, device_id, last_seen) in rows {
+                            auth::expire_session_with_ended_at(
+                                s,
+                                &session_id,
+                                cutoff,
+                                last_seen + SESSION_IDLE,
+                                || {
+                                    Event::system("session.expired", at, "completed")
+                                        .customer(customer_no)
+                                        .session(&session_id)
+                                        .device(device_id)
+                                },
+                            )?;
                         }
                         if count > 0 {
                             s.commit()?;
@@ -356,19 +362,32 @@ async fn logout(
     who: AuthCustomer,
 ) -> Result<Response, ApiError> {
     let c = ctx.clone();
-    state
+    let closed = state
         .db
         .run_in(&stats, move |s| {
             s.execute(&REVOKE_TOKEN, &[&now, &who.token_hash])?;
-            s.execute(&END_SESSION, &[&now, &who.session_id])?;
-            let event = Event::for_request(&c, "logout", now, CHANNEL, "completed")
-                .customer(who.customer_no.clone())
-                .session(who.session_id.clone());
-            outbox::record(s, &event)?;
-            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
-            s.commit()
+            if s.execute(&END_SESSION, &[&now, &who.session_id])? == 1 {
+                let event = Event::for_request(&c, "logout", now, CHANNEL, "completed")
+                    .customer(who.customer_no.clone())
+                    .session(who.session_id.clone());
+                outbox::record(s, &event)?;
+                outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
+                s.commit()?;
+                Ok(true)
+            } else {
+                s.rollback()?;
+                Ok(false)
+            }
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
+    if !closed {
+        return Err(ApiError::new(
+            &ctx,
+            StatusCode::UNAUTHORIZED,
+            codes::UNAUTHORIZED,
+            "인증이 필요합니다",
+        ));
+    }
     Ok(api::ok(&ctx, json!({})))
 }

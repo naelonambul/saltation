@@ -22,7 +22,8 @@
     "bank/src/features/auth/**",
     "bank/src/main.rs",
     "bank/tests/auth.rs",
-    "bank/tests/backfill.rs"
+    "bank/tests/backfill.rs",
+    "bank/tests/migrations.rs"
   ],
   "approvals": [
     {
@@ -33,10 +34,10 @@
     },
     {
       "artifact": "plan.md",
-      "sha256": "sha256:36f5616374e746780b4c2fcba60ec284a3bdc790aecfbaa5c14dac33fd36b9f5",
+      "sha256": "sha256:a37d6a2566ad4d107da86a61dcb4b5777763d4ad2911b5c9dd31a064666f49ae",
       "by": "ckh",
-      "at": "2026-11-26T22:17:19Z",
-      "write_scope_sha256": "sha256:5603aa84ab4b7c48452b418afcd64f3e72123a9dd7f9fb858d16208b6a5353ca"
+      "at": "2026-11-26T23:26:58Z",
+      "write_scope_sha256": "sha256:16ef2cca7e2ad40df2285a4ee856c47dca844320690ad79262939828ae1f5b2f"
     }
   ]
 }

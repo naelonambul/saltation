@@ -28,10 +28,11 @@ Astra Pro audit finding `F-03`: customer bearer tokens expire after 30 minutes o
    - Add `"session.expired"` payload schema (`{session_id: ULID, ended_at: date-time, end_reason: "expired"}`, `additionalProperties: false`) and `"auth_session_expiry"` to `rollover.job_completed.job` enum in `contracts/schemas/event-payloads.schema.json`.
    - Add representative positive and negative fixtures for `session.expired` (both system rollover and lazy request-triggered envelopes) in `scripts/ops/test_event_contracts.py`.
 
-6. **Add integration and unit tests (`bank/tests/auth.rs`, `bank/tests/backfill.rs`, `bank/src/shared/auth/mod.rs`)**
+6. **Add integration and unit tests (`bank/tests/auth.rs`, `bank/tests/backfill.rs`, `bank/tests/migrations.rs`, `bank/src/shared/auth/mod.rs`)**
    - Cover lazy inactivity expiry on expired token (`401` + `ended_at` = effective expiry + `end_reason = 'expired'` + exactly one `session.expired` event).
-   - Cover rollover expiry (`AuthSessionExpiryJob`) across backfill clock jumps, idempotency on repeated sweep, and separation of `ended_at` from `occurred_at`.
-   - Cover race safety: simultaneous logout/password-reset vs expiry, and deferred touch not reviving an ended session.
+   - Cover rollover expiry (`AuthSessionExpiryJob`) inside `backfill_sequence` before the live switch, idempotency on repeated sweep, and separation of `ended_at` from `occurred_at`.
+   - Cover race safety: simultaneous logout/password-reset vs expiry, in-flight admitted touch preservation, and deferred touch not reviving an ended session.
+   - Update `bank/tests/migrations.rs` to assert migrations `1..=22` and presence of `AUTH_SESSION_OPEN_LAST_SEEN_IX`.
 
 ## Verification
 

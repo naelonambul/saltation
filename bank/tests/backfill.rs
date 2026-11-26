@@ -1285,6 +1285,7 @@ async fn backfill_sequence() {
             recording: recording.clone(),
         }));
     }
+    registry.register(Arc::new(bank::features::auth::AuthSessionExpiryJob));
     registry.register(Arc::new(bank::features::atm::AtmSessionExpiryJob));
     registry.register(Arc::new(bank::features::deposits::MaturityJob));
     registry.register(Arc::new(bank::features::accounts_lifecycle::DormancyJob));
@@ -1324,6 +1325,7 @@ async fn backfill_sequence() {
     term_deposit_matured(&api, deposits).await;
     password_reset_code_expires(&api).await;
     atm_sessions_in_business_time(&api).await;
+    auth_session_expiry_rollover(&api).await;
     daily_maintenance_window(&api).await;
     let restoration = daily_close_tests::sequence(&api, &close_logs, &close_metrics).await;
     live_switch_is_one_way(&api, &recording).await;
@@ -1683,8 +1685,7 @@ async fn card_payment_reconciliation(api: &Api) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn rollover_materializes_idle_session_expiry_once() {
+async fn auth_session_expiry_rollover(api: &Api) {
     use bank::features::auth::AuthSessionExpiryJob;
     use bank::shared::auth::{SESSION_IDLE, token_hash};
     use bank::shared::rollover::last_instant;
@@ -1728,24 +1729,17 @@ async fn rollover_materializes_idle_session_expiry_once() {
             .collect()
     }
 
-    let mut state = common::state().await;
-    let mut registry = Registry::default();
-    registry.register(Arc::new(AuthSessionExpiryJob));
-    state.clock = Clock::init(state.db.clone(), registry).await.unwrap();
-    let api = Api {
-        public: bank::app::public_router(state.clone()),
-        generator: bank::app::generator_router(state.clone()),
-        state,
-    };
     let clock = &api.state.clock;
-    let today = business_date(clock.state().await.unwrap().business_time);
-    let date = today.succ_opt().unwrap();
+    let current = clock.state().await.unwrap().business_time;
+    let date = business_date(current).succ_opt().unwrap();
     let at = last_instant(date);
     let start = at.with_nanosecond(0).unwrap() - chrono::Duration::minutes(40);
-    clock.set(start).await.unwrap();
-    let idle = common::customer(&api, 0).await;
-    let recently_touched = common::customer(&api, 0).await;
-    let (session_id, customer_no, last_seen, _, _) = session(&api, &idle.token).await;
+    let delta = (start - current).num_seconds();
+    assert!(delta > 0, "expected future date for rollover test");
+    clock.advance(delta).await.unwrap();
+    let idle = common::customer(api, 0).await;
+    let recently_touched = common::customer(api, 0).await;
+    let (session_id, customer_no, last_seen, _, _) = session(api, &idle.token).await;
 
     clock.advance(20 * 60).await.unwrap();
     let (status, body) = call(
@@ -1758,26 +1752,31 @@ async fn rollover_materializes_idle_session_expiry_once() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let touched = session(&api, &recently_touched.token).await;
+    let touched = session(api, &recently_touched.token).await;
     assert!(touched.2 > at - SESSION_IDLE);
-    let active = common::customer(&api, 0).await;
-    let active_state = session(&api, &active.token).await;
+    let active = common::customer(api, 0).await;
+    let active_state = session(api, &active.token).await;
 
     let advanced = clock.advance(25 * 60).await.unwrap();
     assert_eq!(advanced.rolled_through, date);
     let effective_expiry = last_seen + SESSION_IDLE;
-    let closed = session(&api, &idle.token).await;
+    let closed = session(api, &idle.token).await;
     assert_eq!(closed.2, last_seen);
     assert_eq!(closed.3, Some(effective_expiry));
     assert_eq!(closed.4.as_deref(), Some("expired"));
-    assert_eq!(session(&api, &recently_touched.token).await, touched);
-    assert_eq!(session(&api, &active.token).await, active_state);
+    assert_eq!(session(api, &recently_touched.token).await, touched);
+    assert_eq!(session(api, &active.token).await, active_state);
     assert!(touched.3.is_none() && active_state.3.is_none());
 
-    let recorded = expiry_events(&api, &session_id).await;
+    let recorded = expiry_events(api, &session_id).await;
     let [event] = recorded.as_slice() else {
         panic!("expected one expiry event, got {recorded:?}");
     };
+    assert!(
+        common::envelope_errors(event).is_empty(),
+        "{:?}",
+        common::envelope_errors(event)
+    );
     assert_eq!(event["channel"], "SYSTEM");
     assert_eq!(event["outcome"], "completed");
     assert!(event["request_id"].is_null());
@@ -1798,8 +1797,8 @@ async fn rollover_materializes_idle_session_expiry_once() {
         .run(&api.state.db, date, at)
         .await
         .unwrap();
-    assert_eq!(session(&api, &idle.token).await, closed);
-    assert_eq!(expiry_events(&api, &session_id).await, recorded);
-    assert!(expiry_events(&api, &touched.0).await.is_empty());
-    assert!(expiry_events(&api, &active_state.0).await.is_empty());
+    assert_eq!(session(api, &idle.token).await, closed);
+    assert_eq!(expiry_events(api, &session_id).await, recorded);
+    assert!(expiry_events(api, &touched.0).await.is_empty());
+    assert!(expiry_events(api, &active_state.0).await.is_empty());
 }

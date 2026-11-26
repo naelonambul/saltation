@@ -394,6 +394,30 @@ mod deferred_touch {
         let at = expires - Duration::seconds(1);
         let inflight = authenticate(&api, &customer.token, at).await;
         let session_id = &inflight.who.session_id;
+        let blocked_id = new_id();
+        let (status, body) = call(
+            &api.public,
+            "GET",
+            "/v2.0/user/me",
+            &blocked_id,
+            Some(&customer.token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(
+            stored(&api, &customer.token).await,
+            (expires, last_seen, None, None)
+        );
+        assert!(expiry_events(&api, session_id).await.is_empty());
+
+        finish(&api, &inflight, StatusCode::OK).await;
+        let extended = (at + SESSION_IDLE, at, None, None);
+        assert_eq!(stored(&api, &customer.token).await, extended);
+
+        let expired_at = at + SESSION_IDLE + Duration::seconds(1);
+        prepare(&api, &customer.token, expired_at, "login inquiry transfer").await;
+        let (_, last_seen_after, _, _) = stored(&api, &customer.token).await;
         let id = new_id();
         let (status, body) = call(
             &api.public,
@@ -405,14 +429,24 @@ mod deferred_touch {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-        let effective_expiry = last_seen + SESSION_IDLE;
-        let closed = (expires, last_seen, None, Some(effective_expiry));
+        let effective_expiry = last_seen_after + SESSION_IDLE;
+        let closed = (
+            last_seen_after + SESSION_IDLE,
+            last_seen_after,
+            None,
+            Some(effective_expiry),
+        );
         assert_eq!(stored(&api, &customer.token).await, closed);
         assert_eq!(end_reason(&api, session_id).await, "expired");
         let recorded = expiry_events(&api, session_id).await;
         let [event] = recorded.as_slice() else {
             panic!("expected one expiry event, got {recorded:?}");
         };
+        assert!(
+            common::envelope_errors(event).is_empty(),
+            "{:?}",
+            common::envelope_errors(event)
+        );
         assert_eq!(event["channel"], "MOBILE");
         assert_eq!(event["outcome"], "completed");
         assert_eq!(event["request_id"], id);
@@ -438,8 +472,7 @@ mod deferred_touch {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_unauthorized_at(&api, &customer.token, at).await;
-        finish(&api, &inflight, StatusCode::OK).await;
+        assert_unauthorized_at(&api, &customer.token, expired_at).await;
         assert_eq!(stored(&api, &customer.token).await, closed);
         assert_eq!(expiry_events(&api, session_id).await, recorded);
         assert_eq!(events(&api, &retry_id).await, "request.completed");
@@ -501,11 +534,11 @@ mod deferred_touch {
         use bank::shared::auth::PendingTouch;
         use bank::shared::db::StatementStats;
         let mut stats = StatementStats {
-            pending_touch: Some(PendingTouch {
-                token_hash: "sensitive-token-hash-sentinel".into(),
-                session_id: "session".into(),
-                now: DateTime::parse_from_rfc3339("2026-11-17T12:00:00+09:00").unwrap(),
-            }),
+            pending_touch: Some(PendingTouch::detached(
+                "sensitive-token-hash-sentinel".into(),
+                "session".into(),
+                DateTime::parse_from_rfc3339("2026-11-17T12:00:00+09:00").unwrap(),
+            )),
             ..Default::default()
         };
         stats.merge(&StatementStats::default());
