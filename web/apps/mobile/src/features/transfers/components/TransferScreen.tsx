@@ -27,18 +27,32 @@ export function TransferScreen(props: { accounts: SourceAccount[]; onDone: () =>
 
     inFlight.current = true;
     setBusy(true);
-    let result: TransferResult;
     try {
-      result = await transfer(confirmedIntent.input, confirmedIntent.bankTranId);
-    } catch {
-      result = networkTransferFailure;
+      let result: TransferResult;
+      try {
+        result = await transfer(confirmedIntent.input, confirmedIntent.bankTranId);
+      } catch {
+        result = networkTransferFailure;
+      }
+      setTransferState(resolveTransferOutcome(confirmedIntent, result, { priorAmbiguous: ambiguous }));
+    } finally {
+      setBusy(false);
+      inFlight.current = false;
     }
-    setTransferState(resolveTransferOutcome(confirmedIntent, result));
-    setBusy(false);
-    inFlight.current = false;
+  }
+
+  function goBack() {
+    if (inFlight.current) return;
+    if (
+      ambiguous &&
+      !window.confirm("이전 이체가 완료되었을 수 있습니다. 화면을 나가면 같은 이체를 다시 시도할 수 없습니다. 잔액과 거래내역을 확인하러 이동할까요?")
+    ) return;
+
+    props.onBack();
   }
 
   function editTransfer() {
+    if (inFlight.current) return;
     if (
       ambiguous &&
       !window.confirm("이전 이체가 완료되었을 수 있습니다. 새 이체를 보내기 전에 잔액과 거래내역을 확인해 주세요. 새 이체를 작성할까요?")
@@ -62,7 +76,7 @@ export function TransferScreen(props: { accounts: SourceAccount[]; onDone: () =>
   }
 
   return (
-    <Screen title="이체" onBack={busy || ambiguous ? undefined : props.onBack}>
+    <Screen title="이체" onBack={busy ? undefined : goBack}>
       <form
         className="stack"
         onSubmit={(e) => {
@@ -100,10 +114,12 @@ export function TransferScreen(props: { accounts: SourceAccount[]; onDone: () =>
         {confirmedIntent ? (
           <>
             <Notice kind="ok">
-              {confirmedIntent.input.toName}님께 {won(confirmedIntent.input.amount)}을 보낼까요?
+              {ambiguous
+                ? "이체 처리 결과를 확인하지 못했습니다. 다시 시도해도 중복 이체되지 않습니다."
+                : `${confirmedIntent.input.toName}님께 ${won(confirmedIntent.input.amount)}을 보낼까요?`}
             </Notice>
             <button className="primary" type="submit" disabled={busy}>
-              {ambiguous ? "다시 시도" : "보내기"}
+              {busy ? "보내는 중…" : ambiguous ? "다시 시도" : "보내기"}
             </button>
             <button className="link" type="button" disabled={busy} onClick={editTransfer}>
               {ambiguous ? "새 이체 작성" : "수정"}
