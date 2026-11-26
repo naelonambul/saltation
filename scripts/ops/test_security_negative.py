@@ -33,6 +33,8 @@ def compose_port_entries(compose: str) -> Iterator[tuple[str, str]]:
         indent = len(line) - len(line.lstrip())
         if indent == 0:
             key = COMPOSE_KEY.match(content)
+            if key is not None and key["key"] == "include":
+                raise ValueError(f"Unsupported Compose top-level include: {content}")
             in_services = key is not None and key["key"] == "services"
             if in_services and re.fullmatch(r"(?:#.*)?", content[key.end():]) is None:
                 raise ValueError(f"Unsupported Compose services mapping: {content}")
@@ -65,6 +67,8 @@ def compose_port_entries(compose: str) -> Iterator[tuple[str, str]]:
             continue
         key = COMPOSE_KEY.match(content)
         if key is None:
+            raise ValueError(f"Unsupported Compose service property: {content}")
+        if key["key"] in {"extends", "network_mode"}:
             raise ValueError(f"Unsupported Compose service property: {content}")
         if key["key"] != "ports":
             continue
@@ -102,12 +106,23 @@ class SecurityNegativeTests(unittest.TestCase):
             ("web", "8088"),
             ("grafana", "3000"),
         )
+        self.assertEqual(len(mappings), len(expected))
         for service, port in expected:
             with self.subTest(service=service, port=port):
                 self.assertTrue(
                     {(service, port, port, "tcp"), (service, "", port, "tcp")} & mappings,
                     f"Missing TCP loopback mapping for {service}:{port}",
                 )
+
+    def test_compose_port_entries_rejects_include_extends_and_network_mode(self) -> None:
+        for snippet in (
+            "include:\n  - other.yml\nservices:\n  bank:\n    ports: ['127.0.0.1:8080:8080']\n",
+            "services:\n  bank:\n    extends:\n      file: other.yml\n      service: bank\n",
+            "services:\n  bank:\n    network_mode: host\n",
+        ):
+            with self.subTest(snippet=snippet):
+                with self.assertRaises(ValueError):
+                    list(compose_port_entries(snippet))
 
     def test_compose_port_entries_reads_quoted_inline_and_block_lists(self) -> None:
         compose = (
