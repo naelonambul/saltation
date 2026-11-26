@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import json
 import math
 from pathlib import Path
@@ -16,7 +16,9 @@ KEYWORDS = {
     "$schema", "$id", "$defs", "$ref", "title", "description",
     "type", "const", "enum", "pattern", "format", "required", "properties",
     "additionalProperties", "anyOf", "oneOf", "minimum", "maximum",
+    "minLength", "dependentRequired",
 }
+DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 DATE_TIME = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
     r"(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
@@ -86,14 +88,21 @@ def check_schema(schema, root):
             raise ValueError("type must name one or more distinct JSON types")
     if "required" in schema and not unique_strings(schema["required"]):
         raise ValueError("required must be an array of distinct strings")
+    dependencies = schema.get("dependentRequired", {})
+    if not isinstance(dependencies, dict) or not all(
+        isinstance(key, str) and unique_strings(value) for key, value in dependencies.items()
+    ):
+        raise ValueError("dependentRequired must map properties to arrays of distinct strings")
     if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
         raise ValueError("enum must be a non-empty array")
     for keyword in ("minimum", "maximum"):
         if keyword in schema and not is_number(schema[keyword]):
             raise ValueError(f"{keyword} must be a number")
+    if "minLength" in schema and (type(schema["minLength"]) is not int or schema["minLength"] < 0):
+        raise ValueError("minLength must be a non-negative integer")
     if "pattern" in schema:
         re.compile(schema["pattern"], flags=re.ASCII)
-    if "format" in schema and schema["format"] != "date-time":
+    if "format" in schema and schema["format"] not in {"date", "date-time"}:
         raise ValueError(f"Unsupported format: {schema['format']}")
     if "$ref" in schema:
         resolve_reference(schema["$ref"], root)
@@ -149,8 +158,17 @@ def validate(value, schema, root, path="$"):
     if "enum" in schema and not any(same_json_value(value, item) for item in schema["enum"]):
         raise ValidationError(f"{path}: value outside enum")
     if isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            raise ValidationError(f"{path}: below minimum length")
         if "pattern" in schema and not matches_pattern(schema["pattern"], value):
             raise ValidationError(f"{path}: value does not match pattern")
+        if schema.get("format") == "date":
+            try:
+                if not DATE.fullmatch(value):
+                    raise ValueError(value)
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValidationError(f"{path}: expected calendar date") from None
         if schema.get("format") == "date-time":
             try:
                 if not DATE_TIME.fullmatch(value):
@@ -165,6 +183,9 @@ def validate(value, schema, root, path="$"):
             raise ValidationError(f"{path}: above maximum")
     if isinstance(value, dict):
         missing = set(schema.get("required", ())) - value.keys()
+        for key, required in schema.get("dependentRequired", {}).items():
+            if key in value:
+                missing.update(set(required) - value.keys())
         if missing:
             raise ValidationError(f"{path}: missing required properties {sorted(missing)}")
         properties = schema.get("properties", {})
@@ -199,7 +220,7 @@ RUST_TOKEN = re.compile(
 )
 BLOCK_COMMENT = re.compile(r"/\*|\*/")
 DELIMITERS = {"(": ")", "[": "]", "{": "}"}
-IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+IDENTIFIER = re.compile(r"(?:r#)?[A-Za-z_][A-Za-z_0-9]*")
 
 
 @dataclass(frozen=True)
@@ -211,6 +232,11 @@ class RustString:
 class RustGroup:
     opener: str
     tokens: list
+
+
+TEST_PREDICATE = RustGroup("(", ["test"])
+CFG_TEST_ATTRIBUTE = RustGroup("[", ["cfg", TEST_PREDICATE])
+CFG_NOT_TEST_ATTRIBUTE = RustGroup("[", ["cfg", RustGroup("(", ["not", TEST_PREDICATE])])
 
 
 def rust_tokens(source):
@@ -265,6 +291,57 @@ def split_tokens(tokens, separator):
         yield tokens[start:]
 
 
+def production_tokens(tokens):
+    index = 0
+    while index < len(tokens):
+        if tokens[index:index + 3] == ["#", "!", CFG_TEST_ATTRIBUTE]:
+            return
+        if tokens[index:index + 2] == ["#", CFG_NOT_TEST_ATTRIBUTE]:
+            index += 2
+            continue
+        if tokens[index:index + 2] != ["#", CFG_TEST_ATTRIBUTE]:
+            yield tokens[index]
+            index += 1
+            continue
+        index += 2
+        statement = False
+        function = False
+        generic_depth = 0
+        while index < len(tokens):
+            token = tokens[index]
+            index += 1
+            statement = statement or token in ("let", "use")
+            function = function or token == "fn"
+            if token == "<" and function:
+                generic_depth += 1
+            elif token == ">" and generic_depth:
+                generic_depth -= 1
+            if token == ";":
+                break
+            if is_group(token, "{") and not statement and not generic_depth:
+                if tokens[index:index + 1] == [","]:
+                    index += 1
+                break
+
+
+def imported_names(tokens):
+    for index, token in enumerate(tokens):
+        if token == "use":
+            yield from use_names(next(split_tokens(tokens[index + 1:], ";"), []))
+
+
+def use_names(use_tree):
+    match use_tree[-3:]:
+        case [str(name), "as", str(alias)] if IDENTIFIER.fullmatch(alias):
+            yield alias.removeprefix("r#"), name.removeprefix("r#") == "Event"
+        case [*_, RustGroup("{", imports)]:
+            for item in split_tokens(imports, ","):
+                yield from use_names(item)
+        case [*_, str(name)] if IDENTIFIER.fullmatch(name) and name != "self":
+            name = name.removeprefix("r#")
+            yield name, name == "Event"
+
+
 @dataclass
 class Binding:
     expression: list
@@ -283,7 +360,8 @@ def event_values(expression, scope, position=None):
             return event_values(inner, scope)
         case [RustGroup("{", inner)]:
             return event_values(inner, scope, position)
-        case [str(name)] if name in scope:
+        case [str(name)] if name.removeprefix("r#") in scope:
+            name = name.removeprefix("r#")
             binding = scope[name]
             if binding.mutable:
                 raise ValueError(f"Unsupported mutable event type binding: {name}")
@@ -318,27 +396,30 @@ def remember_binding(statement, scope):
     mutable = pattern[:1] == ["mut"]
     if mutable:
         pattern = pattern[1:]
-    if "=" not in pattern:
+    if not pattern:
         return
-    equals = pattern.index("=")
+    equals = pattern.index("=") if "=" in pattern else len(pattern)
     expression = pattern[equals + 1:]
     previous = scope.copy()
     match pattern[0]:
         case str(name) if IDENTIFIER.fullmatch(name):
-            scope[name] = Binding(expression, previous, mutable=mutable)
+            scope[name.removeprefix("r#")] = Binding(expression, previous, mutable=mutable)
         case RustGroup("(", names):
             for position, target in enumerate(split_tokens(names, ",")):
                 match target:
                     case [str(name)] if IDENTIFIER.fullmatch(name):
-                        scope[name] = Binding(expression, previous, position)
+                        scope[name.removeprefix("r#")] = Binding(expression, previous, position)
                     case ["mut", str(name)] if IDENTIFIER.fullmatch(name):
-                        scope[name] = Binding(expression, previous, position, mutable=True)
+                        scope[name.removeprefix("r#")] = Binding(expression, previous, position, mutable=True)
 
 
 def producer_literals(source, path):
     atm_helper = path.is_relative_to(ATM)
 
-    def walk(tokens, scope, forwarded=None):
+    def walk(tokens, scope, event_names, forwarded=None):
+        tokens = list(production_tokens(tokens))
+        imports = dict(imported_names(tokens))
+        event_names = (event_names - imports.keys()) | {name for name, is_event in imports.items() if is_event}
         scope = scope.copy()
         helper_body = None
         helper_parameter = None
@@ -347,12 +428,17 @@ def producer_literals(source, path):
             if token == "let":
                 remember_binding(next(split_tokens(tokens[index:], ";")), scope)
             if path == ATM / "mod.rs" and token == "event" and len(tail) == 4:
-                if tokens[index - 1:index] == ["fn"] and tail[1:3] == ["->", "Event"]:
+                if (
+                    tokens[index - 1:index] == ["fn"] and tail[1] == "->"
+                    and isinstance(tail[2], str) and tail[2].removeprefix("r#") in event_names
+                ):
                     parameter = list(split_tokens(tail[0].tokens, ","))[4]
                     helper_parameter = parameter[0]
                     helper_body = tail[3]
             producer = None
-            if token == "Event" and tail[:2] in (["::", "for_request"], ["::", "system"]):
+            if isinstance(token, str) and token.removeprefix("r#") in event_names and tail[:2] in (
+                ["::", "for_request"], ["::", "system"],
+            ):
                 if len(tail) >= 3 and is_group(tail[2], "("):
                     producer = tail[1]
                     arguments = tail[2].tokens
@@ -367,16 +453,16 @@ def producer_literals(source, path):
                     producer, arguments, position = "ATM event", tail[0].tokens, 4
             if producer is not None:
                 try:
-                    expression = list(split_tokens(arguments, ","))[position]
+                    expression = list(split_tokens(list(production_tokens(arguments)), ","))[position]
                     if forwarded is None or producer != "for_request" or expression != [forwarded]:
                         yield from event_values(expression, scope)
                 except (ValueError, IndexError) as error:
                     raise ValueError(f"{path}: {producer}: {error}") from error
             if isinstance(token, RustGroup):
                 parameter = helper_parameter if token is helper_body else forwarded
-                yield from walk(token.tokens, scope, parameter)
+                yield from walk(token.tokens, scope, event_names, parameter)
 
-    return set(walk(rust_tokens(source), {}))
+    return set(walk(rust_tokens(source), {}, {"Event"}))
 
 
 def check_inventory(emitted, catalog):
@@ -497,8 +583,19 @@ FIXTURES = [
         **TERMINAL, "bank_rsp_code": "410", "locked": True,
     }, "ATM", outcome="rejected"),
     envelope("atm.session_ended", ATM_ENDED, "ATM", session_id=SESSION),
+    envelope("atm.session_ended", {**ATM_ENDED, "reason": "locked"}, "ATM", session_id=SESSION),
     envelope("atm.session_ended", {**ATM_ENDED, "request_id": None}, "SYSTEM", session_id=SESSION),
     envelope("atm.operation", ATM_OPERATION, "ATM", session_id=SESSION, outcome="approved"),
+    envelope("atm.operation", {
+        **ATM_OPERATION, "operation": "deposit", "amount": 999999999999,
+    }, "ATM", session_id=SESSION, outcome="approved"),
+    envelope("atm.operation", {
+        **ATM_OPERATION, "outcome": "rejected", "rsp_code": "A0004", "bank_rsp_code": "409",
+    }, "ATM", session_id=SESSION, outcome="rejected"),
+    envelope("atm.operation", {
+        **ATM_OPERATION, "operation": "withdraw", "outcome": "rejected",
+        "rsp_code": "A0004", "bank_rsp_code": "409",
+    }, "ATM", session_id=SESSION, outcome="rejected"),
     envelope("atm.operation", {
         **ATM_OPERATION, "operation": "withdraw", "outcome": "rejected",
         "amount": 10000, "rsp_code": "A0004", "bank_rsp_code": "405",
@@ -573,6 +670,35 @@ class EventContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, r"\$\.payload\.mcc: value does not match pattern"):
             self.validate_event(envelope("card.authorized", {**CARD, "mcc": "0123\n"}, "CARD"))
 
+    def test_payload_rejects_values_outside_producer_contracts(self):
+        cases = (
+            ("login.succeeded", {"failed_count": -1}, r"failed_count: value differs from const"),
+            ("login.failed", {"failed_count": -1}, r"failed_count: below minimum"),
+            ("rollover.job_completed", {"business_date": "2026-02-31"}, r"business_date: expected calendar date"),
+            ("payee.registered", {"bank_code_std": "99"}, r"bank_code_std: value does not match pattern"),
+            ("payee.deleted", {"account_num": "123A"}, r"account_num: value does not match pattern"),
+            ("account.status_changed", {"from": "DORMANT"}, r"oneOf matched 0 alternatives"),
+            ("atm.session_ended", {"request_id": None, "reason": "locked"}, r"anyOf matched 0 alternatives"),
+            ("atm.session_rejected", {"bank_rsp_code": "000"}, r"bank_rsp_code: value outside enum"),
+            ("atm.operation", {"amount": 1}, r"anyOf matched 0 alternatives"),
+            ("atm.operation", {"operation": "withdraw"}, r"anyOf matched 0 alternatives"),
+            ("atm.operation", {"operation": "deposit", "amount": 0}, r"amount: below minimum"),
+            ("atm.operation", {"operation": "deposit", "amount": 1000000000000}, r"amount: above maximum"),
+            ("card.authorized", {"amount": "0000"}, r"amount: value does not match pattern"),
+            ("card.authorized", {"latitude": "37.566500"}, r"oneOf matched 0 alternatives"),
+            ("card.authorized", {"merchant_name": ""}, r"merchant_name: below minimum length"),
+            ("card.declined", {"decline_reason": None}, r"decline_reason: value outside enum"),
+            ("card.declined", {"card_no": "1000000000000000"}, r"card_no: value does not match pattern"),
+            ("request.completed", {"request_type": "UNKNOWN"}, r"request_type: value outside enum"),
+            ("request.completed", {"counterparty_account_no": "110123456789"}, r"missing required properties.*counterparty_bank_code"),
+            ("request.completed", {"counterparty_bank_code": "099"}, r"missing required properties.*counterparty_account_no"),
+        )
+        for kind, overrides, error in cases:
+            fixture = next(event for event in FIXTURES if event["event_type"] == kind)
+            event = {**fixture, "payload": {**fixture["payload"], **overrides}}
+            with self.subTest(kind=kind, overrides=overrides), self.assertRaisesRegex(ValidationError, error):
+                self.validate_event(event)
+
     def test_extra_payload_field(self):
         with self.assertRaisesRegex(ValidationError, r"\$\.payload\.extra: additional property"):
             self.validate_event(envelope("device.new", {"extra": 1}, "MOBILE"))
@@ -589,6 +715,78 @@ class EventContracts(unittest.TestCase):
 
 
 class ProducerScannerTests(unittest.TestCase):
+    def test_cfg_test_items_are_ignored(self):
+        source = '''
+            #[cfg(test)]
+            mod tests { Event::system("test.module", now, outcome); }
+            #[cfg(test)]
+            #[allow(dead_code)]
+            pub(crate) fn test_only<T: Trait<{1}>>() {
+                Event::system("test.function", now, outcome);
+            }
+            fn production() {
+                #[cfg(test)]
+                { Event::system("test.block", now, outcome); }
+                Event::system("production.event", now, outcome);
+            }
+        '''
+        self.assertEqual(producer_literals(source, Path("synthetic.rs")), {"production.event"})
+
+    def test_aliased_event_import_is_recognized(self):
+        source = '''
+            fn production() {
+                Audit::system("aliased.system", now, outcome);
+                Journal::for_request(ctx, "aliased.request", now, channel, outcome);
+                use crate::shared::outbox::{self, Event as Journal};
+            }
+            fn unrelated() {
+                use crate::other::Audit;
+                Audit::system("unrelated.event", now, outcome);
+            }
+            use crate::shared::outbox::Event as Audit;
+        '''
+        self.assertEqual(
+            producer_literals(source, Path("synthetic.rs")), {"aliased.system", "aliased.request"},
+        )
+
+    def test_aliased_atm_helper_forwards_event_type(self):
+        source = '''
+            use crate::shared::outbox::Event as Audit;
+            fn event(ctx: Ctx, now: At, terminal: Terminal, account: Account, kind: &str) -> Audit {
+                Audit::for_request(ctx, kind, now, "ATM", "completed")
+            }
+            fn produce() {
+                event(ctx, now, terminal, account, "atm.event");
+            }
+        '''
+        self.assertEqual(producer_literals(source, ATM / "mod.rs"), {"atm.event"})
+
+    def test_cfg_test_constructor_argument_is_ignored(self):
+        source = '''
+            Event::system(
+                #[cfg(test)] { "test.event" },
+                #[cfg(not(test))] { "production.event" },
+                now,
+                outcome,
+            );
+        '''
+        self.assertEqual(producer_literals(source, Path("synthetic.rs")), {"production.event"})
+
+    def test_deferred_init_shadowing_fails_closed(self):
+        source = '''
+            let kind = "outer.event";
+            {
+                let DEFERRED_NAME;
+                kind = "inner.event";
+                Event::system(kind, now, outcome);
+            }
+        '''
+        for name in ("kind", "r#kind"):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError, r"synthetic\.rs: system: Unsupported event type expression",
+            ):
+                producer_literals(source.replace("DEFERRED_NAME", name), Path("synthetic.rs"))
+
     def test_dynamic_arguments_and_tuple_bindings(self):
         source = '''
             let (kind, outcome) = if accepted {
@@ -655,6 +853,8 @@ class SchemaSubsetTests(unittest.TestCase):
         for schema in (
             {"required": ["field", "field"]}, {"type": ["integer", "integer"]},
             {"minimum": True}, {"properties": []}, {"oneOf": []},
+            {"minLength": -1}, {"minLength": True},
+            {"dependentRequired": {"field": ["other", "other"]}},
         ):
             with self.subTest(schema=schema), self.assertRaises(ValueError):
                 check_schema(schema, schema)

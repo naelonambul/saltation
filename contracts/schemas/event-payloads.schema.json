@@ -30,7 +30,19 @@
           "maximum": 18446744073709551615
         },
         "request_type": {
-          "type": "string"
+          "enum": [
+            "ATM_BALANCE",
+            "ATM_DEPOSIT",
+            "ATM_SESSION",
+            "ATM_WITHDRAW",
+            "CARD_PAYMENT",
+            "INBOUND",
+            "LOAN_REPAY",
+            "LOAN_TAKE",
+            "TERM_CLOSE",
+            "TERM_OPEN",
+            "TRANSFER"
+          ]
         },
         "replayed": {
           "type": "boolean"
@@ -57,6 +69,14 @@
         "counterparty_account_no": {
           "type": "string"
         }
+      },
+      "dependentRequired": {
+        "counterparty_bank_code": [
+          "counterparty_account_no"
+        ],
+        "counterparty_account_no": [
+          "counterparty_bank_code"
+        ]
       }
     },
     "login.succeeded": {
@@ -71,7 +91,8 @@
           "const": "SUCCESS"
         },
         "failed_count": {
-          "type": "integer"
+          "type": "integer",
+          "const": 0
         }
       }
     },
@@ -91,7 +112,8 @@
           ]
         },
         "failed_count": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -192,10 +214,12 @@
           "type": "string"
         },
         "bank_code_std": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]{3}$"
         },
         "account_num": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]{1,16}$"
         }
       }
     },
@@ -212,10 +236,12 @@
           "type": "string"
         },
         "bank_code_std": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]{3}$"
         },
         "account_num": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]{1,16}$"
         }
       }
     },
@@ -237,7 +263,48 @@
         "reason": {
           "type": "string"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "from": {
+              "const": "ACTIVE"
+            },
+            "to": {
+              "enum": [
+                "DORMANT",
+                "CLOSED"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "from": {
+              "const": "DORMANT"
+            },
+            "to": {
+              "enum": [
+                "ACTIVE",
+                "CLOSED"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "from": {
+              "const": "CLOSED"
+            },
+            "to": {
+              "enum": [
+                "ACTIVE",
+                "DORMANT"
+              ]
+            }
+          }
+        }
+      ]
     },
     "rollover.job_completed": {
       "type": "object",
@@ -248,8 +315,10 @@
       ],
       "properties": {
         "business_date": {
+          "description": "Enable format assertions to validate the calendar date.",
           "type": "string",
-          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "format": "date"
         },
         "job": {
           "enum": [
@@ -333,7 +402,12 @@
           "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
         },
         "bank_rsp_code": {
-          "type": "string"
+          "enum": [
+            "403",
+            "404",
+            "409",
+            "410"
+          ]
         },
         "locked": {
           "type": "boolean"
@@ -402,7 +476,23 @@
           "type": "string",
           "format": "date-time"
         }
-      }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "request_id": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "reason": {
+              "const": "expired"
+            }
+          }
+        }
+      ]
     },
     "atm.operation": {
       "type": "object",
@@ -457,7 +547,9 @@
           "type": [
             "integer",
             "null"
-          ]
+          ],
+          "minimum": 1,
+          "maximum": 999999999999
         },
         "rsp_code": {
           "type": "string"
@@ -465,7 +557,51 @@
         "bank_rsp_code": {
           "type": "string"
         }
-      }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "operation": {
+              "const": "balance"
+            },
+            "amount": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "enum": [
+                "withdraw",
+                "deposit"
+              ]
+            },
+            "amount": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "enum": [
+                "withdraw",
+                "deposit"
+              ]
+            },
+            "amount": {
+              "type": "null"
+            },
+            "outcome": {
+              "const": "rejected"
+            },
+            "bank_rsp_code": {
+              "const": "409"
+            }
+          }
+        }
+      ]
     },
     "card.authorized": {
       "type": "object",
@@ -493,7 +629,8 @@
           "type": "string"
         },
         "card_no": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^0000[0-9]{12}$"
         },
         "krw_amount": {
           "type": "integer",
@@ -502,7 +639,7 @@
         },
         "amount": {
           "type": "string",
-          "pattern": "^[0-9]+$"
+          "pattern": "^[0-9]*[1-9][0-9]*$"
         },
         "currency": {
           "enum": [
@@ -514,7 +651,8 @@
           ]
         },
         "merchant_name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "mcc": {
           "type": "string",
@@ -601,7 +739,8 @@
           "type": "string"
         },
         "card_no": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^0000[0-9]{12}$"
         },
         "krw_amount": {
           "type": "integer",
@@ -610,7 +749,7 @@
         },
         "amount": {
           "type": "string",
-          "pattern": "^[0-9]+$"
+          "pattern": "^[0-9]*[1-9][0-9]*$"
         },
         "currency": {
           "enum": [
@@ -622,7 +761,8 @@
           ]
         },
         "merchant_name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "mcc": {
           "type": "string",
