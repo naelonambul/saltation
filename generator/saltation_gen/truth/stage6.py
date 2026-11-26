@@ -18,14 +18,18 @@ from .store import TruthStore
 
 def _compatible_live_attach(existing_inputs: dict, new_inputs: dict, progress: dict) -> bool:
     """Allow attaching/updating live_at once backfill is finished and before LIVE starts."""
-    if not progress.get("backfill_finished") or progress.get("live_started") is not None:
+    if (
+        not progress.get("backfill_finished")
+        or progress.get("live_started") is not None
+        or progress.get("live_intended")
+    ):
         return False
     existing_run = existing_inputs.get("run")
     new_run = new_inputs.get("run")
     if not isinstance(existing_run, dict) or not isinstance(new_run, dict):
         return False
     new_live_at = new_run.get("live_at")
-    if not isinstance(new_live_at, str) or not new_live_at:
+    if not isinstance(new_live_at, str) or not new_live_at or new_live_at == existing_run.get("live_at"):
         return False
     if existing_inputs.get("backfill_end") != new_inputs.get("backfill_end"):
         return False
@@ -34,8 +38,17 @@ def _compatible_live_attach(existing_inputs: dict, new_inputs: dict, progress: d
             return False
     except (KeyError, TypeError, ValueError):
         return False
-    if {k: v for k, v in existing_inputs.items() if k != "run"} != {
-        k: v for k, v in new_inputs.items() if k != "run"
+    existing_counts = existing_inputs.get("planned_counts", {})
+    new_counts = new_inputs.get("planned_counts", {})
+    if not isinstance(existing_counts, dict) or not isinstance(new_counts, dict):
+        return False
+    if {k: v for k, v in existing_counts.items() if k != "live"} != {
+        k: v for k, v in new_counts.items() if k != "live"
+    }:
+        return False
+    live_fields = {"run", "schedule_digest", "planned_counts"}
+    if {k: v for k, v in existing_inputs.items() if k not in live_fields} != {
+        k: v for k, v in new_inputs.items() if k not in live_fields
     }:
         return False
     return {k: v for k, v in existing_run.items() if k != "live_at"} == {
@@ -127,9 +140,13 @@ class Stage6Journal:
             "run_id": self.run_id,
         }
 
-    async def claim(self, inputs: dict, exited_owner: str | None = None) -> dict:
+    async def claim(
+        self, inputs: dict, exited_owner: str | None = None, *, provenance: dict | None = None
+    ) -> dict:
         """Resume a run, supplying an exact owner token only after confirming its process exited."""
         _check_safe(inputs)
+        if provenance is not None:
+            _check_safe(provenance)
         async with self._lock:
             if self._claimed or exited_owner == self.owner:
                 raise RecoveryError("claim requires a fresh stage 6 owner token")
@@ -149,11 +166,25 @@ class Stage6Journal:
             if run is None or run.get("kind") != "generator-stage6":
                 raise RecoveryError("stage 6 run kind or inputs differ")
             live_attached = False
-            if run.get("inputs") != inputs:
-                if _compatible_live_attach(run.get("inputs", {}), inputs, run.get("progress", {})):
+            stored_inputs = run.get("inputs")
+            if stored_inputs != inputs:
+                if not isinstance(stored_inputs, dict):
+                    raise RecoveryError("stage 6 run kind or inputs differ")
+                if _compatible_live_attach(stored_inputs, inputs, run.get("progress", {})):
                     live_attached = True
                 else:
-                    raise RecoveryError("stage 6 run kind or inputs differ")
+                    differences = [
+                        f"{key} (stored={stored_inputs.get(key)!r}, computed={inputs.get(key)!r})"
+                        for key in (
+                            "version",
+                            "workload_version",
+                            "schedule_digest",
+                            "backfill_schedule_digest",
+                        )
+                        if stored_inputs.get(key) != inputs.get(key)
+                    ]
+                    details = f": {', '.join(differences)}" if differences else ""
+                    raise RecoveryError(f"stage 6 run kind or inputs differ{details}")
             prior_owner = run.get("owner")
             if prior_owner is not None and (
                 lease is None or prior_owner not in (lease["owner"], lease.get("prior_owner"))
@@ -182,6 +213,8 @@ class Stage6Journal:
                     raise RecoveryError("stage 6 bank lease changed during takeover")
 
             run_set: dict[str, Any] = {"owner": self.owner, "stage6_claim_id": self._claim_id}
+            if provenance is not None:
+                run_set["provenance"] = provenance
             run_unset: dict[str, str] = {}
             if live_attached:
                 run_set["inputs"] = inputs

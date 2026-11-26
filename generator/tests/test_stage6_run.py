@@ -1,12 +1,18 @@
 import asyncio
+import re
+from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from test_stage6_journal import Database
 
+from saltation_gen.client.bank import BankClient
 from saltation_gen.config.stage6 import ScheduleConfig
+from saltation_gen.drivers import stage6, stage6_identity
 from saltation_gen.drivers.backfill_clock import KST
 from saltation_gen.drivers.stage6 import (
     Due,
@@ -20,7 +26,8 @@ from saltation_gen.drivers.stage6 import (
     _timing,
     _waves,
 )
-from saltation_gen.drivers.stage6_schedule import build_schedule
+from saltation_gen.drivers.stage6_identity import build_schedule_identity
+from saltation_gen.drivers.stage6_schedule import Schedule, build_schedule
 from saltation_gen.drivers.stage6_types import Episode, Step
 from saltation_gen.truth.recovery import RecoveryError
 
@@ -46,6 +53,166 @@ class Clock:
 
 def item(episode, name, actor, peer=None, final=False):
     return Due(AT, episode, Step(name, "transfer", actor, peer=peer), final)
+
+
+@pytest.fixture
+async def identity_run(monkeypatch):
+    database = Database()
+    truth = SimpleNamespace(runs=database["runs"], roster=database["roster"], labels=database["labels"])
+    config = ScheduleConfig(2, annual={"G": 1}, live={}, normal=False)
+    run = RunConfig(DAY, days=2)
+    first = AT.replace(hour=0)
+    stop = asyncio.Event()
+    stop.set()
+    requests = []
+
+    def respond(request):
+        requests.append(request.url.path)
+        assert len(requests) <= 2 and request.url.path == "/internal/v1/clock"
+        return httpx.Response(200, json={"mode": "BACKFILL", "business_time": first.isoformat()})
+
+    async def seed_world(*args, **kwargs):
+        truth.roster.rows.extend(
+            {
+                "customer_no": customer,
+                "protected": True,
+                "account_no": f"account-{customer}",
+                "phone": f"phone-{customer}",
+                "fintech_use_num": f"fintech-{customer}",
+                "card_no": f"card-{customer}",
+            }
+            for customer in stage6.world_customer_numbers(config.population)
+        )
+
+    bank = BankClient("http://synthetic", transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(stage6, "seed_world", seed_world)
+    monkeypatch.delenv("SALTATION_CODE_REVISION", raising=False)
+
+    async def invoke(*, resume=False):
+        return await stage6.run_stage6(
+            bank, truth, "identity-run", 7, config, run, "backfill", stop, resume=resume
+        )
+
+    try:
+        yield invoke, truth.runs.rows, requests
+    finally:
+        await bank.close()
+
+
+async def test_resume_keeps_identity_and_updates_code_revision(identity_run, monkeypatch):
+    invoke, rows, requests = identity_run
+    monkeypatch.setenv("SALTATION_CODE_REVISION", "  original  ")
+    first = await invoke()
+    assert first["status"] == "stopped"
+    assert first["progress"]["seed_state"] == "seeded"
+    assert rows[0]["provenance"] == {"code_revision": "original"}
+    inputs = deepcopy(rows[0]["inputs"])
+    assert inputs["version"] == inputs["workload_version"] == 2
+    assert inputs["schedule_digest"] == inputs["backfill_schedule_digest"]
+    assert inputs["planned_counts"]["backfill"]["episodes"] == {"G": 1}
+    assert "code_revision" not in inputs
+
+    monkeypatch.setenv("SALTATION_CODE_REVISION", " next ")
+    assert await invoke(resume=True) == first
+    assert rows[0]["inputs"] == inputs
+    assert rows[0]["provenance"] == {"code_revision": "next"}
+    assert requests == ["/internal/v1/clock"] * 2
+
+
+@pytest.mark.parametrize(
+    "change", ["workload_version", "legacy", "step", "offset", "expect_declined", "wave_order", "final_step"]
+)
+async def test_resume_rejects_identity_changes_before_bank_http(identity_run, monkeypatch, change):
+    invoke, rows, requests = identity_run
+    assert (await invoke())["status"] == "stopped"
+    assert "provenance" not in rows[0]
+    original = deepcopy(rows[0]["inputs"])
+    if change == "workload_version":
+        monkeypatch.setattr(stage6_identity, "WORKLOAD_VERSION", 3)
+    elif change == "legacy":
+        legacy = rows[0]["inputs"]
+        legacy["version"] = 1
+        for key in ("workload_version", "schedule_digest", "backfill_schedule_digest", "planned_counts"):
+            del legacy[key]
+    else:
+        original_steps = stage6.steps
+
+        def changed_steps(episode):
+            actions = original_steps(episode)
+            if change == "wave_order":
+                index = next(i for i, step in enumerate(actions) if step.op == "atm_start")
+                actions[index : index + 2] = reversed(actions[index : index + 2])
+            elif change == "final_step":
+                assert actions[-1].offset != actions[-2].offset
+                actions[-2:] = reversed(actions[-2:])
+            else:
+                index = next(i for i, step in enumerate(actions) if step.args.get("expect_declined"))
+                target = actions[index]
+                actions[index] = {
+                    "step": replace(target, name=f"{target.name}_changed"),
+                    "offset": replace(target, offset=target.offset + 1),
+                    "expect_declined": replace(target, args=target.args | {"expect_declined": False}),
+                }[change]
+            return actions
+
+        monkeypatch.setattr(stage6, "steps", changed_steps)
+
+    stored_run = deepcopy(rows[0])
+    with pytest.raises(RecoveryError, match="inputs differ") as error:
+        await invoke(resume=True)
+    message = str(error.value)
+    if change == "workload_version":
+        assert "workload_version (stored=2, computed=3)" in message
+    elif change == "legacy":
+        assert "version (stored=1, computed=2)" in message
+        assert "workload_version (stored=None, computed=2)" in message
+        assert f"schedule_digest (stored=None, computed={original['schedule_digest']!r})" in message
+    else:
+        for field in ("schedule_digest", "backfill_schedule_digest"):
+            match = re.search(
+                rf"\b{field} \(stored='(sha256:[0-9a-f]{{64}})', computed='(sha256:[0-9a-f]{{64}})'\)",
+                message,
+            )
+            assert match
+            assert match[1] == original[field]
+            assert match[1] != match[2]
+    assert rows[0] == stored_run
+    assert requests == ["/internal/v1/clock"] * 2
+
+
+def test_schedule_identity_canonicalizes_mappings_and_separates_live_work():
+    annual = Episode("annual", "A", AT, {"actor": "a", "receiver": "b"}, "annual")
+    live_at = AT + timedelta(days=1)
+    live = Episode("live", "D", live_at, {"actor": "c"}, "live", carry_in=True)
+    action = Step("send", "transfer", "a", args={"amount": 10, "options": {"y": 2, "x": 1}}, peer="b")
+    later = Step("login", "login", "a", offset=5)
+    live_login = Step("login", "login", "c")
+    schedule = Schedule([annual, live], {"a", "c"}, {}, set())
+    backfill = [(annual, action, AT), (annual, later, AT + timedelta(seconds=5))]
+    planned = {DAY: backfill, live_at.date(): [(live, live_login, live_at)]}
+    identity = build_schedule_identity(schedule, planned)
+    reordered = dict(reversed(planned.items()))
+    reordered[DAY] = [
+        (
+            replace(annual, roles={"receiver": "b", "actor": "a"}),
+            replace(action, args={"options": {"x": 1, "y": 2}, "amount": 10}),
+            AT,
+        ),
+        backfill[1],
+    ]
+    assert build_schedule_identity(schedule, reordered) == identity
+    assert identity["planned_counts"] == {
+        "backfill": {"episodes": {"A": 1}, "operations": 2},
+        "live": {"episodes": {"D": 1}, "operations": 1},
+    }
+
+    changed_live = planned | {live_at.date(): [(live, live_login, live_at + timedelta(seconds=1))]}
+    new_identity = build_schedule_identity(schedule, changed_live)
+    assert new_identity["schedule_digest"] != identity["schedule_digest"]
+    assert new_identity["backfill_schedule_digest"] == identity["backfill_schedule_digest"]
+    changed_dormant = build_schedule_identity(replace(schedule, dormant={"c"}), planned)
+    assert changed_dormant["schedule_digest"] != identity["schedule_digest"]
+    assert changed_dormant["backfill_schedule_digest"] != identity["backfill_schedule_digest"]
 
 
 def test_adjacent_transfers_dispatch_in_separate_waves():

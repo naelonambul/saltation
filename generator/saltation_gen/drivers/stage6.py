@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from contextlib import suppress
@@ -17,6 +18,7 @@ from saltation_gen.drivers.stage6_execute import (
     TERMINAL_BY_REGION,
     Stage6Executor,
 )
+from saltation_gen.drivers.stage6_identity import build_schedule_identity
 from saltation_gen.drivers.stage6_schedule import Schedule, build_schedule, normal_amount, normal_episodes
 from saltation_gen.drivers.stage6_seed import seed_world, world_customer_numbers
 from saltation_gen.drivers.stage6_steps import steps
@@ -484,6 +486,11 @@ async def run_stage6(
     numbers = world_customer_numbers(config.population, run.start)
     schedule = build_schedule(config, seed, run.first, run.days, live_at, numbers)
     planned = _index_scenarios(schedule)
+    steps_by_start_day = defaultdict(list)
+    for episode in schedule.episodes:
+        steps_by_start_day[episode.start.date()].extend(
+            (episode, step, episode.start + timedelta(seconds=step.offset)) for step in steps(episode)
+        )
     first_at = datetime.combine(run.first, time(), KST)
     backfill_end = (
         min(live_at, first_at + timedelta(days=run.days)) if live_at else first_at + timedelta(days=run.days)
@@ -491,7 +498,7 @@ async def run_stage6(
     _timing(schedule, run, live_at, backfill_end)
     preparation_at = first_at - timedelta(days=366 if schedule.dormant else 0)
     inputs = {
-        "version": 1,
+        "version": 2,
         "seed": seed,
         "config": asdict(config),
         "run": asdict(run)
@@ -500,9 +507,12 @@ async def run_stage6(
         "preparation_start": preparation_at.isoformat(),
         "backfill_start": first_at.isoformat(),
         "backfill_end": backfill_end.isoformat(),
+        **build_schedule_identity(schedule, steps_by_start_day),
     }
+    revision = os.environ.get("SALTATION_CODE_REVISION", "").strip()
+    provenance = {"code_revision": revision} if revision else None
     journal = Stage6Journal(truth, run_id, new_ulid())
-    doc = await journal.claim(inputs, exited_owner)
+    doc = await journal.claim(inputs, exited_owner, provenance=provenance)
     clock = BackfillClock(bank, journal, doc.get("progress", {}))
     people = {}
     try:
