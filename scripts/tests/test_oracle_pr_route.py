@@ -76,10 +76,18 @@ class OraclePrRoute(unittest.TestCase):
         self.write("docs/guides/agent.md")
         self.write("changes/docs-guide/change.json", "{}\n")
         self.write("changes/docs-guide/plan.md")
+        self.write("changes/docs-guide/review.md")
         mode, reason = self.decide(self.candidate())
         self.assertEqual(mode, "docs-only")
         self.assertIn("docs/guides/agent.md", reason)
+        self.assertIn("changes/docs-guide/review.md", reason)
         self.assertNotIn("README.ko.md", reason)
+
+    def test_review_record_with_code_changes_requires_oci(self):
+        self.write("README.md")
+        self.write("changes/docs-guide/review.md")
+        self.write("bank/src/main.rs")
+        self.assertEqual(self.decide(self.candidate())[0], "full")
 
     def test_document_rename_and_root_readme(self):
         self.git("mv", "docs/old.md", "docs/new.md")
@@ -102,7 +110,7 @@ class OraclePrRoute(unittest.TestCase):
         for path in (
             "bank/src/main.rs", ".github/workflows/repository.yml", "checks.json",
             "intent.md", "AGENTS.md", "docs/script.sh", "unmapped.txt",
-            "changes/other/plan.md", "changes/docs-guide/spec.md",
+            "changes/other/plan.md", "changes/other/review.md", "changes/docs-guide/spec.md",
         ):
             with self.subTest(path=path):
                 self.write("README.md")

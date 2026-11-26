@@ -1,16 +1,20 @@
 import ast
-from collections import Counter
+from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 import io
+from itertools import zip_longest
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tokenize
 
 
 ROOT = Path(__file__).resolve().parents[2]
+STRING_OPENING = re.compile(r"""[rRuU]?('''|"{3}|'|")""")
+CODE_START = re.compile(r"\w+(?:\.\w+)*")
 
 
 def git(root, *args):
@@ -35,16 +39,32 @@ def source_text(source):
     return source.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
 
 
-def comments(text):
+def annotated_lines(text):
     tokens = tokenize.generate_tokens(io.StringIO(text).readline)
-    return {
-        token.start[0] - 1: token.string.strip()
+    comments = {
+        token.start[0] - 1: (token.line[:token.start[1]].strip(), token.string.strip())
         for token in tokens if token.type == tokenize.COMMENT
     }
+    return [comments.get(line, (code.strip(), None)) for line, code in enumerate(text.split("\n"))]
+
+
+def string_fragments(text, literal):
+    source = ast.get_source_segment(text, literal)
+    tokens = tokenize.generate_tokens(io.StringIO(f"({source}\n)").readline)
+    fragments = defaultdict(list)
+    for token in tokens:
+        if token.type != tokenize.STRING:
+            continue
+        opening = STRING_OPENING.match(token.string)
+        contents = token.string[opening.end():].removesuffix(opening[1])
+        for line, part in enumerate(contents.split("\n"), literal.lineno + token.start[0] - 2):
+            if part.strip():
+                fragments[line].append(part.strip())
+    return tuple((line, " ".join(parts)) for line, parts in fragments.items()) or ((literal.lineno - 1, ""),)
 
 
 def docstrings(text):
-    owners, found = Counter(), {}
+    owners, found = Counter(), defaultdict(list)
 
     def visit(node, parent):
         owner = parent
@@ -52,15 +72,8 @@ def docstrings(text):
             key = (*parent, type(node).__name__, node.name)
             owner = (*key, owners[key])
             owners[key] += 1
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            if ast.get_docstring(node, clean=False) is not None:
-                literal = node.body[0].value
-                fragments = ast.get_source_segment(text, literal).split("\n")
-                found[owner] = tuple(
-                    (line, part.strip())
-                    for line, part in enumerate(fragments, literal.lineno - 1)
-                    if part.strip()
-                )
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            found[owner].append(string_fragments(text, node.value))
         for child in ast.iter_child_nodes(node):
             visit(child, owner)
 
@@ -76,44 +89,108 @@ def added_lines(before, after):
             yield from (line for line, _ in after[start:end])
 
 
+def added_docstring_lines(before, after):
+    old_strings = [tuple(text for _, text in fragments) for fragments in before]
+    new_strings = [tuple(text for _, text in fragments) for fragments in after]
+    matcher = SequenceMatcher(None, old_strings, new_strings, autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag in {"insert", "replace"}:
+            for old, new in zip_longest(before[old_start:old_end], after[new_start:new_end], fillvalue=()):
+                yield from added_lines(old, new)
+
+
+def compare_comments(before, after, new_start):
+    for offset, ((_, previous), (_, current)) in enumerate(zip_longest(before, after, fillvalue=("", None))):
+        if current is not None and current != previous:
+            yield new_start + offset
+
+
+def code_anchor(code, comment):
+    start = CODE_START.match(code)
+    return start[0] if start else (code, comment)
+
+
+def added_comment_lines(before, after):
+    original = [(code, comment if not code else None) for code, comment in before]
+    candidate = [(code, comment if not code else None) for code, comment in after]
+    matcher = SequenceMatcher(None, original, candidate, autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        previous, current = before[old_start:old_end], after[new_start:new_end]
+        if tag == "equal":
+            yield from compare_comments(previous, current, new_start)
+        elif tag == "insert":
+            yield from compare_comments((), current, new_start)
+        elif tag == "replace":
+            anchors = SequenceMatcher(
+                None, [code_anchor(*line) for line in previous],
+                [code_anchor(*line) for line in current], autojunk=False,
+            )
+            for match, left, right, start, end in anchors.get_opcodes():
+                retained = previous[left:right] if match == "equal" else ()
+                yield from compare_comments(retained, current[start:end], new_start + start)
+
+
 def new_annotations(before, after, allowed):
     old_text, new_text = source_text(before), source_text(after)
-    old_lines, new_lines_of_source = old_text.split("\n"), new_text.split("\n")
-    old_comments, new_comments = comments(old_text), comments(new_text)
-    changes = []
-    matcher = SequenceMatcher(None, old_lines, new_lines_of_source, autojunk=False)
-    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
-        if tag == "equal":
-            changes.extend(
-                (new, "comment")
-                for old, new in zip(range(old_start, old_end), range(new_start, new_end))
-                if new in new_comments and new_comments[new] != old_comments.get(old)
-            )
-        elif tag in {"insert", "replace"}:
-            previous = [(line, old_comments[line]) for line in range(old_start, old_end) if line in old_comments]
-            current = [(line, new_comments[line]) for line in range(new_start, new_end) if line in new_comments]
-            changes.extend((line, "comment") for line in added_lines(previous, current))
+    new_lines_of_source = new_text.split("\n")
+    changes = [(line, "comment") for line in added_comment_lines(annotated_lines(old_text), annotated_lines(new_text))]
     old_docs = docstrings(old_text)
     for owner, fragments in docstrings(new_text).items():
-        changes.extend((line, "docstring") for line in added_lines(old_docs.get(owner, ()), fragments))
+        changes.extend((line, "docstring") for line in added_docstring_lines(old_docs.get(owner, ()), fragments))
     for line, kind in sorted(changes):
         if new_lines_of_source[line].strip() not in allowed:
             yield line + 1, kind
 
 
+def resolve_commit(root, ref):
+    result = subprocess.run(
+        ["git", "-C", root, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def comparison_commit(root, commit):
+    result = subprocess.run(
+        ["git", "-C", root, "merge-base", commit, "HEAD"],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else commit
+
+
+def push_before():
+    before = os.environ.get("GITHUB_EVENT_BEFORE")
+    payload = os.environ.get("GITHUB_EVENT_PATH")
+    if not before and payload:
+        try:
+            event = json.loads(Path(payload).read_bytes())
+        except (OSError, ValueError):
+            return None
+        if isinstance(event, dict):
+            before = event.get("before")
+    if isinstance(before, str) and re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", before) and before.strip("0"):
+        return before
+    return None
+
+
 def baseline_ref(root, branch, pr_base):
     if pr_base:
-        return git(root, "rev-parse", "--verify", "--end-of-options", f"{pr_base}^{{commit}}").decode().strip()
-    if git(root, "rev-parse", "--abbrev-ref", "HEAD").decode().strip() == branch:
+        commit = git(root, "rev-parse", "--verify", "--end-of-options", f"{pr_base}^{{commit}}").decode().strip()
+        return comparison_commit(root, commit)
+    on_baseline_branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").decode().strip() == branch
+    if os.environ.get("GITHUB_EVENT_NAME") == "push":
+        before = push_before()
+        commit = resolve_commit(root, before) if before else None
+        return commit or resolve_commit(root, "HEAD~1") or "HEAD"
+    if on_baseline_branch:
+        if not git(root, "--no-optional-locks", "status", "--porcelain"):
+            return resolve_commit(root, "HEAD~1") or "HEAD"
         return "HEAD"
     refs = (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}")
     for ref in refs:
-        result = subprocess.run(
-            ["git", "-C", root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
+        commit = resolve_commit(root, ref)
+        if commit:
+            return comparison_commit(root, commit)
     raise ValueError(f"Cannot find the comment ratchet baseline branch {branch!r}")
 
 

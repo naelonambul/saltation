@@ -32,7 +32,7 @@ def documented_paths(root: Path, start: str, end: str, packet: str) -> list[str]
     if fields[-1] or len(fields) % 2 != 1:
         raise ValueError("unexpected Git diff format")
 
-    packet_files = {f"changes/{packet}/change.json", f"changes/{packet}/plan.md"}
+    packet_files = {f"changes/{packet}/{name}" for name in ("change.json", "plan.md", "review.md")}
     paths = []
     for header, filename in zip(fields[0:-1:2], fields[1:-1:2]):
         old_mode, new_mode, _, _, status = header[1:].split()

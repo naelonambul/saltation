@@ -1,10 +1,12 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from scripts.ops.check_new_comments import findings, main, new_annotations
 
@@ -13,6 +15,11 @@ class AnnotationTests(unittest.TestCase):
     def test_existing_inline_comment_survives_code_edits_and_line_shifts(self):
         before = b"x = 1  # existing\n"
         after = b"prefix = 0\nx = 2  # existing\n"
+        self.assertEqual(list(new_annotations(before, after, set())), [])
+
+    def test_inline_comments_survive_adjacent_value_edits(self):
+        before = b"a = 1  # first\nb = 2  # second\n"
+        after = b"a = 3  # first\nb = 4  # second\n"
         self.assertEqual(list(new_annotations(before, after, set())), [])
 
     def test_added_duplicate_is_detected_when_existing_line_stays(self):
@@ -39,6 +46,31 @@ class AnnotationTests(unittest.TestCase):
             [(1, "docstring"), (3, "docstring"), (5, "docstring")],
         )
 
+    def test_detects_bare_strings_outside_docstring_positions(self):
+        for before, after, line in (
+            (b'import os\n', b'import os\n"""after import"""\n', 2),
+            (b'value = 1\n', b'value = 1\n"""attribute documentation"""\n', 2),
+            (
+                b'def f():\n    value = 1\n    return value\n',
+                b'def f():\n    value = 1\n    """mid-function"""\n    return value\n',
+                3,
+            ),
+            (b'import os\n', b'import os\n""\n', 2),
+        ):
+            with self.subTest(after=after):
+                self.assertEqual(list(new_annotations(before, after, set())), [(line, "docstring")])
+
+    def test_single_line_docstring_can_be_reformatted_as_multiline(self):
+        before = b'def f():\n    """existing"""\n    return 1\n'
+        for quotes in (b'"""', b"'''"):
+            with self.subTest(quotes=quotes):
+                after = b'def f():\n    %s\n    existing\n    %s\n    return 1\n' % (quotes, quotes)
+                self.assertEqual(list(new_annotations(before, after, set())), [])
+
+    def test_concatenated_string_delimiters_can_change(self):
+        before = b"(\n    '''first\n    '''\n    '''second\n    '''\n)\n"
+        after = before.replace(b"'''", b'"""')
+        self.assertEqual(list(new_annotations(before, after, set())), [])
 
     def test_unrelated_docstring_removal_cannot_hide_an_addition(self):
         before = b'def first():\n    """alpha"""\n    return 1\n\ndef second():\n    return 2\n'
@@ -50,9 +82,24 @@ class AnnotationTests(unittest.TestCase):
         after = b'first = 1\nsecond = 2\nthird = 3  # units\n'
         self.assertEqual(list(new_annotations(before, after, set())), [(3, "comment")])
 
+    def test_moving_inline_comment_to_an_adjacent_statement_is_an_addition(self):
+        before = b'a = 1  # units\nb = 2\n'
+        after = b'a = 1\nb = 2  # units\n'
+        self.assertEqual(list(new_annotations(before, after, set())), [(2, "comment")])
+
+    def test_moving_inline_comment_between_edited_assignments_to_same_name_is_an_addition(self):
+        before = b"a = 1  # units\na = 2\n"
+        after = b"a = 3\na = 4  # units\n"
+        self.assertEqual(list(new_annotations(before, after, set())), [(2, "comment")])
+
 
 class RepositoryTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ, {
+            "GITHUB_EVENT_NAME": "", "GITHUB_EVENT_BEFORE": "", "GITHUB_EVENT_PATH": "",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -126,6 +173,47 @@ class RepositoryTests(unittest.TestCase):
         self.git("branch", "-D", "main")
         self.write("product.py", "# existing\nvalue = 1  # added\n")
         self.assertEqual([p.split(": new")[0] for p in findings(self.root)], ["product.py:2"])
+
+    def test_diverged_baseline_uses_the_merge_base(self):
+        self.git("switch", "-qc", "candidate")
+        self.write("feature.py", "# added\n")
+        self.git("add", "feature.py")
+        self.git("commit", "-qm", "Candidate")
+        self.git("switch", "-q", "main")
+        self.write("product.py", "value = 1\n")
+        self.git("add", "product.py")
+        self.git("commit", "-qm", "Remove fork-point comment")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("switch", "-q", "candidate")
+        for pr_base in (None, "refs/remotes/origin/main"):
+            with self.subTest(pr_base=pr_base):
+                self.assertEqual([p.split(": new")[0] for p in findings(self.root, pr_base)], ["feature.py:1"])
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        self.assertEqual([p.split(": new")[0] for p in findings(self.root)], ["feature.py:1"])
+
+    def test_clean_main_and_detached_push_check_committed_comments(self):
+        self.write("product.py", "# existing\nvalue = 1  # added\n")
+        self.git("add", "product.py")
+        self.git("commit", "-qm", "Add a comment")
+        self.assertEqual([p.split(": new")[0] for p in findings(self.root)], ["product.py:2"])
+        self.git("switch", "--detach", "-q")
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}):
+            self.assertEqual([p.split(": new")[0] for p in findings(self.root)], ["product.py:2"])
+
+    def test_push_prefers_valid_before_commit_and_falls_back_to_parent(self):
+        before = subprocess.check_output(["git", "-C", self.root, "rev-parse", "HEAD"], text=True).strip()
+        self.write("product.py", "# existing\nvalue = 1  # added\n")
+        self.git("add", "product.py")
+        self.git("commit", "-qm", "Add a comment")
+        self.git("commit", "--allow-empty", "-qm", "Second pushed commit")
+        for event_before, expected in ((before, ["product.py:2"]), ("0" * 40, []), ("f" * 40, [])):
+            with self.subTest(event_before=event_before), patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_BEFORE": event_before},
+            ):
+                self.assertEqual([p.split(": new")[0] for p in findings(self.root)], expected)
+        self.write("push.json", json.dumps({"before": before}))
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(self.root / "push.json")}):
+            self.assertEqual([p.split(": new")[0] for p in findings(self.root)], ["product.py:2"])
 
     def test_rename_inherits_existing_comments(self):
         self.git("mv", "product.py", "renamed.py")
