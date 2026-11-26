@@ -11,33 +11,72 @@ SPEC_NAMES = ("public", "internal", "inbound", "atm", "card")
 HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 PATH_KEY = re.compile(r"""(["']?)(/[^\s"']+)\1:\s*(?:#.*)?""")
 STATUS_KEY = re.compile(r"""(["']?)([1-5][0-9]{2})\1:(?:\s|$)""")
-QUOTED_SCALAR = re.compile(
-    r"""(?:^|\s)\#.*$|(?:^|:\s+)(?:"(?:\\.|[^"\\])*(?:"|(?P<open_double>\\?$))|'(?:''|[^'])*(?:'|(?P<open_single>$)))"""
-)
 
 type OpenAPIPaths = dict[str, dict[str, set[int]]]
+
+
+def scan_flow_delta(entry: str) -> int:
+    delta = 0
+    quote: str | None = None
+    i = 0
+    length = len(entry)
+    while i < length:
+        ch = entry[i]
+        if quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+        elif quote == "'":
+            if ch == "'":
+                if i + 1 < length and entry[i + 1] == "'":
+                    i += 2
+                    continue
+                quote = None
+        elif ch == "#" and (i == 0 or entry[i - 1].isspace()):
+            break
+        elif ch in ('"', "'") and (i == 0 or entry[i - 1] in " \t:,[{"):
+            quote = ch
+        elif ch in "{[":
+            delta += 1
+        elif ch in "}]":
+            delta -= 1
+        i += 1
+    if quote is not None:
+        raise ValueError("OpenAPI paths must use single-line quoted scalars")
+    return delta
 
 
 def extract_paths(document: str) -> OpenAPIPaths:
     paths: OpenAPIPaths = {}
     in_paths = in_responses = False
+    flow_depth = 0
     methods: dict[str, set[int]] | None = None
     statuses: set[int] | None = None
     for line in document.splitlines():
         entry = line.lstrip()
         if not entry or entry.startswith("#"):
             continue
-        if in_paths and any(match.lastgroup for match in QUOTED_SCALAR.finditer(entry)):
-            raise ValueError("OpenAPI paths must use single-line quoted scalars")
         indent = len(line) - len(entry)
-        key = entry.partition(":")[0]
-        if indent == 0:
+        if indent == 0 and flow_depth == 0:
             if in_paths:
                 break
-            in_paths = key == "paths"
-        elif not in_paths:
+            key, sep, _ = entry.partition(":")
+            in_paths = bool(sep) and key == "paths"
             continue
-        elif indent == 2:
+        if not in_paths:
+            continue
+        in_flow = flow_depth > 0
+        flow_depth += scan_flow_delta(entry)
+        if flow_depth < 0:
+            raise ValueError("Unbalanced YAML flow collection in OpenAPI paths")
+        if in_flow:
+            continue
+        key, sep, _ = entry.partition(":")
+        if not sep:
+            continue
+        if indent == 2:
             path = PATH_KEY.fullmatch(entry)
             methods = paths.setdefault(path[2], {}) if path else None
             statuses = None
@@ -152,6 +191,17 @@ def test_extractor_rejects_multiline_response_description(contract_fixture: str)
     )
     with pytest.raises(ValueError, match="single-line quoted scalars"):
         extract_paths(mutated)
+
+
+def test_extractor_ignores_nested_status_in_multiline_flow_mapping(contract_fixture: str) -> None:
+    mutated = contract_fixture.replace(
+        "        '404':\n          description: Missing\n",
+        '        x-metadata: {\n        "404": "nested"\n        }\n',
+        1,
+    )
+    operation = OperationSpec("fixture", "GET", "/fixture/{id}", (200, 404))
+    with pytest.raises(AssertionError, match=r"missing response statuses \[404\]"):
+        assert_conforms("fixture_lookup", operation, extract_paths(mutated))
 
 
 def test_operation_path_resolves_parameters() -> None:
