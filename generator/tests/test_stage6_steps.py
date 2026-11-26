@@ -1,11 +1,14 @@
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from saltation_gen.config.card import card_amount_krw
+from saltation_gen.drivers.stage6_execute import Stage6Executor
 from saltation_gen.drivers.stage6_steps import PRIOR_DAY, steps
 from saltation_gen.drivers.stage6_types import Episode, Step
+from saltation_gen.truth.recovery import RecoveryError
 
 _KST = timezone(timedelta(hours=9))
 _ACTOR, _RECEIVER, _SECOND = "C00000001", "C00000002", "C00000003"
@@ -13,6 +16,35 @@ _ACTOR, _RECEIVER, _SECOND = "C00000001", "C00000002", "C00000003"
 
 def _episode(kind: str, **roles: str) -> Episode:
     return Episode("fixture", kind, datetime(2026, 1, 1, 23, 59, 59, tzinfo=_KST), roles, "fixture")
+
+
+@pytest.mark.parametrize(
+    ("kind", "expect_declined", "state", "error"),
+    [
+        ("G", True, "declined", None),
+        ("G", True, "succeeded", "expected declined outcome"),
+        ("G", False, "declined", "required operation declined"),
+        ("G", False, "succeeded", None),
+        ("normal_card", False, "declined", None),
+    ],
+)
+async def test_execute_resumes_terminal_operation(kind, expect_declined, state, error):
+    class NoDispatchBank:
+        def __getattr__(self, name):
+            pytest.fail(f"unexpected bank method accessed: {name}")
+
+    episode = _episode(kind, actor=_ACTOR)
+    step = Step("card", "card", _ACTOR, args={"expect_declined": expect_declined})
+    journal = Mock(run_id="run", owner="owner", get_operation=AsyncMock(return_value={"state": state}))
+    executor = Stage6Executor(NoDispatchBank(), Mock(), journal, {})
+
+    if error is None:
+        await executor.execute(episode, step, episode.start)
+    else:
+        with pytest.raises(RecoveryError, match=error):
+            await executor.execute(episode, step, episode.start)
+
+    journal.get_operation.assert_awaited_once_with(episode.id, step.name)
 
 
 @pytest.mark.parametrize(

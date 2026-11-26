@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "stage6-expected-decline-resume",
+  "kind": "implementation",
+  "title": "Validate terminal outcomes consistently when resuming Stage 6 operations",
+  "base": {
+    "ref": "main",
+    "commit": "93fd4801cfdebbadcd4b053f830e1120a0ecb8e4"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d8ffc031f0ff1bedee0ff8e62052d87d6096d0a89a5a47da51305f6e9bb681b0"
+  },
+  "write_scope": [
+    "generator/saltation_gen/drivers/stage6_execute.py",
+    "generator/tests/test_stage6_steps.py"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:d5af12028f1835d5f9d79e626b49d7d0c440e297f2190a5ff35a4958fecf7aef",
+      "by": "ckh",
+      "at": "2026-11-26T07:36:32Z",
+      "write_scope_sha256": "sha256:7f12a0dc8e345995ed669bfa1c3782a58e90ed6ee92073243c33cdeb821207e3"
+    }
+  ]
+}

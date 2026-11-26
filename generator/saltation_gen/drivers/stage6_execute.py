@@ -54,6 +54,14 @@ ENDPOINTS = {
 }
 
 
+def _validate_terminal_outcome(episode: Episode, step: Step, terminal: str) -> None:
+    expect_declined = bool(step.args.get("expect_declined"))
+    if expect_declined and terminal != "declined":
+        raise RecoveryError(f"expected declined outcome for {episode.id}/{step.name}")
+    if not expect_declined and terminal == "declined" and not episode.kind.startswith("normal_"):
+        raise RecoveryError(f"required operation declined for {episode.id}/{step.name}")
+
+
 class Stage6Executor:
     def __init__(
         self,
@@ -81,8 +89,7 @@ class Stage6Executor:
     async def execute(self, episode: Episode, step: Step, now: datetime) -> None:
         previous = await self.journal.get_operation(episode.id, step.name)
         if previous and previous["state"] in {"succeeded", "declined"}:
-            if previous["state"] == "declined" and not episode.kind.startswith("normal_"):
-                raise RecoveryError(f"required operation declined for {episode.id}/{step.name}")
+            _validate_terminal_outcome(episode, step, previous["state"])
             return
         if previous and previous["state"] != "prepared":
             raise RecoveryError(f"unresolved stage 6 operation {episode.id}/{step.name}")
@@ -259,11 +266,7 @@ class Stage6Executor:
             raise RecoveryError(f"unconfirmed outcome for {episode.id}/{step.name}") from None
         terminal = "declined" if result["decision"] == "rejected" else "succeeded"
         await self.journal.transition(episode.id, step.name, "unconfirmed", terminal, result)
-        expect_declined = bool(step.args.get("expect_declined"))
-        if expect_declined and terminal != "declined":
-            raise RecoveryError(f"expected declined outcome for {episode.id}/{step.name}")
-        if not expect_declined and terminal == "declined" and not episode.kind.startswith("normal_"):
-            raise RecoveryError(f"required operation declined for {episode.id}/{step.name}")
+        _validate_terminal_outcome(episode, step, terminal)
 
     def _build_prepared_record(
         self, episode: Episode, step: Step, now: datetime, context: Context, product: dict | None
