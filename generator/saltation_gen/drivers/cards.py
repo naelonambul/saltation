@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from saltation_gen.client.bank import BankClient, BankError, Context, atm_idempotency_key, new_ulid
+from saltation_gen.client.contracts import OPERATIONS
 from saltation_gen.config import ATM_TERMINALS
 from saltation_gen.config.card import HOLDER_ACTIVITY_WINDOW_HOURS, NORMAL_CARD_ANNUAL_CAP, card_amount_krw
 from saltation_gen.drivers.backfill_clock import BackfillClock
@@ -27,10 +28,10 @@ from saltation_gen.truth.recovery import RecoveryError, RecoveryJournal
 
 NETWORK_CONTEXT = Context("192.0.2.10", "KR-11", "card-network")
 ENDPOINTS = {
-    "login": "/v2.0/ext/auth/login",
-    "atm_start": "/atm/v1/session",
-    "atm_withdraw": "/atm/v1/cash/withdraw",
-    "card": "/card/v1/authorize",
+    "login": OPERATIONS["login"].path,
+    "atm_start": OPERATIONS["atm_start_session"].path,
+    "atm_withdraw": OPERATIONS["atm_withdraw"].path,
+    "card": OPERATIONS["card_authorize"].path,
 }
 TERMINAL_STATES = {"succeeded", "declined"}
 

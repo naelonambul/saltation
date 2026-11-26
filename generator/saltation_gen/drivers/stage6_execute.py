@@ -16,6 +16,7 @@ from saltation_gen.client.bank import (
     bank_tran_id,
     new_ulid,
 )
+from saltation_gen.client.contracts import OPERATIONS
 from saltation_gen.config import ATM_TERMINALS, BANK_CODE
 from saltation_gen.drivers.stage6_types import Episode, Step
 from saltation_gen.personas.normal import home_context
@@ -35,22 +36,22 @@ ATM_CASH = {"atm_withdraw", "atm_deposit"}
 TRANSFER_STEPS = {"transfer", "payee"}
 CARD_CONTEXT = {"card", "inbound"}
 ENDPOINTS = {
-    "login": "/v2.0/ext/auth/login",
-    "bad_login": "/v2.0/ext/auth/login",
-    "reset_request": "/v2.0/ext/auth/password_reset/request",
-    "sms": "/internal/v1/sms/{phone}",
-    "reset_confirm": "/v2.0/ext/auth/password_reset/confirm",
-    "payee": "/v2.0/ext/payees",
-    "transfer": "/v2.0/transfer/withdraw/fin_num",
-    "balance": "/v2.0/account/balance/fin_num",
-    "term_identity": "/internal/v1/deposits/{product}/identity",
-    "term_open": "/v2.0/ext/deposits",
-    "term_close": "/v2.0/ext/deposits/{product}/close",
-    "inbound": "/v2.0/transfer/deposit/fin_num",
-    "atm_start": "/atm/v1/session",
-    "atm_withdraw": "/atm/v1/cash/withdraw",
-    "atm_deposit": "/atm/v1/cash/deposit",
-    "card": "/card/v1/authorize",
+    "login": OPERATIONS["login"].path,
+    "bad_login": OPERATIONS["login"].path,
+    "reset_request": OPERATIONS["password_reset_request"].path,
+    "sms": OPERATIONS["sms"].path,
+    "reset_confirm": OPERATIONS["password_reset_confirm"].path,
+    "payee": OPERATIONS["register_payee"].path,
+    "transfer": OPERATIONS["transfer"].path,
+    "balance": OPERATIONS["balance"].path,
+    "term_identity": OPERATIONS["deposit_identity"].path.replace("{deposit_id}", "{product}"),
+    "term_open": OPERATIONS["open_deposit"].path,
+    "term_close": OPERATIONS["close_deposit"].path.replace("{id}", "{product}"),
+    "inbound": OPERATIONS["inbound_deposit"].path,
+    "atm_start": OPERATIONS["atm_start_session"].path,
+    "atm_withdraw": OPERATIONS["atm_withdraw"].path,
+    "atm_deposit": OPERATIONS["atm_deposit"].path,
+    "card": OPERATIONS["card_authorize"].path,
 }
 
 
