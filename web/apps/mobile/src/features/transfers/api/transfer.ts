@@ -12,12 +12,18 @@ export type TransferInput = {
   memo: string;
 };
 
+export type TransferFailureOutcome = "ambiguous" | "rejected";
+
 export type TransferResult =
   | { ok: true; holder: string; remain: string }
-  | { ok: false; message: string; retryable: boolean };
+  | { ok: false; outcome: TransferFailureOutcome; message: string };
+
+export function classifyTransferStatus(status: number): TransferFailureOutcome {
+  return status >= 500 || status === 408 || status === 429 ? "ambiguous" : "rejected";
+}
 
 /** One transfer; the bank_tran_id is created once per attempt the user confirms. */
-export async function transfer(input: TransferInput, bankTranId = newBankTranId()): Promise<TransferResult> {
+export async function transfer(input: Readonly<TransferInput>, bankTranId = newBankTranId()): Promise<TransferResult> {
   const { data, error, response } = await bank.POST("/v2.0/transfer/withdraw/fin_num", {
     body: {
       bank_tran_id: bankTranId,
@@ -32,5 +38,5 @@ export async function transfer(input: TransferInput, bankTranId = newBankTranId(
     },
   });
   if (data) return { ok: true, holder: data.dps_account_holder_name, remain: data.wd_limit_remain_amt };
-  return { ok: false, message: errorMessage(error), retryable: response.status === 503 };
+  return { ok: false, outcome: classifyTransferStatus(response.status), message: errorMessage(error) };
 }
