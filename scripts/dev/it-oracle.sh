@@ -85,6 +85,8 @@ SALTATION_CORS_ORIGINS=http://web:8088
 ORACLE_PUBLISH=127.0.0.1:
 MONGO_PUBLISH=127.0.0.1:
 BANK_PUBLISH=127.0.0.1:
+BANK_GENERATOR_PUBLISH=127.0.0.1:
+BANK_METRICS_PUBLISH=127.0.0.1:
 WEB_PUBLISH=127.0.0.1:
 GRAFANA_PUBLISH=127.0.0.1:
 SETUP_KEY=
@@ -105,6 +107,8 @@ PY
 # Keep clock-independent wall-clock CI suites immune to 00:00-00:30 KST; F-27a is proven
 # explicitly with maintenance_minutes=30 in bank/tests/backfill.rs.
 set_env SALTATION_MAINTENANCE_MINUTES "${SALTATION_MAINTENANCE_MINUTES:-0}"
+set_env BANK_GENERATOR_PUBLISH "127.0.0.1:"
+set_env BANK_METRICS_PUBLISH "127.0.0.1:"
 
 # Identity of the database volumes. Volumes created by anything else (another
 # version of this script, a manual `down -v`) hold other passwords, so a

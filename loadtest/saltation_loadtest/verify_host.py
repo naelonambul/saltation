@@ -19,16 +19,7 @@ import httpx
 CORE_SERVICES = frozenset({"oracle", "mongo", "bank", "web", "alloy", "loki", "prometheus", "grafana"})
 OPTIONAL_SERVICES = frozenset({"generator", "loadtest", "cloudflared"})
 OPTIONAL_MEMBERS = frozenset(f"saltation/{service}" for service in OPTIONAL_SERVICES)
-CO_TENANTS = frozenset(
-    {
-        "sonarqube-sonarqube-1",
-        "postgresql-postgresql-1",
-        "qdrant-qdrant-1",
-        "npm",
-        "jenkins",
-        "cloudflared-oci-vpc",
-    }
-)
+CO_TENANTS: frozenset[str] = frozenset()
 CPU_BUDGET = 4
 MEMORY_BUDGET = 14 * 1024**3
 PROJECT_LABEL = "com.docker.compose.project"

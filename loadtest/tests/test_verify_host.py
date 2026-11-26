@@ -182,7 +182,7 @@ async def test_complete_inspection_and_coverage(engine):
     assert result["violations"] == []
     assert result["incomplete"] == []
     for phase in ("before", "after"):
-        assert len(result[phase]["containers"]) == 14
+        assert len(result[phase]["containers"]) == 8
         assert result[phase]["cpu_limit_vcpu"] == 2.4
         assert result[phase]["memory_limit_bytes"] == 8 * 1024**3
     assert len(result["events"]) == 1
@@ -199,16 +199,16 @@ async def test_complete_inspection_and_coverage(engine):
 async def test_detects_transient_events_and_inspect_changes(engine):
     verifier = await host.HostVerifier.start(project=PROJECT)
     bank = engine.find(f"{PROJECT}-bank-1")
-    jenkins = engine.find("jenkins")
+    oracle = engine.find(f"{PROJECT}-oracle-1")
     engine.event(bank, "oom", deliver=False)  # Recovered by history after a live-delivery omission.
     engine.event(bank, "health_status: unhealthy")
     engine.event(bank, "health_status: healthy")
-    engine.event(jenkins, "restart")
-    engine.inspect[jenkins]["RestartCount"] += 1
-    removed = engine.find("npm")
+    engine.event(oracle, "restart")
+    engine.inspect[oracle]["RestartCount"] += 1
+    removed = engine.find(f"{PROJECT}-mongo-1")
     engine.event(removed, "destroy")
     del engine.rows[removed]
-    engine.event(engine.add("npm"), "create")
+    engine.event(engine.add(f"{PROJECT}-mongo-1", "mongo"), "create")
 
     extra = engine.add(f"{PROJECT}-generator-run-1", "generator")
     engine.event(extra, "start")
@@ -217,21 +217,21 @@ async def test_detects_transient_events_and_inspect_changes(engine):
     assert result["incomplete"] == []
     assert any("bank emitted Docker oom" in line for line in result["violations"])
     assert any("bank emitted Docker health_status: unhealthy" in line for line in result["violations"])
-    assert any("jenkins changed restart_count" in line for line in result["violations"])
-    assert any("npm was replaced" in line for line in result["violations"])
+    assert any("oracle changed restart_count" in line for line in result["violations"])
+    assert any("mongo was replaced" in line for line in result["violations"])
     assert any("generator emitted Docker start" in line for line in result["violations"])
 
 
 async def test_initial_unknown_missing_and_duplicate_inventory(engine):
     engine.add(f"{PROJECT}-unknown-1", "unknown")
     engine.add(f"{PROJECT}-bank-2", "bank")
-    del engine.rows[engine.find("npm")]
+    del engine.rows[engine.find(f"{PROJECT}-mongo-1")]
     verifier = await host.HostVerifier.start(project=PROJECT)
     result = await verifier.finish()
     assert {"before", "after"} == {line.partition(":")[0] for line in result["incomplete"]}
     assert any("unknown Docker project" in line for line in result["incomplete"])
     assert any("ambiguous Docker inventory for saltation/bank" in line for line in result["incomplete"])
-    assert any("missing co-tenant/npm" in line for line in result["incomplete"])
+    assert any("missing saltation/mongo" in line for line in result["incomplete"])
     assert result["before"]["cpu_limit_vcpu"] is None
 
 
@@ -337,15 +337,15 @@ async def test_unknown_project_event_fails_coverage_without_exposing_labels(engi
     assert SECRET not in json.dumps(result)
 
 
-async def test_rejects_baseline_oom_and_inactive_co_tenant(engine):
+async def test_rejects_baseline_oom_and_inactive_container(engine):
     bank = engine.find(f"{PROJECT}-bank-1")
     engine.inspect[bank]["State"]["OOMKilled"] = True
-    postgres = engine.find("postgresql-postgresql-1")
-    engine.inspect[postgres]["State"].update(Running=False, Status="exited")
+    mongo = engine.find(f"{PROJECT}-mongo-1")
+    engine.inspect[mongo]["State"].update(Running=False, Status="exited")
     verifier = await host.HostVerifier.start(project=PROJECT)
     try:
         assert any("bank has OOMKilled set" in line for line in verifier.violations)
-        assert any("postgresql-postgresql-1 is not running" in line for line in verifier.violations)
+        assert any("mongo is not running" in line for line in verifier.violations)
     finally:
         await verifier.close()
 
