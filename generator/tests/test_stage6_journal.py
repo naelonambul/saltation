@@ -491,6 +491,11 @@ async def test_prune_completed_normal_day_preserves_totals_and_is_idempotent(tru
         "workload_version",
         "backfill_schedule_digest",
         "backfill_counts",
+        "legacy",
+        "non_integer_workload_version",
+        "non_string_backfill_digest",
+        "missing_backfill_counts",
+        "malformed_planned_counts",
         "backfill_finished",
         "live_started",
         "live_intended",
@@ -503,6 +508,16 @@ async def test_claim_only_attaches_live_before_live_starts_with_matching_backfil
 ):
     if mismatch in {"live_intended", "same_live_at"}:
         backfill_inputs["run"]["live_at"] = "2026-01-06T10:00:00+09:00"
+    if mismatch == "legacy":
+        backfill_inputs["version"] = 1
+    elif mismatch == "non_integer_workload_version":
+        backfill_inputs["workload_version"] = "2"
+    elif mismatch == "non_string_backfill_digest":
+        backfill_inputs["backfill_schedule_digest"] = None
+    elif mismatch == "missing_backfill_counts":
+        del backfill_inputs["planned_counts"]["backfill"]
+    elif mismatch == "malformed_planned_counts":
+        backfill_inputs["planned_counts"] = None
     first = Stage6Journal(truth, "run", "owner-1")
     await first.claim(backfill_inputs)
     await first.save_progress(
@@ -518,7 +533,8 @@ async def test_claim_only_attaches_live_before_live_starts_with_matching_backfil
     live_inputs = deepcopy(backfill_inputs)
     live_inputs["run"]["live_at"] = "2026-01-06T10:00:00+09:00"
     live_inputs["schedule_digest"] = "sha256:backfill-and-live"
-    live_inputs["planned_counts"]["live"] = {"episodes": {"F": 1}, "operations": 7}
+    if isinstance(live_inputs["planned_counts"], dict):
+        live_inputs["planned_counts"]["live"] = {"episodes": {"F": 1}, "operations": 7}
     if mismatch in {"seed", "version", "workload_version"}:
         live_inputs[mismatch] += 1
     elif mismatch == "backfill_schedule_digest":

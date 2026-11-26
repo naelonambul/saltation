@@ -10,13 +10,27 @@ from saltation_gen.drivers.stage6_types import Episode, Step
 WORKLOAD_VERSION = 2
 
 
-def _schedule_digest(dormant: list[str], items: list[dict]) -> str:
-    encoded = json.dumps({"dormant": dormant, "items": items}, sort_keys=True, separators=(",", ":"))
+def _digest(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(encoded.encode()).hexdigest()}"
 
 
+def build_day_waves_digest(waves: list[list[tuple[Episode, Step, datetime]]]) -> str:
+    return _digest(
+        [
+            [
+                [episode.id, step.name, at.isoformat(), step.op, step.actor, step.peer, step.args]
+                for episode, step, at in wave
+            ]
+            for wave in waves
+        ]
+    )
+
+
 def build_schedule_identity(
-    schedule: Schedule, planned: dict[date, list[tuple[Episode, Step, datetime]]]
+    schedule: Schedule,
+    planned: dict[date, list[tuple[Episode, Step, datetime]]],
+    backfill_end: datetime,
 ) -> dict:
     items = []
     episodes = {"backfill": {}, "live": {}}
@@ -28,27 +42,37 @@ def build_schedule_identity(
             episodes[window][episode.id] = episode.kind
             operations[window] += 1
             items.append(
-                {
-                    "at": at.isoformat(),
-                    "episode": asdict(episode) | {"start": episode.start.isoformat()},
-                    "step": asdict(step)
-                    | {
-                        "expect_declined": bool(step.args.get("expect_declined")),
-                        "region": step.context.get("region"),
-                        "device": step.context.get("device"),
-                        "foreign_ip": step.context.get("ip"),
+                (
+                    at,
+                    {
+                        "at": at.isoformat(),
+                        "episode": asdict(episode) | {"start": episode.start.isoformat()},
+                        "step": asdict(step)
+                        | {
+                            "expect_declined": bool(step.args.get("expect_declined")),
+                            "region": step.context.get("region"),
+                            "device": step.context.get("device"),
+                            "foreign_ip": step.context.get("ip"),
+                        },
+                        "step_order": step_order[episode.id],
                     },
-                    "step_order": step_order[episode.id],
-                }
+                )
             )
             step_order[episode.id] += 1
-    items.sort(key=lambda item: (item["at"], item["episode"]["id"], item["step"]["name"], item["step_order"]))
-    dormant = sorted(schedule.dormant)
+    items.sort(
+        key=lambda entry: (
+            entry[0],
+            entry[1]["episode"]["id"],
+            entry[1]["step"]["name"],
+            entry[1]["step_order"],
+        )
+    )
+    schedule_fields = {"dormant": sorted(schedule.dormant), "profiles": list(schedule.profiles.items())}
     return {
         "workload_version": WORKLOAD_VERSION,
-        "schedule_digest": _schedule_digest(dormant, items),
-        "backfill_schedule_digest": _schedule_digest(
-            dormant, [item for item in items if item["episode"]["window"] != "live"]
+        "schedule_digest": _digest(schedule_fields | {"items": [item for _, item in items]}),
+        "backfill_schedule_digest": _digest(
+            schedule_fields | {"items": [item for at, item in items if at < backfill_end]}
         ),
         "planned_counts": {
             window: {

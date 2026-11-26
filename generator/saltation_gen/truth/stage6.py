@@ -19,7 +19,10 @@ from .store import TruthStore
 def _compatible_live_attach(existing_inputs: dict, new_inputs: dict, progress: dict) -> bool:
     """Allow attaching/updating live_at once backfill is finished and before LIVE starts."""
     if (
-        not progress.get("backfill_finished")
+        existing_inputs.get("version") != 2
+        or not isinstance(existing_inputs.get("workload_version"), int)
+        or not isinstance(existing_inputs.get("backfill_schedule_digest"), str)
+        or not progress.get("backfill_finished")
         or progress.get("live_started") is not None
         or progress.get("live_intended")
     ):
@@ -40,7 +43,11 @@ def _compatible_live_attach(existing_inputs: dict, new_inputs: dict, progress: d
         return False
     existing_counts = existing_inputs.get("planned_counts", {})
     new_counts = new_inputs.get("planned_counts", {})
-    if not isinstance(existing_counts, dict) or not isinstance(new_counts, dict):
+    if (
+        not isinstance(existing_counts, dict)
+        or not isinstance(existing_counts.get("backfill"), dict)
+        or not isinstance(new_counts, dict)
+    ):
         return False
     if {k: v for k, v in existing_counts.items() if k != "live"} != {
         k: v for k, v in new_counts.items() if k != "live"

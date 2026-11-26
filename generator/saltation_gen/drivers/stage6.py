@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from contextlib import suppress
@@ -18,7 +19,7 @@ from saltation_gen.drivers.stage6_execute import (
     TERMINAL_BY_REGION,
     Stage6Executor,
 )
-from saltation_gen.drivers.stage6_identity import build_schedule_identity
+from saltation_gen.drivers.stage6_identity import build_day_waves_digest, build_schedule_identity
 from saltation_gen.drivers.stage6_schedule import Schedule, build_schedule, normal_amount, normal_episodes
 from saltation_gen.drivers.stage6_seed import seed_world, world_customer_numbers
 from saltation_gen.drivers.stage6_steps import steps
@@ -274,17 +275,21 @@ def _checked_live_time(observed: dict, started: datetime) -> datetime:
     return datetime.fromisoformat(observed["business_time"]).astimezone(KST)
 
 
+def _recorded_live_start(progress: dict) -> datetime:
+    try:
+        persisted = datetime.fromisoformat(progress["live_started"])
+        if persisted.utcoffset() is None:
+            raise ValueError("offset missing")
+    except (TypeError, ValueError):
+        raise RecoveryError("recorded LIVE start is malformed") from None
+    return persisted
+
+
 async def _begin_live(clock: BackfillClock, planned: datetime, stop: asyncio.Event) -> bool:
     bank = clock.bank
     observed = await bank.clock()
     if "live_started" in clock.progress:
-        try:
-            persisted = datetime.fromisoformat(clock.progress["live_started"])
-            if persisted.utcoffset() is None:
-                raise ValueError("offset missing")
-        except (TypeError, ValueError):
-            raise RecoveryError("recorded LIVE start is malformed") from None
-        _checked_live_time(observed, persisted)
+        _checked_live_time(observed, _recorded_live_start(clock.progress))
         return True
     if observed["mode"] != "LIVE" and clock.progress.get("live_intended"):
         deadline = asyncio.get_running_loop().time() + 30
@@ -358,6 +363,43 @@ def _partition_bucket_waves(
     return segments
 
 
+def _day_buckets(items: list[Due], run: RunConfig) -> list[list[tuple[int, datetime, list[Due]]]]:
+    buckets: dict[int, dict[datetime, list[Due]]] = {}
+    for item in items:
+        bucket = int(item.at.timestamp()) // run.bucket_seconds
+        buckets.setdefault(bucket, {}).setdefault(item.at, []).append(item)
+    index = 0
+    day_buckets = []
+    for times in buckets.values():
+        bucket_waves: list[tuple[int, datetime, list[Due]]] = []
+        for at, same_time in times.items():
+            for wave in _waves(same_time, run.workers):
+                index += 1
+                bucket_waves.append((index, at, wave))
+        day_buckets.append(bucket_waves)
+    return day_buckets
+
+
+def _day_checkpoint(
+    progress: dict, date_key: str, day_buckets: list[list[tuple[int, datetime, list[Due]]]]
+) -> tuple[int, str]:
+    offset = progress.get("wave_offset", 0) if progress.get("wave_date") == date_key else 0
+    day_digest = build_day_waves_digest(
+        [
+            [(item.episode, item.step, at) for item in wave]
+            for bucket_waves in day_buckets
+            for _, at, wave in bucket_waves
+        ]
+    )
+    if type(offset) is not int or offset < 0:
+        raise RecoveryError(f"invalid stage 6 wave checkpoint offset for {date_key}")
+    if offset > 0 and progress.get("wave_day_digest") != day_digest:
+        raise RecoveryError(f"stage 6 wave checkpoint digest differs for {date_key}")
+    if offset > sum(map(len, day_buckets)):
+        raise RecoveryError(f"invalid stage 6 wave checkpoint offset for {date_key}")
+    return offset, day_digest
+
+
 async def _due(
     items: list[Due],
     phase: str,
@@ -367,31 +409,24 @@ async def _due(
     journal: Stage6Journal,
     stop: asyncio.Event,
     live_started: datetime | None = None,
+    *,
+    day: date | None = None,
 ) -> bool:
-    if not items:
+    if day is None and not items:
         return not stop.is_set()
-    day = items[0].at.date()
+    day = day or items[0].at.date()
     date_key = f"{phase}:{day.isoformat()}"
-    offset = clock.progress.get("wave_offset", 0) if clock.progress.get("wave_date") == date_key else 0
+    day_buckets = _day_buckets(items, run)
+    offset, day_digest = _day_checkpoint(clock.progress, date_key, day_buckets)
     live_end = live_started + timedelta(seconds=run.live_seconds) if live_started else None
     can_batch = (
         phase == "backfill" and hasattr(executor, "prepare_chunk") and hasattr(executor, "execute_wave")
     )
-    # Preserve the contracted second for ATM/session TTLs and ledger dates. A
-    # bucket bounds preparation and backpressure checks; only one wave is admitted.
-    buckets: dict[int, dict[datetime, list[Due]]] = {}
-    for item in items:
-        bucket = int(item.at.timestamp()) // run.bucket_seconds
-        buckets.setdefault(bucket, {}).setdefault(item.at, []).append(item)
-    index = 0
-    for times in buckets.values():
-        bucket_waves: list[tuple[int, datetime, list[Due]]] = []
-        for at, same_time in times.items():
-            for wave in _waves(same_time, run.workers):
-                index += 1
-                if index <= offset:
-                    continue
-                bucket_waves.append((index, at, wave))
+    if not items:
+        return not stop.is_set()
+
+    for bucket_waves in day_buckets:
+        bucket_waves = [entry for entry in bucket_waves if entry[0] > offset]
         for is_batch, segment in _partition_bucket_waves(bucket_waves, allow_batch=can_batch):
             if is_batch:
                 if stop.is_set():
@@ -406,7 +441,9 @@ async def _due(
                 for wave_idx, at, wave in segment:
                     if stop.is_set():
                         if last_done is not None:
-                            await clock.save(wave_date=date_key, wave_offset=last_done)
+                            await clock.save(
+                                wave_date=date_key, wave_offset=last_done, wave_day_digest=day_digest
+                            )
                         return False
                     if all(
                         prepared_map[(item.episode.id, item.step.name)]["state"] in {"succeeded", "declined"}
@@ -420,7 +457,7 @@ async def _due(
                     )
                     last_done = wave_idx
                 if last_done is not None:
-                    await clock.save(wave_date=date_key, wave_offset=last_done)
+                    await clock.save(wave_date=date_key, wave_offset=last_done, wave_day_digest=day_digest)
                 continue
             for wave_idx, at, wave in segment:
                 if stop.is_set():
@@ -456,7 +493,7 @@ async def _due(
                 for result in outcomes:
                     if isinstance(result, BaseException):
                         raise result
-                await clock.save(wave_date=date_key, wave_offset=wave_idx)
+                await clock.save(wave_date=date_key, wave_offset=wave_idx, wave_day_digest=day_digest)
     return True
 
 
@@ -507,9 +544,11 @@ async def run_stage6(
         "preparation_start": preparation_at.isoformat(),
         "backfill_start": first_at.isoformat(),
         "backfill_end": backfill_end.isoformat(),
-        **build_schedule_identity(schedule, steps_by_start_day),
+        **build_schedule_identity(schedule, steps_by_start_day, backfill_end),
     }
     revision = os.environ.get("SALTATION_CODE_REVISION", "").strip()
+    if revision and not re.fullmatch(r"[0-9A-Za-z._/@+-]{1,80}", revision):
+        raise RecoveryError("invalid SALTATION_CODE_REVISION format")
     provenance = {"code_revision": revision} if revision else None
     journal = Stage6Journal(truth, run_id, new_ulid())
     doc = await journal.claim(inputs, exited_owner, provenance=provenance)
@@ -660,7 +699,7 @@ async def _run_phases(
                 )
                 if item.at < backfill_end
             ]
-            if not await _due(due, "backfill", clock, run, executor, journal, stop):
+            if not await _due(due, "backfill", clock, run, executor, journal, stop, day=day):
                 return "stopped"
             boundary = min(datetime.combine(day + timedelta(days=1), time(), KST), backfill_end)
             if not await _gate(clock, stop):
@@ -668,7 +707,9 @@ async def _run_phases(
             await clock.move_clock(boundary, gated=True)
             completed_day = day
             day += timedelta(days=1)
-            await clock.save(backfill_day=day.isoformat())
+            await clock.save(
+                backfill_day=day.isoformat(), wave_date=None, wave_offset=0, wave_day_digest=None
+            )
             prune_day = completed_day - timedelta(days=_NORMAL_PRUNE_KEEP_DAYS)
             if prune_day >= run.first:
                 await journal.prune_completed_normal_day(prune_day.isoformat())
@@ -678,23 +719,34 @@ async def _run_phases(
         if not await _drain(clock, stop):
             return "stopped"
         return "backfill_ready" if live_at else "completed"
-    if not await _begin_live(clock, live_at, stop):
+    resuming_live = "live_started" in clock.progress
+    if not resuming_live and not await _begin_live(clock, live_at, stop):
         return "stopped"
-    started = datetime.fromisoformat(clock.progress["live_started"])
+    started = _recorded_live_start(clock.progress)
     live_end = started + timedelta(seconds=run.live_seconds)
-    await clock.save(live_end=live_end.isoformat())
     planned_end = live_at + timedelta(seconds=run.live_seconds)
     day = date.fromisoformat(clock.progress.get("live_day", live_at.date().isoformat()))
-    while datetime.combine(day, time(), KST) < max(planned_end, live_end):
-        due = [
+
+    def work_for_live_day(day):
+        return [
             item
             for item in _work_for_day(schedule, config, run, seed, day, planned.get(day, []), True, live_at)
             if live_at <= item.at and (not item.episode.kind.startswith("normal_") or item.at < live_end)
         ]
-        if not await _due(due, "live", clock, run, executor, journal, stop, started):
+
+    if resuming_live:
+        date_key = f"live:{day.isoformat()}"
+        if clock.progress.get("wave_date") == date_key:
+            _day_checkpoint(clock.progress, date_key, _day_buckets(work_for_live_day(day), run))
+        await _begin_live(clock, live_at, stop)
+    await clock.save(live_end=live_end.isoformat())
+    while datetime.combine(day, time(), KST) < max(planned_end, live_end):
+        if not await _due(
+            work_for_live_day(day), "live", clock, run, executor, journal, stop, started, day=day
+        ):
             return "stopped"
         day += timedelta(days=1)
-        await clock.save(live_day=day.isoformat())
+        await clock.save(live_day=day.isoformat(), wave_date=None, wave_offset=0, wave_day_digest=None)
     while True:
         observed = await clock.bank.clock()
         now = _checked_live_time(observed, started)
