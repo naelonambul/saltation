@@ -1,5 +1,3 @@
-"""Classify an exact GitHub pull request candidate for the Oracle CI job."""
-
 from __future__ import annotations
 
 import argparse
@@ -34,7 +32,7 @@ def documented_paths(root: Path, start: str, end: str, packet: str) -> list[str]
     if fields[-1] or len(fields) % 2 != 1:
         raise ValueError("unexpected Git diff format")
 
-    packet_files = {f"changes/{packet}/change.json", f"changes/{packet}/plan.md"}
+    packet_files = {f"changes/{packet}/{name}" for name in ("change.json", "plan.md", "review.md")}
     paths = []
     for header, filename in zip(fields[0:-1:2], fields[1:-1:2]):
         old_mode, new_mode, _, _, status = header[1:].split()
@@ -78,7 +76,7 @@ def classify(root: Path, event: str, base: str, head: str, candidate: str, body:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Classify an exact GitHub pull request candidate for the Oracle CI job.')
     for field in ("event", "base", "head", "candidate"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--pr-body", required=True, type=Path)

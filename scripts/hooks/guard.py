@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""Agent-neutral guard: decide allow / deny / ask for a file edit or a shell command.
-
-    guard.py path <path> [--proposed FILE|-]   file edit about to happen
-    guard.py command <string>                  shell command about to run
-    guard.py claude                            Claude Code PreToolUse JSON on stdin
-
-`path` and `command` print {"decision", "reason"} and exit 0 (allow), 2 (deny) or 3 (ask).
-The guard adds friction and an audit trail; it is not authentication and not the
-enforcement boundary. When it cannot evaluate, it allows and says why on stderr.
-"""
 
 from __future__ import annotations
 
@@ -22,17 +12,23 @@ import subprocess
 import sys
 from pathlib import Path
 
+USAGE = """Agent-neutral guard: decide allow / deny / ask for a file edit or a shell command.
+
+    guard.py path <path> [--proposed FILE|-]   file edit about to happen
+    guard.py command <string>                  shell command about to run
+    guard.py claude                            Claude Code PreToolUse JSON on stdin
+
+`path` and `command` print {"decision", "reason"} and exit 0 (allow), 2 (deny) or 3 (ask).
+The guard adds friction and an audit trail; it is not authentication and not the
+enforcement boundary. When it cannot evaluate, it allows and says why on stderr.
+"""
+
 ALLOW, DENY, ASK = "allow", "deny", "ask"
 EXIT = {ALLOW: 0, DENY: 2, ASK: 3}
 
 
 def decision(kind: str, reason: str = "") -> tuple[str, str]:
     return kind, reason
-
-
-# --------------------------------------------------------------------------
-# repository facts
-# --------------------------------------------------------------------------
 
 
 def git(root: Path | str, *args: str) -> subprocess.CompletedProcess:
@@ -63,7 +59,6 @@ def baseline_ref(root: Path) -> str | None:
 
 
 def is_merged(root: Path, change_id: str) -> bool:
-    """The packet's pull request merged: its change.json is on the baseline branch's tip."""
     ref = baseline_ref(root)
     if ref is None or change_id == "_template":
         return False
@@ -71,7 +66,6 @@ def is_merged(root: Path, change_id: str) -> bool:
 
 
 def relative_path(root: Path, path: str) -> str | None:
-    """POSIX path relative to the repository root, or None when it lies outside."""
     raw = Path(path)
     absolute = raw if raw.is_absolute() else root / raw
     resolved = Path(os.path.realpath(absolute))
@@ -80,11 +74,6 @@ def relative_path(root: Path, path: str) -> str | None:
     except ValueError:
         return None
     return posixpath.normpath(rel)
-
-
-# --------------------------------------------------------------------------
-# path rules
-# --------------------------------------------------------------------------
 
 
 def approvals_of(text: str) -> object:
@@ -132,10 +121,6 @@ def decide_path(root: Path, path: str, proposed: str | None) -> tuple[str, str]:
     return decision(ALLOW)
 
 
-# --------------------------------------------------------------------------
-# command rules
-# --------------------------------------------------------------------------
-
 PACKET_FILE = re.compile(r"(?:^|/)change\.json$")
 APPROVE = re.compile(r"repo\.py\s+approve\b")
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
@@ -145,7 +130,6 @@ MCP_PATH_KEYS = ("relative_path", "file_path", "path")
 
 
 def strip_shell_comments(command: str) -> str:
-    """Drop comments line by line and turn unquoted newlines into separators."""
     out: list[str] = []
     quote = None
     word_start = True
@@ -153,7 +137,7 @@ def strip_shell_comments(command: str) -> str:
     while i < len(command):
         c = command[i]
         if c == "\\" and quote != "'":
-            if command[i + 1 : i + 2] == "\n":  # line continuation
+            if command[i + 1 : i + 2] == "\n":
                 i += 2
                 continue
             out.append(command[i : i + 2])
@@ -177,7 +161,6 @@ def strip_shell_comments(command: str) -> str:
 
 
 def tokenize(command: str) -> list[str]:
-    """Shell-ish tokens, operators kept as their own tokens; newlines count as separators."""
     try:
         lexer = shlex.shlex(strip_shell_comments(command), posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -192,7 +175,6 @@ def is_operator(token: str) -> bool:
 
 
 def split_segments(tokens: list[str]) -> list[list[str]]:
-    """Simple commands between operators, with redirection targets dropped."""
     segments: list[list[str]] = [[]]
     skip = False
     for token in tokens:
@@ -214,7 +196,6 @@ def names_packet_file(token: str) -> bool:
 
 
 def packet_write(tokens: list[str]) -> bool:
-    """A redirect, tee, in-place edit, move, copy, delete or inline script that targets change.json."""
     for i, token in enumerate(tokens):
         if is_operator(token) and ">" in token and i + 1 < len(tokens) and names_packet_file(tokens[i + 1]):
             return True
@@ -235,7 +216,6 @@ def packet_write(tokens: list[str]) -> bool:
 
 
 def git_invocation(segment: list[str]) -> tuple[str, list[str]] | None:
-    """Return (subcommand, arguments) when the segment runs git."""
     if posixpath.basename(segment[0]) in INERT_COMMANDS:
         return None
     for i, token in enumerate(segment):
@@ -288,7 +268,6 @@ def git_rule(sub: str, args: list[str]) -> str | None:
 
 
 def shell_script(segment: list[str]) -> str | None:
-    """The script a shell runs through a -c style flag, such as -c, -lc or -ec."""
     args = iter(segment[1:])
     for token in args:
         if token in ("-o", "-O", "+o", "+O"):
@@ -327,11 +306,6 @@ def decide_command(command: str, depth: int = 0) -> tuple[str, str]:
     return decision(ALLOW)
 
 
-# --------------------------------------------------------------------------
-# Claude Code adapter
-# --------------------------------------------------------------------------
-
-
 def apply_edit(text: str, old: str, new: str, replace_all: bool) -> str:
     return text.replace(old, new) if replace_all else text.replace(old, new, 1)
 
@@ -361,7 +335,6 @@ def claude_decision(payload: dict) -> tuple[str, str]:
         command = tool_input.get("command")
         return decide_command(command) if isinstance(command, str) else decision(ALLOW)
     if mcp_edit:
-        # The proposed content is unknown here, so change.json is denied outright.
         paths = [tool_input[k] for k in MCP_PATH_KEYS if isinstance(tool_input.get(k), str) and tool_input[k]]
         return decide_path(root, paths[0], None) if paths else decision(ALLOW)
 
@@ -396,7 +369,7 @@ def run_claude() -> int:
         return 0
     try:
         kind, reason = claude_decision(payload)
-    except Exception as exc:  # the guard is friction, never a crash in the agent's loop
+    except Exception as exc:
         print(f"guard: cannot evaluate ({type(exc).__name__}: {exc}); allowing", file=sys.stderr)
         return 0
     if kind == DENY:
@@ -417,11 +390,6 @@ def run_claude() -> int:
     return 0
 
 
-# --------------------------------------------------------------------------
-# entry point
-# --------------------------------------------------------------------------
-
-
 def emit(result: tuple[str, str]) -> int:
     kind, reason = result
     print(json.dumps({"decision": kind, "reason": reason}))
@@ -429,7 +397,7 @@ def emit(result: tuple[str, str]) -> int:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
     p_path = sub.add_parser("path", help="decide a file edit")
     p_path.add_argument("path")

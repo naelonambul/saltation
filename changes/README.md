@@ -12,6 +12,7 @@ Each unit of work is a **change packet**, `changes/<id>/`. The root `intent.md` 
 | `intent.md` | Full proposed next root `intent.md`. Only for kinds that change intent. |
 | `spec.md` | Full proposed next root `spec.md`. Only for kinds that change behavior or contracts. |
 | `plan.md` | How the change is implemented and proven. |
+| `review.md` | Final review of the verified implementation, authored after testing. It records the reviewed commit, evidence references, findings, and their disposition. |
 
 Create a packet with `python3 scripts/repo.py new <id> --kind <kind> --title <summary> [--scope <pattern>]...`, run from the change's branch point, because it records `HEAD` as `base.commit`. It creates no branch, commit or approval; `status` remains the judge of the result. Copying `changes/_template/` by hand is the fallback. For a change-local `intent.md` or `spec.md`, copy the current root file and edit the copy. Once approved, it replaces the root file whole in the change's own pull request, which makes "merged into the baseline" checkable byte for byte.
 
@@ -72,15 +73,16 @@ The ordered path for every change, with what `python3 scripts/repo.py status --c
 | Step | Action | Expected status |
 |---|---|---|
 | 1 | Branch from the updated baseline; create the packet; draft artifacts in chain order | `stage=<first unapproved artifact>`, `readiness=blocked` |
-| 2 | The owner approves each artifact in order with `repo.py approve`; the agent commits and pushes the claim | after the last: `stage=implementation readiness=ready` |
+| 2 | Review the plan to inform the owner's approval decision. The owner approves each artifact in order with `repo.py approve` | after the last: `stage=implementation readiness=ready` |
 | 3 | Implement inside `write_scope`; run `repo.py verify --change <id>` while iterating | unchanged |
-| 4 | Replace the root `intent.md`/`spec.md` with each accepted change-local copy; run `repo.py verify --change <id> --full` | unchanged |
-| 5 | The agent commits, pushes, and opens one pull request with `Change-ID: <id>`; record the verify result in it | the CI `status` job applies the pull-request gate |
+| 4 | Replace the root `intent.md`/`spec.md` with each accepted change-local copy, commit the approved packet and implementation, and run `repo.py verify --change <id> --full` | unchanged |
+| 5 | Review the verified implementation under [REVIEW.md](../REVIEW.md) and commit `review.md`. Verify the resulting HEAD with `--full`, push, and open one pull request with `Change-ID: <id>`, the review link, and the final verification result | the CI `status` job applies the pull-request gate |
 | 6 | CI `summary` passes on the head; the owner reviews the pull request and squash-merges it | — |
 | 7 | After merge | `stage=merged` |
 
 - **Evidence.** `verify` writes `.evidence/<run>/evidence.json`, bound to HEAD and a digest of the files it ran on (paths, modes and content, leaving out `.evidence/`). It is the author's local record. CI runs the checks again on the candidate, and the required `summary` check is the merge gate. Any commit after a `verify` needs a new one before you report the result.
-- **Fixes before merge.** If CI or review needs another commit, edit, run `verify --change <id> --full` again, and push. A change to an artifact or `write_scope` needs the owner's approval again, in chain order.
+- Cite the implementation's local evidence in `review.md`. Include material results in the PR and link to evidence that reviewers can access when available. For performance claims, store raw captures under `.evidence/benchmarks/<change-id>/<run-id>/` and include the [baseline and candidate comparison](../REVIEW.md#performance-and-resource-claims) in both the review record and PR.
+- **Fixes before merge.** If the implementation changes, verify and review the updated implementation commit, then refresh and commit the review record. Verify the final HEAD with `--full` before pushing. A change to an approval-chain artifact or `write_scope` needs the owner's approval again, in chain order.
 - **After merge.** The merged pull request is the record: Git keeps the packet, the commit and its review. Record follow-up work as a new change. To undo a merged change, open a new change whose plan restores the files; a plain `git revert` of the squash commit is an acceptable way to implement it. If the undone change altered the baseline, use a kind that carries the restored `spec.md` or `intent.md` for approval.
 
 `status` needs history back to the change's base to compute its diff, so CI fetches full history.

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Subtract SQL cursor counters in two Oracle window snapshots (stdlib only)."""
 import pathlib
 import sys
 

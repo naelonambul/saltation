@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Saltation N-9 storage budget (70 GB / 80% alert) and retention helper.
-
-Checks:
-1. Saltation Docker volume disk usage against the 70 GB budget (alerts at >= 80% = 56 GB).
-2. MongoDB `bank_logs.events` 18-month retention cutoff on ISO-8601 `recorded_at` strings
-   (dry-run by default; pass `--apply` to delete expired documents).
-3. `app.log` daily rotation count (spec N-9: at most 7 files kept).
-"""
 
 from __future__ import annotations
 
@@ -21,8 +13,8 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-BUDGET_BYTES = 70 * 1000**3  # 70 GB decimal SI (spec N-9, matches docker system df)
-ALERT_RATIO = 0.80  # 80% alert threshold (56 GB)
+BUDGET_BYTES = 70 * 1000**3
+ALERT_RATIO = 0.80
 RETENTION_MONTHS = 18
 MAX_APP_LOG_FILES = 7
 
@@ -47,7 +39,6 @@ _UNIT_MULT = {
 
 
 def compute_bank_logs_cutoff(now: datetime | None = None, months: int = RETENTION_MONTHS) -> str:
-    """Returns an ISO-8601 UTC cutoff timestamp `months` calendar months before `now`."""
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
@@ -61,7 +52,6 @@ def compute_bank_logs_cutoff(now: datetime | None = None, months: int = RETENTIO
 
 
 def parse_docker_size(size_str: str) -> int:
-    """Parses `docker system df -v` human-readable sizes (e.g. '1.23GB', '456kB', '0B')."""
     m = _SIZE_RE.match(size_str)
     if not m:
         raise ValueError(f"Unrecognized docker size string: {size_str!r}")
@@ -97,7 +87,6 @@ def evaluate_disk_budget(
 
 
 def evaluate_app_log_files(filenames: list[str], max_files: int = MAX_APP_LOG_FILES) -> list[str]:
-    """Returns oldest `app.YYYY-MM-DD.log` files exceeding the 7-file retention limit."""
     pattern = re.compile(r"^app\.\d{4}-\d{2}-\d{2}\.log$")
     daily = sorted(f for f in filenames if pattern.match(f))
     if len(daily) <= max_files:
@@ -106,7 +95,6 @@ def evaluate_app_log_files(filenames: list[str], max_files: int = MAX_APP_LOG_FI
 
 
 def measure_saltation_volumes(project_prefix: str = "saltation_") -> dict[str, int]:
-    """Reads Docker volume sizes using `docker system df -v --format json`."""
     proc = subprocess.run(
         ["docker", "system", "df", "-v", "--format", "{{json .Volumes}}"],
         check=True,

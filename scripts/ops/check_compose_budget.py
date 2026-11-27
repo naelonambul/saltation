@@ -1,5 +1,3 @@
-"""Check Saltation's OCI container budget without changing Docker state."""
-
 import argparse
 import json
 import os
@@ -96,7 +94,6 @@ def static_matrix(model):
 
 
 def docker_output(operation, *args, env=None):
-    # Keep Compose interpolation output and Docker diagnostics out of reports.
     try:
         result = subprocess.run(
             ["docker", *args], cwd=ROOT, env=env, capture_output=True,
@@ -110,8 +107,6 @@ def docker_output(operation, *args, env=None):
 
 
 def render_compose():
-    # Pass only CLI discovery settings so local secrets and COMPOSE_* settings
-    # cannot override the checked-in example environment or profile selection.
     env = {key: os.environ[key] for key in ("HOME", "PATH", "DOCKER_CONFIG")
            if key in os.environ}
     output = docker_output(
@@ -123,8 +118,6 @@ def render_compose():
 
 
 LABEL_PREFIX = "com.docker.compose."
-# Docker formats the typed inspect response first. Its Go field names for
-# these quotas differ from the JSON keys in unformatted inspect output.
 INSPECT_FIELDS = (
     ".ID", ".State.Status",
     *(f'(index .Config.Labels "{LABEL_PREFIX}{label}")'
@@ -273,7 +266,7 @@ def effective_cgroup(container):
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Check Saltation's OCI container budget without changing Docker state.")
     subcommands = parser.add_subparsers(dest="mode", required=True)
     subcommands.add_parser("static", help="render the OCI phase matrix with one connector reserved")
     runtime = subcommands.add_parser(

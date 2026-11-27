@@ -1,5 +1,3 @@
-"""Fixtures for `repo.py status`: identity, lifecycle, approval, scope, merged packets."""
-
 import contextlib
 import io
 import json
@@ -70,7 +68,7 @@ class Lifecycle(RepoCase):
 
     def test_out_of_order_timestamps_are_blocked(self):
         self.packet("init", kind="product-init", artifacts={"intent.md": "# I\n", "spec.md": "# S\n", "plan.md": "# P\n"})
-        self.approve("init", "plan.md", "spec.md", "intent.md")  # later seconds for upstream artifacts
+        self.approve("init", "plan.md", "spec.md", "intent.md")
         self.assertIn("out-of-order", self.codes(self.status("--change", "init"), "init"))
 
     def test_ordered_product_init_reaches_implementation(self):
@@ -109,6 +107,20 @@ class Lifecycle(RepoCase):
     def test_stored_lifecycle_label_is_rejected(self):
         self.packet("alpha", kind="repository", status="accepted")
         self.assertIn("invalid-change", self.codes(self.status("--change", "alpha"), "alpha"))
+
+    def test_another_packets_lifecycle_errors_do_not_fail_the_gate(self):
+        self.packet("alpha", kind="repository", scope=["changes/beta/**"])
+        self.approve("alpha", "plan.md")
+        self.packet("beta")
+        result = self.status("--change", "alpha")
+        self.assertIn("baseline-unestablished", self.codes(result, "beta"))
+        self.assertEqual(result["exit"], 0, result["failures"])
+
+    def test_another_packets_invalid_record_fails_the_gate(self):
+        self.packet("alpha", kind="repository", scope=["changes/beta/**"])
+        self.approve("alpha", "plan.md")
+        self.packet("beta", kind="repository", status="accepted")
+        self.assertFailed(self.status("--change", "alpha"), "beta:")
 
 
 class Approval(RepoCase):
@@ -328,7 +340,7 @@ class TextOutput(RepoCase):
 
     def test_merged_packet_with_a_reason_prints_in_full(self):
         sys.path.insert(0, str(REPO_PY.parent))
-        import repo  # noqa: E402
+        import repo
 
         change = {"id": "alpha", "kind": "repository", "stage": "merged", "freshness": "current", "approval": "none",
                   "readiness": "blocked", "artifacts": {},
@@ -423,8 +435,6 @@ class WriteScope(RepoCase):
 
 
 class MergedPackets(RepoCase):
-    """A packet on the baseline branch's tip is merged: its pull request closed it."""
-
     def branch_change(self, scope):
         self.git("switch", "-q", "-c", "change/alpha")
         self.packet("alpha", kind="repository", scope=scope)
@@ -553,7 +563,7 @@ class Surfaces(RepoCase):
 
     def test_plain_file_adapter_is_broken(self):
         self.adapters()
-        self.write(".claude/skills/demo", "../../.agents/skills/demo")  # what core.symlinks=false checks out
+        self.write(".claude/skills/demo", "../../.agents/skills/demo")
         self.assertFailed(self.status(), "core.symlinks=false")
 
     def test_copied_skill_adapter_is_broken(self):
@@ -587,7 +597,7 @@ class Surfaces(RepoCase):
         self.assertFailed(self.status(), "scripts/hooks/missing.py, which is not tracked")
 
     def test_hook_script_without_exec_bit_is_still_valid(self):
-        self.hook_script(executable=False)  # the adapter runs it through python3
+        self.hook_script(executable=False)
         self.settings("python3 scripts/hooks/guard.py claude")
         self.commit("hooks")
         self.assertTrue(self.status()["ok"])
@@ -605,38 +615,166 @@ class Surfaces(RepoCase):
         self.assertIn("hook-adapter-missing", self.surface_codes(result))
 
 
-class RegisteredChecks(RepoCase):
-    def configure(self):
-        check = {"id": "control-plane", "argv": ["true"], "cwd": ".", "timeout_seconds": 5, "paths": ["scripts/**"]}
-        self.write("checks.json", json.dumps({"schema": 1, "checks": [check]}))
+CHECK = {"argv": ["true"], "cwd": ".", "timeout_seconds": 5, "paths": ["**"]}
 
-    def warnings(self):
-        return [s for s in self.status()["surface"] if s["code"] == "checks-unregistered"]
 
-    def test_template_only_tree_does_not_warn(self):
-        self.configure()
+class Gates(RepoCase):
+    def surface(self, result, code):
+        return [s for s in result["surface"] if s["code"] == code]
+
+    def product(self):
+        self.write("src/app.py", "print('hi')\n")
+
+    def test_template_only_tree_needs_no_gates(self):
+        self.write_checks([{"id": "control-plane", **CHECK}], gates=None)
         self.write("scripts/repo.py", "")
         self.write("docs/notes.md", "")
         self.commit("template")
-        self.assertEqual(self.warnings(), [])
+        result = self.status()
+        self.assertTrue(result["ok"], result["failures"])
+        self.assertEqual(self.surface(result, "gates-undecided"), [])
 
-    def test_product_files_with_only_control_plane_warn(self):
-        self.configure()
-        self.write("src/app.py", "print('hi')\n")
-        self.commit("product")
-        warnings = self.warnings()
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("'src/app.py'", warnings[0]["message"])
+    def test_template_only_tree_needs_no_checks_json(self):
+        (self.root / "checks.json").unlink()
+        self.commit("no registry")
         self.assertTrue(self.status()["ok"])
 
-    def test_registered_product_check_silences_warning(self):
-        self.configure()
-        config = json.loads(self.read("checks.json"))
-        config["checks"].append({"id": "unit", "argv": ["true"], "cwd": ".", "timeout_seconds": 5, "paths": ["src/**"]})
-        self.write("checks.json", json.dumps(config))
-        self.write("src/app.py", "")
+    def test_product_path_without_checks_json_fails(self):
+        (self.root / "checks.json").unlink()
+        self.product()
         self.commit("product")
-        self.assertEqual(self.warnings(), [])
+        result = self.status()
+        self.assertFailed(result, "checks.json")
+        self.assertEqual(len(self.surface(result, "checks-missing")), 1)
+
+    def test_product_path_without_gates_names_every_role(self):
+        self.write_checks(gates=None)
+        self.product()
+        self.commit("product")
+        result = self.status()
+        self.assertFailed(result, "'src/app.py'")
+        [finding] = self.surface(result, "gates-undecided")
+        for role in ("build", "test", "lint", "format", "types", "boundaries", "comments"):
+            self.assertIn(role, finding["message"])
+        self.assertIn("repository-quality", finding["message"])
+
+    def test_a_missing_role_is_named(self):
+        gates = {r: {"none": "n/a"} for r in ("build", "test", "lint", "format", "types", "boundaries")}
+        self.write_checks(gates=gates)
+        self.product()
+        self.commit("product")
+        result = self.status()
+        [finding] = self.surface(result, "gates-undecided")
+        self.assertIn("comments", finding["message"])
+        self.assertNotIn("boundaries", finding["message"])
+        self.assertEqual(result["exit"], 1)
+
+    def test_every_role_as_a_registered_check_passes(self):
+        roles = ("build", "test", "lint", "format", "types", "boundaries", "comments")
+        self.write_checks([{"id": f"app-{r}", **CHECK} for r in roles], gates={r: f"app-{r}" for r in roles})
+        self.product()
+        self.commit("product")
+        result = self.status()
+        self.assertTrue(result["ok"], result["failures"])
+
+    def test_every_role_declared_none_passes(self):
+        self.product()
+        self.commit("product")
+        result = self.status()
+        self.assertTrue(result["ok"], result["failures"])
+        self.assertEqual(self.surface(result, "gates-undecided"), [])
+
+    def test_the_exception_register_is_not_a_product_path(self):
+        self.write_checks(gates=None)
+        self.write("comment-exceptions.json", json.dumps({"schema": 1, "exceptions": []}))
+        self.commit("register")
+        self.assertTrue(self.status()["ok"])
+
+    def invalid(self, gates, fragment, checks=()):
+        self.write_checks(checks, gates=gates)
+        self.commit("bad gates")
+        self.assertFailed(self.status(), fragment)
+        proc = self.run_repo("verify", "--full")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(fragment, proc.stdout + proc.stderr)
+
+    def test_an_unknown_role_is_invalid(self):
+        self.invalid({"docs": {"none": "x"}}, "unknown gate role")
+
+    def test_an_unregistered_check_id_is_invalid(self):
+        self.invalid({"lint": "app-lint"}, "not a registered check")
+
+    def test_an_empty_none_reason_is_invalid(self):
+        self.invalid({"lint": {"none": " "}}, "gates.lint")
+
+    def test_a_none_with_extra_keys_is_invalid(self):
+        self.invalid({"lint": {"none": "x", "later": True}}, "gates.lint")
+
+    def test_gates_must_be_an_object(self):
+        self.invalid(["lint"], "gates must be an object")
+
+
+class CommentExceptions(RepoCase):
+    SOURCE = "#!/usr/bin/env python3\n  // SPDX-License-Identifier: MIT  \nx = 1\n"
+
+    def register(self, *entries, raw=None):
+        self.write("src/app.py", self.SOURCE)
+        self.write("comment-exceptions.json", raw if raw is not None else json.dumps({"schema": 1, "exceptions": list(entries)}))
+        self.commit("register")
+        return self.status()
+
+    def entry(self, **over):
+        return {"path": "src/app.py", "text": "// SPDX-License-Identifier: MIT", "category": "license", "reason": "the license requires it", **over}
+
+    def invalid(self, fragment, *entries, raw=None):
+        result = self.register(*entries, raw=raw)
+        self.assertFailed(result, fragment)
+        self.assertTrue(any(s["code"] == "comment-exceptions-invalid" for s in result["surface"]), result["surface"])
+
+    def test_no_register_is_fine(self):
+        self.write("src/app.py", self.SOURCE)
+        self.commit("product")
+        self.assertTrue(self.status()["ok"])
+
+    def test_a_valid_entry_of_each_category_passes(self):
+        self.write("src/b.py", "x = 1\n")
+        result = self.register(
+            self.entry(),
+            self.entry(text="#!/usr/bin/env python3", category="directive", reason="the kernel reads it"),
+            self.entry(text="x = 1", category="public-api", reason="documents the published constant"),
+            self.entry(path="src/b.py", text="x = 1", category="external-constraint", reason="the vendor fixes it", evidence="https://example.invalid/spec"),
+        )
+        self.assertTrue(result["ok"], result["failures"])
+
+    def test_matching_ignores_only_surrounding_whitespace(self):
+        self.invalid("not a line of", self.entry(text="// SPDX-License-Identifier:  MIT"))
+
+    def test_invalid_json_fails(self):
+        self.invalid("comment-exceptions.json", raw="{bad")
+
+    def test_a_wrong_schema_fails(self):
+        self.invalid("comment-exceptions.json", raw=json.dumps({"schema": 2, "exceptions": []}))
+
+    def test_an_unknown_category_fails(self):
+        self.invalid("category", self.entry(category="workaround"))
+
+    def test_an_empty_reason_fails(self):
+        self.invalid("reason", self.entry(reason="  "))
+
+    def test_an_external_constraint_needs_evidence(self):
+        self.invalid("evidence", self.entry(category="external-constraint"))
+
+    def test_an_untracked_path_fails(self):
+        self.invalid("not tracked", self.entry(path="src/missing.py"))
+
+    def test_a_stale_entry_fails(self):
+        self.invalid("not a line of", self.entry(text="// gone"))
+
+    def test_a_duplicate_fails(self):
+        self.invalid("duplicate", self.entry(), self.entry(reason="again"))
+
+    def test_unknown_keys_fail(self):
+        self.invalid("unknown keys", self.entry(owner="me"))
 
 
 class CheckWiring(RepoCase):
@@ -736,6 +874,55 @@ class PullRequestGate(RepoCase):
         self.commit("merge the accepted spec into the root")
         result = self.pr("beh")
         self.assertTrue(result["ok"], result["failures"])
+
+
+class TemplatePin(RepoCase):
+    PIN = {"commit": "a" * 40, "digest": "sha256:" + "b" * 64}
+    OWNED = ".agents/skills/template-upgrade/references/owned-files.txt"
+
+    def setUp(self):
+        super().setUp()
+        self.write("scripts/repo.py", "installed\n")
+        self.write(self.OWNED, f"{self.OWNED}\nscripts/repo.py\n")
+        self.commit("installed template copy")
+
+    def invalid(self, pin):
+        self.write_checks(template=pin)
+        return [s["message"] for s in self.status()["surface"] if s["code"] == "checks-invalid"]
+
+    def test_absent_pin_is_no_finding(self):
+        self.write("scripts/repo.py", "edited\n")
+        self.commit("local edit")
+        result = self.status()
+        self.assertEqual([s for s in result["surface"] if s["code"] in ("template-drift", "checks-invalid")], [])
+
+    def test_a_well_formed_pin_is_valid(self):
+        self.assertEqual(self.invalid(self.PIN), [])
+        self.assertEqual(self.invalid({**self.PIN, "carried": ["scripts/repo.py"]}), [])
+
+    def test_shape_and_values_are_checked(self):
+        self.assertIn("checks.json template must be an object", self.invalid("main")[0])
+        self.assertIn("checks.json template must be an object", self.invalid({"commit": "a" * 40})[0])
+        self.assertIn("checks.json template must be an object", self.invalid({**self.PIN, "tag": "v3"})[0])
+        self.assertEqual(self.invalid({**self.PIN, "commit": "abc123"}), ["template.commit must be a full 40-hex commit id"])
+        self.assertEqual(self.invalid({**self.PIN, "commit": "A" * 40}), ["template.commit must be a full 40-hex commit id"])
+        self.assertEqual(self.invalid({**self.PIN, "digest": "b" * 64}), ["template.digest must be sha256:<64 hex>"])
+
+    def test_carried_must_be_unique_tracked_owned_paths(self):
+        self.assertEqual(self.invalid({**self.PIN, "carried": "scripts/repo.py"}), ["template.carried must be a list of paths"])
+        self.assertEqual(self.invalid({**self.PIN, "carried": ["src/app.py"]}), ["template.carried: 'src/app.py' is not a template-owned copy path"])
+        self.assertEqual(self.invalid({**self.PIN, "carried": ["scripts/repo.py", "scripts/repo.py"]}), ["template.carried lists a path twice"])
+        self.assertEqual(
+            self.invalid({**self.PIN, "carried": ["scripts/hooks/local.py"]}),
+            [f"template.carried: scripts/hooks/local.py must be tracked files listed in {self.OWNED}"],
+        )
+
+    def test_a_wrong_digest_is_template_drift(self):
+        self.write_checks(template=self.PIN)
+        result = self.status()
+        drift = [s for s in result["surface"] if s["code"] == "template-drift"]
+        self.assertEqual(len(drift), 1, result["surface"])
+        self.assertEqual(result["exit"], 1)
 
 
 if __name__ == "__main__":

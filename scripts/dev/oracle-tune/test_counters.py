@@ -1,4 +1,3 @@
-"""Regression witnesses for connection turnover and retained lifetime stats."""
 import tempfile
 from pathlib import Path
 import unittest

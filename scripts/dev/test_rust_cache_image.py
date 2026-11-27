@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Exercise the real bank build stage with old-timestamp fixture sources."""
 from pathlib import Path
 import os
 import shutil
@@ -16,8 +14,6 @@ def run(command, **options):
 
 
 def main():
-    # Fixed, project-specific tiny cache; locked by the real Dockerfile RUN.
-    # Tags and temporary source context belong only to this invocation.
     tag = 'saltation/cache-witness:' + uuid.uuid4().hex
     try:
         with tempfile.TemporaryDirectory(prefix='saltation-buildkit-witness-') as temp:
@@ -28,9 +24,6 @@ def main():
             assert 'id=saltation-bank-build-guarded-v1,' in dockerfile
             dockerfile = dockerfile.replace('id=saltation-bank-build-guarded-v1,', 'id=saltation-bank-build-witness-v1,')
             for index, label in enumerate(('A', 'B', 'A')):
-                # Distinct worktree contexts are essential: reusing one context
-                # and restoring identical stat data can make Docker's local
-                # file-sync cache send the old source before RUN even starts.
                 context = root / ('worktree-' + str(index))
                 (context / 'src').mkdir(parents=True)
                 (context / 'Dockerfile').write_text(dockerfile)

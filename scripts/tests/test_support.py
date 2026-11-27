@@ -1,5 +1,3 @@
-"""Tests for the test harness itself: the subprocess contract and fixture isolation."""
-
 from __future__ import annotations
 
 import json
@@ -18,8 +16,6 @@ SETTINGS = PROJECT / ".claude" / "settings.json"
 
 
 class SubprocessContract(RepoCase):
-    """Both entry points keep working as real processes."""
-
     def real(self, script, *args, stdin=None):
         return support.run_subprocess(script, args, stdin, self.root)
 
@@ -60,7 +56,6 @@ class SubprocessContract(RepoCase):
         self.assertEqual(json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_settings_hook_command_runs_the_guard(self):
-        """Run each hook command from .claude/settings.json through a shell, as Claude Code does."""
         data = json.loads(SETTINGS.read_text())
         commands = {h["command"] for entry in data["hooks"]["PreToolUse"] for h in entry["hooks"]}
         payload = json.dumps(
@@ -82,8 +77,6 @@ class SubprocessContract(RepoCase):
 
 
 class NoAutoMaintenance(RepoCase):
-    """Fixture Git commands never start detached auto maintenance, which races copies and cleanup."""
-
     def test_commit_starts_no_maintenance(self):
         trace = Path(self._tmp.name) / "trace"
         self.write("a.txt", "a\n")

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""Real Cargo regression witnesses; run in the bank dev image, without shared caches."""
 import os
 from pathlib import Path
 import subprocess
@@ -157,7 +155,6 @@ class Freshness(unittest.TestCase):
         alpha_bins = list((self.root / 'target/debug/deps').glob('alpha-*'))
         self.assertTrue(alpha_bins)
         stamps = {p: p.stat().st_mtime_ns for p in alpha_bins if p.is_file()}
-        # Switching `--test` target names must not invalidate or clean the cache.
         second = subprocess.run(
             [*self.command(verb='test'), '--test', 'beta', '--', '--nocapture'],
             env=self.env, text=True, capture_output=True,
@@ -165,7 +162,6 @@ class Freshness(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertIn('invalidated=no', second.stderr)
         self.assertEqual(stamps, {p: p.stat().st_mtime_ns for p in stamps})
-        # Changing a source file with an older mtime still invalidates and cleans.
         self.source('B')
         third = subprocess.run(
             [*self.command(verb='test'), '--test', 'beta', '--', '--nocapture'],
@@ -173,7 +169,6 @@ class Freshness(unittest.TestCase):
         )
         self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
         self.assertIn('invalidated=yes', third.stderr)
-        # Switching `--bins` / `CARGO_BUILD_JOBS` does not invalidate the cache.
         fourth_env = dict(self.env, CARGO_BUILD_JOBS='2')
         fourth = subprocess.run(
             [*self.command(verb='test'), '--bins', '--', '--nocapture'],

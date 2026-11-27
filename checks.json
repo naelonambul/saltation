@@ -35,6 +35,26 @@
       ]
     },
     {
+      "id": "comment-ratchet",
+      "group": "core",
+      "argv": [
+        "python3",
+        "scripts/tests/run.py"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 600,
+      "paths": [
+        "**/*.py",
+        "*.py",
+        "checks.json",
+        "comment-exceptions.json"
+      ],
+      "requires": [
+        "python3",
+        "git"
+      ]
+    },
+    {
       "id": "ops-observability",
       "group": "python",
       "argv": [
@@ -397,5 +417,24 @@
         "docker"
       ]
     }
-  ]
+  ],
+  "gates": {
+    "build": "web-build",
+    "test": "rust-unit",
+    "lint": "rust-clippy",
+    "format": "rust-fmt",
+    "types": "web-typecheck",
+    "boundaries": "py-lint",
+    "comments": "comment-ratchet"
+  },
+  "template": {
+    "commit": "f40b5e90172501f9d61f145ed43eda20b1a3a66e",
+    "digest": "sha256:23e629d17f08dd7199f14d8d8daa5b0de11d731ccb953d25d7df3b95f397ce78",
+    "carried": [
+      "scripts/repo.py",
+      "scripts/tests/test_status.py",
+      "scripts/tests/test_verify.py",
+      "scripts/tests/test_workflow.py"
+    ]
+  }
 }

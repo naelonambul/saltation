@@ -29,6 +29,7 @@ Use the `sdlc-artifacts` skill whenever creating, revising, approving, or closin
 - Do not force-push, rewrite history, hard-reset shared work, or delete unrelated changes unless explicitly instructed.
 - Do not delete, overwrite, regenerate, move, or change ignore rules for a file that existed before the current task until you have established its origin; follow "Pre-existing local files" in the `sdlc-artifacts` skill. An out-of-scope path is a status finding, not permission to remove or hide it.
 - Do not weaken tests, lint rules, type checks, security checks, or configuration merely to make validation pass.
+- Comments are off by default. A comment needs an accepted `comment-exceptions.json` entry in a closed category; there is none for our own code. See the `repository-quality` skill.
 - Do not commit tool caches or generated analysis metadata.
 - Prefer repository-native commands and conventions over agent preferences.
 - Commit, push, open pull requests and read CI under the agent identity, using the command path `docs/host-setup.md` selects for this host. If no path works, stop and ask the owner. Never fall back to the owner's credentials.
