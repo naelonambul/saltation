@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "id": "mobile-transfer-immutable-intent",
+  "kind": "implementation",
+  "title": "Bind mobile transfers to an immutable confirmed intent across ambiguous errors",
+  "base": {
+    "ref": "main",
+    "commit": "dec5b6e9e321ac0da2b922071ce7ac686c20affe"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d8ffc031f0ff1bedee0ff8e62052d87d6096d0a89a5a47da51305f6e9bb681b0"
+  },
+  "write_scope": [
+    "web/apps/mobile/src/features/transfers/**",
+    "web/apps/mobile/src/shared/ui.tsx"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a8c2569ec7756df6e4c621a13b3ec287d393e3755c46e042c1ed44594f97f4a0",
+      "by": "ckh",
+      "at": "2026-11-26T12:27:48Z",
+      "write_scope_sha256": "sha256:72bbcc0f4dfeae6a8e715362f769744732c7aa01dac5bff1d243f2925e6bb8fc"
+    }
+  ]
+}

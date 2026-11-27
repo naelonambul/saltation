@@ -25,6 +25,7 @@ export function Field(props: {
   value: string;
   onChange: (v: string) => void;
   type?: string;
+  disabled?: boolean;
   inputMode?: "numeric" | "tel" | "text";
   name: string;
 }) {
@@ -32,6 +33,7 @@ export function Field(props: {
     <label className="field">
       <span>{props.label}</span>
       <input
+        disabled={props.disabled}
         name={props.name}
         type={props.type ?? "text"}
         inputMode={props.inputMode}
