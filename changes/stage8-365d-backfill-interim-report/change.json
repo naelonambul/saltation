@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "stage8-365d-backfill-interim-report",
+  "kind": "repository",
+  "title": "Add OTN-compliant Stage 8 365-day backfill interim stability report",
+  "base": {
+    "ref": "main",
+    "commit": "93fd4801cfdebbadcd4b053f830e1120a0ecb8e4"
+  },
+  "baseline": {},
+  "write_scope": [
+    "docs/stage8-365d-backfill-interim-report.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:a6f5569f6374c99621c496b4b4b5851c90a4a1072c031bc20e6e7ef56ef05085",
+      "by": "ckh",
+      "at": "2026-11-27T21:09:19Z",
+      "write_scope_sha256": "sha256:5505493ab91ddfc667c6a8ee6a072c7533c797eee846865de0b19fca41acc1d7"
+    }
+  ]
+}
