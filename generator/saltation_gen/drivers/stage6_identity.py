@@ -7,7 +7,7 @@ from datetime import date, datetime
 from saltation_gen.drivers.stage6_schedule import Schedule
 from saltation_gen.drivers.stage6_types import Episode, Step
 
-WORKLOAD_VERSION = 2
+WORKLOAD_VERSION = 3
 
 
 def _digest(value: object) -> str:

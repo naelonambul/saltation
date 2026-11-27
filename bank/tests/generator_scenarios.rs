@@ -1483,7 +1483,7 @@ async fn generator_scenarios_proof() {
         let seeded = if mules.contains(&person.customer_no) {
             0
         } else {
-            3_000_000
+            20_000_000
         };
         assert_eq!(person.opening_balance, seeded, "synthetic opening balance");
         account_ledger(

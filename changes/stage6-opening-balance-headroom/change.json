@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "id": "stage6-opening-balance-headroom",
+  "kind": "implementation",
+  "title": "Prevent 365-day Stage 6 balance depletion on required scenario debits",
+  "base": {
+    "ref": "main",
+    "commit": "db73eef67f7efc6a9cf934fcd97545bc6bbe776b"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d5d22617544ac815af7ff650dfd84bd70932192454a621d7d9f07610322b123b"
+  },
+  "write_scope": [
+    "generator/saltation_gen/drivers/stage6_seed.py",
+    "generator/saltation_gen/drivers/stage6_steps.py",
+    "generator/saltation_gen/drivers/stage6_identity.py",
+    "generator/tests/test_stage6_seed.py",
+    "generator/tests/test_stage6_schedule.py",
+    "generator/tests/test_stage6_run.py",
+    "bank/tests/generator_scenarios.rs"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:1c571dca350c40e119838d6b5f25440a3a1401ae364e1b0f754c16a6aa7e9c90",
+      "by": "ckh",
+      "at": "2026-11-27T21:26:01Z",
+      "write_scope_sha256": "sha256:39d5e1debf0891e3d2dc700ce4004d1c482449967ba70056c8e9c47d9f0fd308"
+    }
+  ]
+}

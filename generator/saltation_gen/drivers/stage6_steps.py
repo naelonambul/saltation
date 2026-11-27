@@ -162,7 +162,7 @@ def _foreign_card_misuse(actor: str) -> list[Step]:
         _card("small_card", actor, 3_600, 5, "Harbor Market", "G"),
         _card("large_card", actor, 3_780, 20, "Cedar Grocery", "G"),
         _card("online_card", actor, 3_840, 20, "Union Food Hall", "G", online=True),
-        _card("declined_card", actor, 3_900, 50_000, "Metro Luxury Goods", "G", expect_declined=True),
+        _card("declined_card", actor, 3_900, 200_000, "Metro Luxury Goods", "G", expect_declined=True),
     ]
 
 

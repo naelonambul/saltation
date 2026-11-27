@@ -213,7 +213,7 @@ async def test_seed_world_orders_cohorts_bounds_batches_and_preserves_other_rost
         assert [row["customer_no"] for row in customers] == [row["customer_no"] for row in accounts]
         assert cards == [{"account_no": row["account_no"], "status": "ACTIVE"} for row in accounts]
         for row in accounts:
-            assert row["opening_balance"] == (0 if row["customer_no"] in dormant else 3_000_000)
+            assert row["opening_balance"] == (0 if row["customer_no"] in dormant else 20_000_000)
     assert all(0 < item.args[1] <= BATCH for item in make.call_args_list)
     make.assert_any_call(7 + start, BATCH, start)
 
