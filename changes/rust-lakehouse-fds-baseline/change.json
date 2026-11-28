@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "id": "rust-lakehouse-fds-baseline",
+  "kind": "intent",
+  "title": "Establish pure-Rust streaming, lakehouse, FDS/MLOps and Compose/VMware split baseline",
+  "base": {
+    "ref": "main",
+    "commit": "35207b2027e196e3b40372ee6ea24581541ed5fe"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d5d22617544ac815af7ff650dfd84bd70932192454a621d7d9f07610322b123b"
+  },
+  "write_scope": [
+    "intent.md",
+    "spec.md"
+  ],
+  "approvals": [
+    {
+      "artifact": "intent.md",
+      "sha256": "sha256:3779278f6d19dc7abb00f76a997ebc7b0d8521e25b29502edc9973e3759d469b",
+      "by": "ckh",
+      "at": "2026-11-28T05:38:15Z",
+      "note": "\uc2b9\uc778"
+    },
+    {
+      "artifact": "spec.md",
+      "sha256": "sha256:886e1662f645acd74f42abe58a4b70b59a5d4edbe679cc6d7b53a3c1cc94602c",
+      "by": "ckh",
+      "at": "2026-11-28T05:38:15Z",
+      "note": "\uc2b9\uc778"
+    },
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:ae9adb766a95269e8ca67eae855fb7d85ecac65ba6f2f5bdd9534f713d0978b7",
+      "by": "ckh",
+      "at": "2026-11-28T05:38:15Z",
+      "write_scope_sha256": "sha256:38a33b23245be293f9d810ab5bdf8d77b032e7be87cce62a673b591a2b20843a",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
