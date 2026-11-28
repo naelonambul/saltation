@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from saltation_gen.client.contracts import OPERATIONS, operation_path
+
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _ALNUM = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 _lock = threading.Lock()
@@ -118,29 +120,55 @@ class BankClient:
             return res.status_code, body
         raise AssertionError("unreachable")
 
+    async def _call_operation(
+        self,
+        name: str,
+        request_id: str | None = None,
+        token: str | None = None,
+        ctx: Context | None = None,
+        *,
+        path_params: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
+        data: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+        request_timeout: float | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        operation = OPERATIONS[name]
+        return await self._call(
+            operation.method,
+            operation_path(name, **(path_params or {})),
+            request_id,
+            token,
+            ctx,
+            json=json,
+            accept=operation.statuses,
+            data=data,
+            params=params,
+            request_timeout=request_timeout,
+        )
+
     async def seed_customers(self, customers: list[dict[str, Any]]) -> None:
-        await self._call("POST", "/internal/v1/seed/customers", json={"customers": customers})
+        await self._call_operation("seed_customers", json={"customers": customers})
 
     async def seed_accounts(self, accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        _, body = await self._call("POST", "/internal/v1/seed/accounts", json={"accounts": accounts})
+        _, body = await self._call_operation("seed_accounts", json={"accounts": accounts})
         return body["accounts"]
 
     async def seed_cards(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        _, body = await self._call("POST", "/internal/v1/seed/cards", json={"cards": items})
+        _, body = await self._call_operation("seed_cards", json={"cards": items})
         return body["cards"]
 
     async def seed_analysts(self, items: list[dict[str, Any]]) -> int:
-        _, body = await self._call("POST", "/internal/v1/seed/analysts", json={"analysts": items})
+        _, body = await self._call_operation("seed_analysts", json={"analysts": items})
         return int(body["created"])
 
     async def outbox_backlog(self) -> int:
-        _, body = await self._call("GET", "/internal/v1/outbox")
+        _, body = await self._call_operation("outbox_backlog")
         return int(body["undelivered"])
 
     async def login(self, request_id: str, phone: str, password: str, ctx: Context) -> str:
-        _, body = await self._call(
-            "POST",
-            "/v2.0/ext/auth/login",
+        _, body = await self._call_operation(
+            "login",
             request_id,
             ctx=ctx,
             json={"phone": phone, "password": password, "device_id": ctx.device},
@@ -157,9 +185,8 @@ class BankClient:
         *,
         transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "GET",
-            "/v2.0/account/balance/fin_num",
+        return await self._call_operation(
+            "balance",
             request_id,
             token,
             ctx,
@@ -168,7 +195,6 @@ class BankClient:
                 "fintech_use_num": fintech_use_num,
                 "tran_dtime": tran_dtime,
             },
-            accept=(200, 404),
         )
 
     async def transfer(
@@ -187,9 +213,8 @@ class BankClient:
         transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """Returns (status, body); 200 done, 422 rejected by the bank."""
-        return await self._call(
-            "POST",
-            "/v2.0/transfer/withdraw/fin_num",
+        return await self._call_operation(
+            "transfer",
             request_id,
             token,
             ctx,
@@ -204,50 +229,50 @@ class BankClient:
                 "recv_client_bank_code": bank_code,
                 "recv_client_account_num": to_account,
             },
-            accept=(200, 422),
         )
 
     async def seed_counterparties(self, items: list[dict[str, Any]]) -> int:
-        _, body = await self._call("POST", "/internal/v1/seed/counterparties", json={"counterparties": items})
+        _, body = await self._call_operation("seed_counterparties", json={"counterparties": items})
         return int(body["created"])
 
     async def seed_counterparty_clients(self, items: list[dict[str, Any]]) -> int:
-        _, body = await self._call(
-            "POST", "/internal/v1/seed/counterparty_clients", json={"counterparty_clients": items}
+        _, body = await self._call_operation(
+            "seed_counterparty_clients", json={"counterparty_clients": items}
         )
         return int(body["created"])
 
     async def clock(self) -> dict[str, Any]:
-        _, body = await self._call("GET", "/internal/v1/clock")
+        _, body = await self._call_operation("clock")
         return body
 
     async def clock_set(self, business_time: str) -> dict[str, Any]:
-        _, body = await self._call(
-            "POST",
-            "/internal/v1/clock/set",
+        _, body = await self._call_operation(
+            "clock_set",
             json={"business_time": business_time},
             request_timeout=self._clock_timeout,
         )
         return body
 
     async def clock_advance(self, seconds: int) -> dict[str, Any]:
-        _, body = await self._call(
-            "POST",
-            "/internal/v1/clock/advance",
+        _, body = await self._call_operation(
+            "clock_advance",
             json={"seconds": seconds},
             request_timeout=self._clock_timeout,
         )
         return body
 
     async def go_live(self) -> dict[str, Any]:
-        _, body = await self._call("POST", "/internal/v1/mode/live", request_timeout=self._clock_timeout)
+        _, body = await self._call_operation("go_live", request_timeout=self._clock_timeout)
         return body
 
     async def sms(
         self, phone: str, *, request_id: str | None = None, ctx: Context | None = None
     ) -> dict[str, Any] | None:
-        status, body = await self._call(
-            "GET", f"/internal/v1/sms/{phone}", request_id, ctx=ctx, accept=(200, 404)
+        status, body = await self._call_operation(
+            "sms",
+            request_id,
+            ctx=ctx,
+            path_params={"phone": phone},
         )
         return None if status == 404 else body
 
@@ -260,9 +285,8 @@ class BankClient:
         request_id: str | None = None,
         ctx: Context | None = None,
     ) -> str:
-        _, body = await self._call(
-            "POST",
-            "/oauth/2.0/token",
+        _, body = await self._call_operation(
+            "client_token",
             request_id,
             ctx=ctx,
             data={
@@ -277,9 +301,7 @@ class BankClient:
     async def card_authorize(
         self, request_id: str, token: str, ctx: Context, payload: dict[str, Any]
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST", "/card/v1/authorize", request_id, token, ctx, json=payload, accept=(200, 422)
-        )
+        return await self._call_operation("card_authorize", request_id, token, ctx, json=payload)
 
     async def inbound_deposit(
         self,
@@ -295,9 +317,8 @@ class BankClient:
         *,
         transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/transfer/deposit/fin_num",
+        return await self._call_operation(
+            "inbound_deposit",
             request_id,
             token,
             ctx,
@@ -320,7 +341,6 @@ class BankClient:
                     }
                 ],
             },
-            accept=(200, 422),
         )
 
     async def inquiry_receive(
@@ -334,9 +354,8 @@ class BankClient:
         tran_dtime: str,
         memo: str = "",
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/inquiry/receive",
+        return await self._call_operation(
+            "inquiry_receive",
             request_id,
             token,
             ctx,
@@ -348,73 +367,80 @@ class BankClient:
                 "tran_dtime": tran_dtime,
                 "print_content": memo[:20],
             },
-            accept=(200, 422),
         )
 
     async def register_payee(
         self, request_id: str, token: str, ctx: Context, bank_code: str, account_num: str, alias: str = ""
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/ext/payees",
+        return await self._call_operation(
+            "register_payee",
             request_id,
             token,
             ctx,
             json={"bank_code_std": bank_code, "account_num": account_num, "alias": alias[:40]},
-            accept=(200, 409, 422),
         )
 
     async def delete_payee(
         self, request_id: str, token: str, ctx: Context, payee_id: str
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "DELETE",
-            "/v2.0/ext/payees",
+        return await self._call_operation(
+            "delete_payee",
             request_id,
             token,
             ctx,
             params={"payee_id": str(payee_id)},
-            accept=(200, 404),
         )
 
     async def password_reset_request(
         self, request_id: str, phone: str, ctx: Context
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST", "/v2.0/ext/auth/password_reset/request", request_id, ctx=ctx, json={"phone": phone}
+        return await self._call_operation(
+            "password_reset_request", request_id, ctx=ctx, json={"phone": phone}
         )
 
     async def password_reset_confirm(
         self, request_id: str, phone: str, code: str, new_password: str, ctx: Context
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/ext/auth/password_reset/confirm",
+        return await self._call_operation(
+            "password_reset_confirm",
             request_id,
             ctx=ctx,
             json={"phone": phone, "code": code, "new_password": new_password},
-            accept=(200, 401),
         )
 
     async def payees(self, token: str):
-        _, body = await self._call("GET", "/v2.0/ext/payees", token=token)
+        _, body = await self._call_operation("payees", token=token)
         return body["res_list"]
 
     async def products(self, token: str):
-        _, body = await self._call("GET", "/v2.0/ext/products", token=token)
+        _, body = await self._call_operation("products", token=token)
         return body["res_list"]
 
     async def deposit(self, token: str, deposit_id: str):
-        _, body = await self._call("GET", f"/v2.0/ext/deposits/{deposit_id}", token=token)
+        _, body = await self._call_operation(
+            "deposit",
+            token=token,
+            path_params={"id": deposit_id},
+        )
         return body
 
     async def deposit_identity(
         self, request_id: str, token: str, ctx: Context, deposit_id: str
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call("GET", f"/internal/v1/deposits/{deposit_id}/identity", request_id, token, ctx)
+        return await self._call_operation(
+            "deposit_identity",
+            request_id,
+            token,
+            ctx,
+            path_params={"deposit_id": deposit_id},
+        )
 
     async def loan(self, token: str, loan_id: str):
-        _, body = await self._call("GET", f"/v2.0/ext/loans/{loan_id}", token=token)
+        _, body = await self._call_operation(
+            "loan",
+            token=token,
+            path_params={"id": loan_id},
+        )
         return body
 
     async def open_deposit(
@@ -429,9 +455,8 @@ class BankClient:
         *,
         transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/ext/deposits",
+        return await self._call_operation(
+            "open_deposit",
             request_id,
             token,
             ctx,
@@ -442,7 +467,6 @@ class BankClient:
                 "terms_id": str(terms_id),
                 "tran_amt": str(amount),
             },
-            accept=(200, 404, 422),
         )
 
     async def take_loan(
@@ -455,9 +479,8 @@ class BankClient:
         amount: int,
         tran_dtime: str,
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/v2.0/ext/loans",
+        return await self._call_operation(
+            "take_loan",
             request_id,
             token,
             ctx,
@@ -468,7 +491,6 @@ class BankClient:
                 "terms_id": str(terms_id),
                 "tran_amt": str(amount),
             },
-            accept=(200, 404, 422),
         )
 
     async def close_deposit(
@@ -481,9 +503,8 @@ class BankClient:
         *,
         transaction_key: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            f"/v2.0/ext/deposits/{deposit_id}/close",
+        return await self._call_operation(
+            "close_deposit",
             request_id,
             token,
             ctx,
@@ -491,15 +512,14 @@ class BankClient:
                 "bank_tran_id": bank_tran_id() if transaction_key is None else transaction_key,
                 "tran_dtime": tran_dtime,
             },
-            accept=(200, 404, 422),
+            path_params={"id": deposit_id},
         )
 
     async def repay_loan(
         self, request_id: str, token: str, ctx: Context, loan_id: str, amount: int, tran_dtime: str
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            f"/v2.0/ext/loans/{loan_id}/repay",
+        return await self._call_operation(
+            "repay_loan",
             request_id,
             token,
             ctx,
@@ -508,57 +528,47 @@ class BankClient:
                 "tran_dtime": tran_dtime,
                 "tran_amt": str(amount),
             },
-            accept=(200, 404, 422),
+            path_params={"id": loan_id},
         )
 
     async def seed_atm_terminals(self, items: list[dict[str, Any]]) -> int:
-        _, body = await self._call("POST", "/internal/v1/seed/atm_terminals", json={"atm_terminals": items})
+        _, body = await self._call_operation("seed_atm_terminals", json={"atm_terminals": items})
         return len(body["atm_terminals"])
 
     async def atm_start_session(
         self, request_id: str, terminal_id: str, account_no: str, pin: str, ctx: Context
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/atm/v1/session",
+        return await self._call_operation(
+            "atm_start_session",
             request_id,
             ctx=ctx,
             json={"terminal_id": terminal_id, "account_no": account_no, "pin": pin},
-            accept=(200, 400, 404, 422, 503),
         )
 
     async def atm_end_session(self, request_id: str, token: str, ctx: Context) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST", "/atm/v1/session/end", request_id, token, ctx, accept=(200, 400, 401, 503)
-        )
+        return await self._call_operation("atm_end_session", request_id, token, ctx)
 
     async def atm_withdraw(
         self, request_id: str, token: str, idempotency_key: str, amount: int, ctx: Context
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/atm/v1/cash/withdraw",
+        return await self._call_operation(
+            "atm_withdraw",
             request_id,
             token,
             ctx,
             json={"idempotency_key": idempotency_key, "amount": str(amount)},
-            accept=(200, 400, 401, 409, 422, 503),
         )
 
     async def atm_deposit(
         self, request_id: str, token: str, idempotency_key: str, amount: int, ctx: Context
     ) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "POST",
-            "/atm/v1/cash/deposit",
+        return await self._call_operation(
+            "atm_deposit",
             request_id,
             token,
             ctx,
             json={"idempotency_key": idempotency_key, "amount": str(amount)},
-            accept=(200, 400, 401, 409, 422, 503),
         )
 
     async def atm_balance(self, request_id: str, token: str, ctx: Context) -> tuple[int, dict[str, Any]]:
-        return await self._call(
-            "GET", "/atm/v1/balance", request_id, token, ctx, accept=(200, 400, 401, 422, 503)
-        )
+        return await self._call_operation("atm_balance", request_id, token, ctx)

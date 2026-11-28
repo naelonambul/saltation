@@ -5,7 +5,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 image="ghcr.io/astral-sh/uv:0.8.17-python3.13-bookworm-slim"
 run() {
-  docker run --rm -v "$root/generator":/app -w /app \
+  docker run --rm -v "$root/generator":/app -v "$root/contracts":/contracts:ro -w /app \
     -v saltation-uv-cache:/root/.cache/uv -e UV_PROJECT_ENVIRONMENT=/tmp/venv -e UV_LINK_MODE=copy \
     "$image" sh -c "$*"
 }

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "generator-contract-registry",
+  "kind": "implementation",
+  "title": "Consolidate Python generator endpoints into an OpenAPI-verified contract registry",
+  "base": {
+    "ref": "main",
+    "commit": "a291800ef2a4630848e2c5798d2227544a3cb716"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d882a04d1c960493fd4b98b4dac8f7401789ec1469ddbd4ea2747ec63b6b6bcc"
+  },
+  "write_scope": [
+    "generator/saltation_gen/client/**",
+    "generator/saltation_gen/drivers/stage6_execute.py",
+    "generator/saltation_gen/drivers/cards.py",
+    "generator/tests/test_contract_conformance.py",
+    "checks.json",
+    "scripts/dev/ci-py.sh"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:3631974fdf7288527fa42923d7bda08e7ad0e348dcfaaa6e9e6c15732712d7cd",
+      "by": "ckh",
+      "at": "2026-11-26T14:08:25Z",
+      "write_scope_sha256": "sha256:69bd4e8d4089dccb6e3143aa45bb0884b34fa8a726efe0c28cf0edf06746d368"
+    }
+  ]
+}
