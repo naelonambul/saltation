@@ -229,12 +229,13 @@ generator ─▶ MongoDB truth database (same instance, separate user)
 | `loki`, `prometheus`, `grafana` | official images | `obs` |
 
 - Two log streams: business events (F-35) go to MongoDB `bank_logs` as product data; operational logs (N-12) go to Loki for monitoring. Both carry request ID and session ID. Access and application events required by the intent are business events in `bank_logs` (`request.completed`, authentication events).
-- TLS is terminated by Cloudflare. No Saltation port is published on the host. `/admin/v1/**` and the admin web origin are behind Cloudflare Access. Grafana is reached through an SSH tunnel.
-- Local testing: the `local` Compose profile omits `cloudflared` and publishes `web` and the bank public listener on localhost over plain HTTP; the CORS allow-list contains the local origins only in that profile. Otherwise the CORS allow-list contains the two SPA origins.
+- TLS is terminated by Cloudflare. Public ingress is restricted to `web` (`:8088`) and the bank public listener (`:8080`); `/admin/v1/**` and the admin web origin are behind Cloudflare Access. No sensitive Saltation port is exposed on a non-loopback host interface or attached to Cloudflare tunnel ingress without an owner-approved security/behavior change.
+- Host-local loopback topology: Compose publishes operator, qualification, and local-testing ports on IPv4 loopback (`127.0.0.1`) only, each overridable via `*_PUBLISH` environment variables: `web` (`:8088`), `bank` public (`:8080`), `bank` generator (`:8081`), `bank` metrics (`:9100`), `oracle` (`:1521`), `mongo` (`:27017`), and `grafana` (`:3000`, reached remotely through an SSH tunnel). Because the `bank` generator listener (`:8081`) trusts simulated identity headers and mounts `/internal/**`, seeding, inbound, ATM, and card routes, host-local processes able to reach `127.0.0.1` are inside the development trust boundary.
+- Local and CI profiles: the `local` profile omits `cloudflared` and serves `web` and the bank public listener on localhost over plain HTTP (with local origins in `SALTATION_CORS_ORIGINS` only in that profile); CI sets `*_PUBLISH=127.0.0.1:` to allocate collision-free ephemeral loopback ports on shared hosts.
 
 ### Data access: plain Oracle SQL, no ORM
 
-- No ORM and no query builder. Every statement is hand-written Oracle SQL in its own file under the owning feature's `sql/` directory (shared ledger statements under `shared/ledger/sql/`), embedded at compile time, executed through the `oracle` crate with bind variables only; SQL is never assembled from strings.
+- No ORM and no query builder. Every statement is hand-written Oracle SQL in its own file under the owning feature's `sql/` directory (shared ledger statements under `shared/ledger/sql/`), embedded at compile time, executed through the pure-Rust `oracledb` crate with bind variables only; SQL is never assembled from strings.
 - Each SQL file starts with a comment giving the statement name, purpose and expected access path, so the exact query can be read in the repository and checked with `EXPLAIN PLAN`.
 - Schema changes are numbered SQL migration files under `bank/migrations/`, recorded in a migration history table.
 - Credential values (passwords, PINs, codes, tokens and their hashes) are never logged.
