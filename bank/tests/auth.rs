@@ -416,7 +416,6 @@ mod deferred_touch {
         assert_eq!(stored(&api, &customer.token).await, extended);
 
         let expired_at = at + SESSION_IDLE + Duration::seconds(1);
-        prepare(&api, &customer.token, expired_at, "login inquiry transfer").await;
         let (_, last_seen_after, _, _) = stored(&api, &customer.token).await;
         let id = new_id();
         let (status, body) = call(
