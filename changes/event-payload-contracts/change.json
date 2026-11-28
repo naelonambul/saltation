@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "id": "event-payload-contracts",
+  "kind": "implementation",
+  "title": "Add event payload JSON schemas and producer inventory conformance check",
+  "base": {
+    "ref": "main",
+    "commit": "459a720057f876b4d1cdab2b4836ff8f32c55131"
+  },
+  "baseline": {
+    "intent.md": "sha256:802a26595cd9aa08ab9afa9efc962508f350c7b626f12084b124c25c7b947270",
+    "spec.md": "sha256:d882a04d1c960493fd4b98b4dac8f7401789ec1469ddbd4ea2747ec63b6b6bcc"
+  },
+  "write_scope": [
+    "contracts/schemas/**",
+    "contracts/codes/event-types.json",
+    "scripts/ops/test_event_contracts.py",
+    "checks.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:94235e6d6a899e1e8706e4c952d4c2cfb5de9afe132dae044a0c54eb423bd03b",
+      "by": "ckh",
+      "at": "2026-11-26T21:06:37Z",
+      "write_scope_sha256": "sha256:5174c54c84e2cc6b1939c079bff8d3162066347a7a57e13177ed1a7edc1aa219"
+    }
+  ]
+}

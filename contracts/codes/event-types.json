@@ -1,5 +1,5 @@
 {
-  "description": "event_type values of business events (spec F-35) written through the outbox to bank_logs. Bank-originated events have channel SYSTEM and a null request_id.",
+  "description": "event_type values of business events (spec F-35) written through the outbox to bank_logs. See contracts/schemas/event-payloads.schema.json for the payload contracts. Bank-originated events have channel SYSTEM and a null request_id.",
   "event_types": {
     "request.completed": "every API request of the public and generator listeners (not /healthz, /metrics or /internal/**), exactly one per HTTP arrival; payload: endpoint (route template or 'unmatched'), method, http_status, duration_ms, and where known request_type, replayed, attempt_id; money-moving completions also retain tran_amt, transfer_id, reason, counterparty_bank_code, counterparty_account_no",
     "login.succeeded": "customer login",
@@ -14,12 +14,12 @@
     "payee.registered": "payee added",
     "payee.deleted": "payee removed",
     "account.status_changed": "account became dormant, active or closed",
-    "rollover.job_completed": "a day-rollover job (maturity, dormancy, daily_close) finished for a business date",
+    "rollover.job_completed": "a day-rollover job (maturity, dormancy, daily_close, atm_session_expiry) finished for a business date",
     "atm.session_started": "ATM session started; payload: terminal_id, region, latitude, longitude, account_no, request_id, session_id",
     "atm.session_rejected": "ATM session rejected; payload: terminal_id, region, latitude, longitude, account_no, request_id, bank_rsp_code, locked",
     "atm.session_ended": "ATM session ended; payload: terminal_id, region, latitude, longitude, account_no, request_id, reason, session_id, start_request_id, ended_at",
     "atm.operation": "ATM operation; payload: terminal_id, region, latitude, longitude, account_no, request_id, operation (withdraw, deposit, balance), outcome (approved, rejected), amount, rsp_code, bank_rsp_code",
-    "card.authorized": "debit card payment authorized; payload: card_no, account_no, amount_krw, original_amount, original_currency, merchant_name, mcc, country, entry_mode",
-    "card.declined": "debit card payment declined; payload: card_no, account_no, amount_krw, original_amount, original_currency, merchant_name, mcc, country, entry_mode, decline_reason"
+    "card.authorized": "debit card payment authorized; payload: client_id, idempotency_key, card_no, krw_amount, amount, currency, merchant_name, mcc, country, entry_mode, latitude, longitude, decline_reason (null)",
+    "card.declined": "debit card payment declined; same payload keys as card.authorized, with a non-null decline_reason"
   }
 }
