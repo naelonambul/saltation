@@ -23,6 +23,7 @@
     "bank/src/main.rs",
     "bank/tests/auth.rs",
     "bank/tests/backfill.rs",
+    "bank/tests/generator_behavior.rs",
     "bank/tests/migrations.rs"
   ],
   "approvals": [
@@ -34,10 +35,10 @@
     },
     {
       "artifact": "plan.md",
-      "sha256": "sha256:a37d6a2566ad4d107da86a61dcb4b5777763d4ad2911b5c9dd31a064666f49ae",
+      "sha256": "sha256:2d354ca2ae78e615886fdac2b3b8a129431944706b891448c2c1bfaeb48a5744",
       "by": "ckh",
-      "at": "2026-11-26T23:26:58Z",
-      "write_scope_sha256": "sha256:16ef2cca7e2ad40df2285a4ee856c47dca844320690ad79262939828ae1f5b2f"
+      "at": "2026-11-28T03:40:30Z",
+      "write_scope_sha256": "sha256:7b7ec4c5f05ccf7f385cfcf29e7823f4a0b786f30996d8094cee7743526507bb"
     }
   ]
 }

@@ -33,6 +33,7 @@ Astra Pro audit finding `F-03`: customer bearer tokens expire after 30 minutes o
    - Cover rollover expiry (`AuthSessionExpiryJob`) inside `backfill_sequence` before the live switch, idempotency on repeated sweep, and separation of `ended_at` from `occurred_at`.
    - Cover race safety: simultaneous logout/password-reset vs expiry, in-flight admitted touch preservation, and deferred touch not reviving an ended session.
    - Update `bank/tests/migrations.rs` to assert migrations `1..=22` and presence of `AUTH_SESSION_OPEN_LAST_SEEN_IX`.
+   - Update `bank/tests/generator_behavior.rs` so requestless `SYSTEM` `session.expired` rollover events emitted for fixture subjects during the interval are explicitly validated (`channel == "SYSTEM"`, `outcome == "completed"`, `end_reason == "expired"`, unique `session_id`) instead of failing as unexpected requestless activity.
 
 ## Verification
 
