@@ -213,6 +213,32 @@ def truth():
     return SimpleNamespace(runs=Database()["runs"])
 
 
+@pytest.fixture
+def backfill_inputs():
+    return {
+        "version": 2,
+        "workload_version": 2,
+        "seed": 7,
+        "config": {"population": 20},
+        "run": {"first": "2026-01-01", "days": 3, "live_at": None},
+        "backfill_end": "2026-01-04T00:00:00+09:00",
+        "schedule_digest": "sha256:backfill",
+        "backfill_schedule_digest": "sha256:backfill",
+        "planned_counts": {
+            "backfill": {"episodes": {"A": 1}, "operations": 10},
+            "live": {"episodes": {}, "operations": 0},
+        },
+    }
+
+
+async def test_claim_validates_provenance_before_writing(truth):
+    journal = Stage6Journal(truth, "run", "owner")
+    with pytest.raises(RecoveryError, match="credential fields"):
+        await journal.claim({}, provenance={"nested": {"access_token": "x"}})
+    assert truth.runs.rows == []
+    assert truth.runs.database["stage6_leases"].rows == []
+
+
 async def test_bank_and_run_ownership_and_stale_claim(truth):
     first = Stage6Journal(truth, "run", "first")
     competitor = Stage6Journal(truth, "other", "competitor")
@@ -406,9 +432,9 @@ async def test_batch_prepare_labels_unconfirmed_and_complete_with_resume(truth):
         await first.mark_unconfirmed_wave([reloaded[("e2", "step2")]])
 
 
-async def test_prune_completed_normal_day_preserves_totals_and_is_idempotent(truth):
+async def test_prune_completed_normal_day_preserves_totals_and_is_idempotent(truth, backfill_inputs):
     journal = Stage6Journal(truth, "run", "owner-1")
-    await journal.claim({"seed": 1})
+    await journal.claim(backfill_inputs)
     prepared = await journal.prepare_batch(
         [
             (
@@ -450,36 +476,91 @@ async def test_prune_completed_normal_day_preserves_totals_and_is_idempotent(tru
     assert await journal.prune_completed_normal_day("2026-01-01") == 0
     assert await journal.totals() == before_totals
     assert await journal.operation_breakdown() == before_breakdown
+    await journal.release()
+    resumed = Stage6Journal(truth, "run", "owner-2")
+    assert (await resumed.claim(backfill_inputs))["inputs"] == backfill_inputs
+    assert await resumed.totals() == before_totals
 
 
-async def test_claim_allows_attaching_live_at_after_backfill_finished(truth):
-    base_inputs = {
-        "version": 1,
-        "seed": 7,
-        "config": {"population": 20},
-        "run": {"first": "2026-01-01", "days": 3, "live_at": None},
-        "backfill_end": "2026-01-04T00:00:00+09:00",
-    }
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        None,
+        "seed",
+        "version",
+        "workload_version",
+        "backfill_schedule_digest",
+        "backfill_counts",
+        "legacy",
+        "non_integer_workload_version",
+        "non_string_backfill_digest",
+        "missing_backfill_counts",
+        "malformed_planned_counts",
+        "backfill_finished",
+        "live_started",
+        "live_intended",
+        "same_live_at",
+        "early_live_at",
+    ],
+)
+async def test_claim_only_attaches_live_before_live_starts_with_matching_backfill(
+    truth, backfill_inputs, mismatch
+):
+    if mismatch in {"live_intended", "same_live_at"}:
+        backfill_inputs["run"]["live_at"] = "2026-01-06T10:00:00+09:00"
+    if mismatch == "legacy":
+        backfill_inputs["version"] = 1
+    elif mismatch == "non_integer_workload_version":
+        backfill_inputs["workload_version"] = "2"
+    elif mismatch == "non_string_backfill_digest":
+        backfill_inputs["backfill_schedule_digest"] = None
+    elif mismatch == "missing_backfill_counts":
+        del backfill_inputs["planned_counts"]["backfill"]
+    elif mismatch == "malformed_planned_counts":
+        backfill_inputs["planned_counts"] = None
     first = Stage6Journal(truth, "run", "owner-1")
-    await first.claim(base_inputs)
-    await first.save_progress({"backfill_finished": True})
+    await first.claim(backfill_inputs)
+    await first.save_progress(
+        {
+            "backfill_finished": mismatch != "backfill_finished",
+            "live_started": "2026-01-06T10:00:00+09:00" if mismatch == "live_started" else None,
+            "live_intended": mismatch == "live_intended",
+        }
+    )
     await first.finish({"status": "completed"})
     await first.release()
 
-    live_inputs = deepcopy(base_inputs)
+    live_inputs = deepcopy(backfill_inputs)
     live_inputs["run"]["live_at"] = "2026-01-06T10:00:00+09:00"
-    second = Stage6Journal(truth, "run", "owner-2")
-    claimed = await second.claim(live_inputs)
-    assert claimed["inputs"]["run"]["live_at"] == "2026-01-06T10:00:00+09:00"
-    assert not claimed.get("completed")
+    live_inputs["schedule_digest"] = "sha256:backfill-and-live"
+    if isinstance(live_inputs["planned_counts"], dict):
+        live_inputs["planned_counts"]["live"] = {"episodes": {"F": 1}, "operations": 7}
+    if mismatch in {"seed", "version", "workload_version"}:
+        live_inputs[mismatch] += 1
+    elif mismatch == "backfill_schedule_digest":
+        live_inputs[mismatch] = "sha256:different"
+    elif mismatch == "backfill_counts":
+        live_inputs["planned_counts"]["backfill"]["operations"] += 1
+    elif mismatch == "early_live_at":
+        live_inputs["run"]["live_at"] = "2026-01-03T10:00:00+09:00"
+    elif mismatch == "live_intended":
+        live_inputs["run"]["live_at"] = "2026-01-07T10:00:00+09:00"
 
-    # Changing non-live_at fields is still rejected.
-    bad_inputs = deepcopy(live_inputs)
-    bad_inputs["seed"] = 8
-    await second.release()
-    third = Stage6Journal(truth, "run", "owner-3")
-    with pytest.raises(RecoveryError, match="kind or inputs differ"):
-        await third.claim(bad_inputs)
+    second = Stage6Journal(truth, "run", "owner-2")
+    if mismatch is not None:
+        with pytest.raises(RecoveryError, match="inputs differ") as error:
+            await second.claim(live_inputs)
+        if mismatch == "backfill_schedule_digest":
+            assert "backfill_schedule_digest (stored='sha256:backfill', computed='sha256:different')" in str(
+                error.value
+            )
+        assert (await truth.runs.find_one({"_id": "run"}))["inputs"] == backfill_inputs
+        assert truth.runs.database["stage6_leases"].rows == []
+        return
+
+    claimed = await second.claim(live_inputs)
+    assert claimed["inputs"] == live_inputs
+    assert not claimed.get("completed")
 
 
 async def test_require_success_validates_expected_declined_steps(truth):
