@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "infra-lab-win-vmware-lab",
+  "kind": "implementation",
+  "title": "Update infra/lab docs and tfvars template for win-vmware-lab",
+  "base": {
+    "ref": "main",
+    "commit": "e13929cbaf7635ca930980561a671a5136c7f7fe"
+  },
+  "baseline": {
+    "intent.md": "sha256:3779278f6d19dc7abb00f76a997ebc7b0d8521e25b29502edc9973e3759d469b",
+    "spec.md": "sha256:886e1662f645acd74f42abe58a4b70b59a5d4edbe679cc6d7b53a3c1cc94602c"
+  },
+  "write_scope": [
+    "infra/lab/README.md",
+    "infra/lab/vms.tfvars.example.json"
+  ],
+  "approvals": [
+    {
+      "artifact": "plan.md",
+      "sha256": "sha256:4c5f328d8dd27884f961800027a78a515c6490a7b328359b7ae5c447faf69d33",
+      "by": "ckh",
+      "at": "2026-11-28T08:43:59Z",
+      "write_scope_sha256": "sha256:c16dcd2f6dadb1ed515a6da3d0f7318db58eb98d8b76c62355d4243c1fff4f30",
+      "note": "\uc2b9\uc778"
+    }
+  ]
+}
