@@ -79,6 +79,28 @@
         ]
       }
     },
+    "session.expired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "ended_at",
+        "end_reason"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "ended_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_reason": {
+          "const": "expired"
+        }
+      }
+    },
     "login.succeeded": {
       "type": "object",
       "additionalProperties": false,
@@ -325,7 +347,8 @@
             "maturity",
             "dormancy",
             "daily_close",
-            "atm_session_expiry"
+            "atm_session_expiry",
+            "auth_session_expiry"
           ]
         }
       }

@@ -16,8 +16,9 @@ use crate::app::AppState;
 use crate::shared::api::{self, ApiError, codes};
 use crate::shared::auth::{self, AuthCustomer, CUSTOMER_SCOPE, SESSION_IDLE};
 use crate::shared::context::{BusinessTime, RequestContext};
-use crate::shared::db::{DbError, SqlStmt};
+use crate::shared::db::{Db, DbError, SqlStmt};
 use crate::shared::outbox::{self, Event};
+use crate::shared::rollover::{JobFuture, RolloverJob};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
@@ -37,6 +38,59 @@ const END_SESSION: SqlStmt = sql_stmt!("auth.end_session", "sql/end_session.sql"
 
 const LOCK_FOR: Duration = Duration::minutes(30);
 const CHANNEL: &str = "MOBILE";
+
+pub struct AuthSessionExpiryJob;
+
+impl RolloverJob for AuthSessionExpiryJob {
+    fn name(&self) -> &'static str {
+        "auth_session_expiry"
+    }
+
+    fn run<'a>(
+        &'a self,
+        db: &'a Db,
+        _date: chrono::NaiveDate,
+        at: DateTime<FixedOffset>,
+    ) -> JobFuture<'a> {
+        Box::pin(async move {
+            const CANDIDATES: SqlStmt =
+                sql_stmt!("auth.expiry_candidates", "sql/expiry_candidates.sql");
+            const EXPIRY_BATCH_SIZE: i64 = 200;
+            type Candidate = (String, String, Option<String>, DateTime<FixedOffset>);
+            let cutoff = at - SESSION_IDLE;
+            loop {
+                let processed = db
+                    .run(move |s| {
+                        let rows =
+                            s.query_all::<Candidate>(&CANDIDATES, &[&cutoff, &EXPIRY_BATCH_SIZE])?;
+                        let count = rows.len();
+                        for (session_id, customer_no, device_id, last_seen) in rows {
+                            auth::expire_session_with_ended_at(
+                                s,
+                                &session_id,
+                                cutoff,
+                                last_seen + SESSION_IDLE,
+                                || {
+                                    Event::system("session.expired", at, "completed")
+                                        .customer(customer_no)
+                                        .session(&session_id)
+                                        .device(device_id)
+                                },
+                            )?;
+                        }
+                        if count > 0 {
+                            s.commit()?;
+                        }
+                        Ok(count)
+                    })
+                    .await?;
+                if processed < EXPIRY_BATCH_SIZE as usize {
+                    return Ok(());
+                }
+            }
+        })
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -308,19 +362,32 @@ async fn logout(
     who: AuthCustomer,
 ) -> Result<Response, ApiError> {
     let c = ctx.clone();
-    state
+    let closed = state
         .db
         .run_in(&stats, move |s| {
             s.execute(&REVOKE_TOKEN, &[&now, &who.token_hash])?;
-            s.execute(&END_SESSION, &[&now, &who.session_id])?;
-            let event = Event::for_request(&c, "logout", now, CHANNEL, "completed")
-                .customer(who.customer_no.clone())
-                .session(who.session_id.clone());
-            outbox::record(s, &event)?;
-            outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
-            s.commit()
+            if s.execute(&END_SESSION, &[&now, &who.session_id])? == 1 {
+                let event = Event::for_request(&c, "logout", now, CHANNEL, "completed")
+                    .customer(who.customer_no.clone())
+                    .session(who.session_id.clone());
+                outbox::record(s, &event)?;
+                outbox::complete(s, &c, &event, 200, codes::SUCCESS)?;
+                s.commit()?;
+                Ok(true)
+            } else {
+                s.rollback()?;
+                Ok(false)
+            }
         })
         .await
         .map_err(|e| db_error(&ctx, &e))?;
+    if !closed {
+        return Err(ApiError::new(
+            &ctx,
+            StatusCode::UNAUTHORIZED,
+            codes::UNAUTHORIZED,
+            "인증이 필요합니다",
+        ));
+    }
     Ok(api::ok(&ctx, json!({})))
 }

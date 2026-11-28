@@ -638,6 +638,8 @@ async fn assert_events(
     ]}).await.unwrap_or_else(|_| panic!("find fixture bank_logs events"));
     let mut by_request = BTreeMap::<String, Vec<Value>>::new();
     let mut event_ids = HashSet::new();
+    let mut expired_sessions = HashSet::new();
+    let subject_customers: HashSet<&str> = subjects.iter().map(|s| s.customer.as_str()).collect();
     while cursor
         .advance()
         .await
@@ -646,9 +648,6 @@ async fn assert_events(
         let row = cursor
             .deserialize_current()
             .unwrap_or_else(|_| panic!("decode fixture bank_logs event"));
-        let id = row.get_str("request_id").unwrap_or_else(|_| {
-            panic!("unexpected requestless bank_logs activity in fixture interval")
-        });
         let event_id = row
             .get_str("event_id")
             .unwrap_or_else(|_| panic!("missing bank_logs event ID"));
@@ -658,6 +657,30 @@ async fn assert_events(
         );
         let value =
             serde_json::to_value(&row).unwrap_or_else(|_| panic!("invalid bank_logs event"));
+        let Ok(id) = row.get_str("request_id") else {
+            assert_eq!(
+                value["event_type"], "session.expired",
+                "unexpected requestless bank_logs activity in fixture interval"
+            );
+            assert_eq!(value["channel"], "SYSTEM");
+            assert_eq!(value["outcome"], "completed");
+            assert!(
+                value["customer_no"]
+                    .as_str()
+                    .is_some_and(|c| subject_customers.contains(c)),
+                "unexpected customer on rollover session.expired"
+            );
+            assert_eq!(value["payload"]["end_reason"], "expired");
+            let session_id = value["session_id"]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing session_id on rollover session.expired"));
+            assert_eq!(value["payload"]["session_id"], session_id);
+            assert!(
+                expired_sessions.insert(session_id.to_owned()),
+                "duplicate rollover session.expired for session {session_id}"
+            );
+            continue;
+        };
         by_request.entry(id.to_owned()).or_default().push(value);
     }
 

@@ -45,6 +45,7 @@ pub const MIGRATIONS: &[Migration] = &[
     migration!(19, "0019_tune_daily_close"),
     migration!(20, "0020_cards"),
     migration!(21, "0021_admin_api"),
+    migration!(22, "0022_auth_session_expiry"),
 ];
 
 const CREATE_TABLE: SqlStmt = sql_stmt!(

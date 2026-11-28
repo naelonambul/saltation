@@ -12,20 +12,29 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::Duration;
+use chrono::{DateTime, Duration, FixedOffset};
 use rand::RngCore;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::app::AppState;
 use crate::shared::api::{ApiError, codes};
 use crate::shared::context::{BusinessTime, RequestContext};
-use crate::shared::db::SqlStmt;
+use crate::shared::db::{DbError, Session, SqlStmt, ToSql};
+use crate::shared::outbox::{self, Event};
 use crate::shared::telemetry::RequestStats;
 use crate::sql_stmt;
 
 const SELECT_TOKEN: SqlStmt = sql_stmt!("auth.select_token", "sql/select_token.sql");
 const DEFERRED_TOUCH: SqlStmt = sql_stmt!("auth.deferred_touch", "sql/deferred_touch.sql");
+const SELECT_EXPIRED_TOKEN: SqlStmt =
+    sql_stmt!("auth.select_expired_token", "sql/select_expired_token.sql");
+const LOCK_EXPIRY_TOKEN: SqlStmt = sql_stmt!("auth.lock_expiry_token", "sql/lock_expiry_token.sql");
+const LOCK_EXPIRY_SESSION: SqlStmt =
+    sql_stmt!("auth.lock_expiry_session", "sql/lock_expiry_session.sql");
+const EXPIRE_SESSION: SqlStmt = sql_stmt!("auth.expire_session", "sql/expire_session.sql");
+const SELECT_ENDED_AT: SqlStmt = sql_stmt!("auth.select_ended_at", "sql/select_ended_at.sql");
 
 /// Session and token lifetime: 30 minutes of business-time inactivity.
 pub const SESSION_IDLE: Duration = Duration::minutes(30);
@@ -355,12 +364,60 @@ pub fn user_seq_no(customer_id: i64) -> String {
     format!("{customer_id:010}")
 }
 
+fn in_flight_sessions() -> &'static Mutex<std::collections::HashMap<String, usize>> {
+    static SESSIONS: OnceLock<Mutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+struct InFlightSessionGuard {
+    session_id: String,
+}
+
+impl InFlightSessionGuard {
+    fn enter(session_id: &str) -> Arc<Self> {
+        let mut map = in_flight_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *map.entry(session_id.to_owned()).or_insert(0) += 1;
+        Arc::new(Self {
+            session_id: session_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for InFlightSessionGuard {
+    fn drop(&mut self) {
+        let mut map = in_flight_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(&self.session_id) {
+            if *count <= 1 {
+                map.remove(&self.session_id);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
+
+fn has_in_flight_session(session_id: &str) -> bool {
+    in_flight_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(session_id)
+}
+
+fn is_lock_contention(error: &DbError) -> bool {
+    matches!(error, DbError::Busy) || matches!(error.ora_code(), Some(54 | 60 | 30006))
+}
+
 /// Request-local activity, applied only with its committed completion.
 #[derive(Clone)]
 pub struct PendingTouch {
     pub token_hash: String,
     pub session_id: String,
     pub now: chrono::DateTime<chrono::FixedOffset>,
+    _in_flight: Option<Arc<InFlightSessionGuard>>,
 }
 
 impl std::fmt::Debug for PendingTouch {
@@ -370,6 +427,19 @@ impl std::fmt::Debug for PendingTouch {
 }
 
 impl PendingTouch {
+    pub fn detached(
+        token_hash: String,
+        session_id: String,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Self {
+        Self {
+            token_hash,
+            session_id,
+            now,
+            _in_flight: None,
+        }
+    }
+
     pub(crate) fn apply(
         &self,
         session: &mut crate::shared::db::Session,
@@ -382,7 +452,7 @@ impl PendingTouch {
             .map(|_| ())
             .map_err(|error| {
                 // execute/timed records the original Oracle failure before remapping.
-                if error.ora_code() == Some(30006) {
+                if is_lock_contention(&error) {
                     crate::shared::db::DbError::Busy
                 } else {
                     error
@@ -418,6 +488,74 @@ fn bearer(parts: &Parts) -> Option<&str> {
         .map(str::trim)
 }
 
+pub(crate) fn expire_session(
+    s: &mut Session,
+    session_id: &str,
+    cutoff: DateTime<FixedOffset>,
+    event: impl FnOnce() -> Event,
+) -> Result<(), DbError> {
+    if s.execute(&EXPIRE_SESSION, &[&session_id, &cutoff])? == 1 {
+        let ended_at = s.query_row(&SELECT_ENDED_AT, &[&session_id])?;
+        outbox::record(s, &event().payload(expiry_payload(session_id, ended_at)))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn expire_session_with_ended_at(
+    s: &mut Session,
+    session_id: &str,
+    cutoff: DateTime<FixedOffset>,
+    ended_at: DateTime<FixedOffset>,
+    event: impl FnOnce() -> Event,
+) -> Result<(), DbError> {
+    if s.execute(&EXPIRE_SESSION, &[&session_id, &cutoff])? == 1 {
+        outbox::record(s, &event().payload(expiry_payload(session_id, ended_at)))?;
+    }
+    Ok(())
+}
+
+fn expiry_payload(session_id: &str, ended_at: DateTime<FixedOffset>) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "ended_at": ended_at.to_rfc3339(),
+        "end_reason": "expired"
+    })
+}
+
+fn expire_presented_token(
+    s: &mut Session,
+    hash: &str,
+    now: DateTime<FixedOffset>,
+    ctx: &RequestContext,
+) -> Result<(), DbError> {
+    type Candidate = (String, String, Option<String>);
+    let cutoff = now - SESSION_IDLE;
+    let params: &[&dyn ToSql] = &[&hash, &now, &cutoff];
+    let Some((session_id, _, _)) = s.query_opt::<Candidate>(&SELECT_EXPIRED_TOKEN, params)? else {
+        return Ok(());
+    };
+    if has_in_flight_session(&session_id) {
+        return Ok(());
+    }
+    if s.query_opt::<String>(&LOCK_EXPIRY_TOKEN, &[&hash])?
+        .is_some()
+        && s.query_opt::<String>(&LOCK_EXPIRY_SESSION, &[&session_id])?
+            .is_some()
+        && !has_in_flight_session(&session_id)
+        && let Some((locked_session_id, customer_no, device_id)) =
+            s.query_opt::<Candidate>(&SELECT_EXPIRED_TOKEN, params)?
+        && locked_session_id == session_id
+    {
+        expire_session(s, &session_id, cutoff, || {
+            Event::for_request(ctx, "session.expired", now, "MOBILE", "completed")
+                .customer(customer_no)
+                .session(&session_id)
+                .device(device_id)
+        })?;
+    }
+    s.commit()
+}
+
 impl FromRequestParts<AppState> for AuthCustomer {
     type Rejection = ApiError;
 
@@ -443,12 +581,14 @@ impl FromRequestParts<AppState> for AuthCustomer {
             .cloned()
             .unwrap_or_default();
         let BusinessTime(now) = BusinessTime::from_request_parts(parts, state).await?;
+        let event_ctx = ctx.clone();
         let found = state
             .db
             .run_in(&stats, move |s| {
                 let row: Option<(i64, String, String, String, Option<String>)> =
                     s.query_opt(&SELECT_TOKEN, &[&hash, &now])?;
                 let Some((customer_id, customer_no, scope, session_id, device_id)) = row else {
+                    expire_presented_token(s, &hash, now, &event_ctx)?;
                     return Ok(None);
                 };
                 Ok(Some(AuthCustomer {
@@ -462,7 +602,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             })
             .await
             .map_err(|e| {
-                if matches!(e, crate::shared::db::DbError::Busy) {
+                if is_lock_contention(&e) {
                     ApiError::busy(&ctx)
                 } else {
                     tracing::error!(request_id = %ctx.request_id, error = %e, "customer token lookup failed");
@@ -470,6 +610,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
                 }
             })?;
         let customer = found.ok_or_else(unauthorized)?;
+        let _in_flight = Some(InFlightSessionGuard::enter(&customer.session_id));
         stats
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -477,6 +618,7 @@ impl FromRequestParts<AppState> for AuthCustomer {
             token_hash: customer.token_hash.clone(),
             session_id: customer.session_id.clone(),
             now,
+            _in_flight,
         });
         if let Some(slot) = parts
             .extensions
@@ -494,6 +636,34 @@ impl FromRequestParts<AppState> for AuthCustomer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_flight_session_guard_tracks_active_requests() {
+        let sid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        assert!(!has_in_flight_session(sid));
+        let g1 = InFlightSessionGuard::enter(sid);
+        assert!(has_in_flight_session(sid));
+        let g2 = InFlightSessionGuard::enter(sid);
+        drop(g1);
+        assert!(has_in_flight_session(sid));
+        drop(g2);
+        assert!(!has_in_flight_session(sid));
+    }
+
+    #[test]
+    fn lock_contention_classifier_handles_busy_and_oracle_codes() {
+        assert!(is_lock_contention(&DbError::Busy));
+    }
+
+    #[test]
+    fn expiry_payload_preserves_effective_time() {
+        let expired_at = DateTime::parse_from_rfc3339("2026-11-26T12:34:56.123456+09:00").unwrap();
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+        let payload = expiry_payload(session_id, expired_at);
+        assert_eq!(payload["session_id"], session_id);
+        assert_eq!(payload["ended_at"], "2026-11-26T12:34:56.123456+09:00");
+        assert_eq!(payload["end_reason"], "expired");
+    }
 
     #[tokio::test]
     async fn hashes_verify_and_reject() {

@@ -93,6 +93,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(applied, "migrations up to date");
     let mut registry = Registry::default();
     registry.register(std::sync::Arc::new(
+        bank::features::auth::AuthSessionExpiryJob,
+    ));
+    registry.register(std::sync::Arc::new(
         bank::features::atm::AtmSessionExpiryJob,
     ));
     registry.register(std::sync::Arc::new(bank::features::deposits::MaturityJob));
