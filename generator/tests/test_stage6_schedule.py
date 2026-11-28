@@ -310,7 +310,47 @@ def test_normal_episodes_spread_across_hour_and_scenario_g_includes_declined_car
     g_steps = {step.name: step for step in steps(g_ep)}
     assert "declined_card" in g_steps
     assert g_steps["declined_card"].args.get("expect_declined") is True
-    assert g_steps["declined_card"].args["amount"] == 50_000
+    assert g_steps["declined_card"].args["amount"] == 200_000
+
+
+def test_stage6_opening_balance_and_declined_card_headroom():
+    from random import Random
+
+    from saltation_gen.config.stage6 import BANKING_KRW_ANCHORS
+    from saltation_gen.drivers.stage6_seed import STAGE6_OPENING_BALANCE
+    from saltation_gen.drivers.stage6_steps import steps
+    from saltation_gen.drivers.stage6_types import Episode
+    from saltation_gen.personas.profiles import PROFILES
+
+    g_ep = Episode("G:headroom:C1", "G", datetime(2026, 1, 1, 10, 0, tzinfo=KST), {"actor": "C1"}, "annual")
+    declined_usd = {step.name: step for step in steps(g_ep)}["declined_card"].args["amount"]
+    declined_krw = declined_usd * 1_300
+    max_annual_income = max(p.income.annual * p.income_krw for p in PROFILES.values())
+    max_annual_incoming = max(p.transfer.annual for p in PROFILES.values()) * BANKING_KRW_ANCHORS[-1][1]
+    assert declined_krw > STAGE6_OPENING_BALANCE + max_annual_income + max_annual_incoming
+
+    student = PROFILES["student"]
+    for pred_name in ("working", "older"):
+        pred = PROFILES[pred_name]
+        for trial in range(25):
+            rng = Random(20261128 + trial * 31 + (0 if pred_name == "working" else 1000))
+            balance = STAGE6_OPENING_BALANCE
+            for day in range(365):
+                if day % 30 == 0 and day // 30 < student.income.annual:
+                    balance += student.income_krw
+                if (day * pred.transfer.annual) % 365 < pred.transfer.annual:
+                    balance += pred.amount("normal_transfer", rng)
+                if (day * student.transfer.annual) % 365 < student.transfer.annual:
+                    out = student.amount("normal_transfer", rng)
+                    if balance >= out:
+                        balance -= out
+                if (day * student.card.annual) % 365 < student.card.annual:
+                    card = student.amount("normal_card", rng)
+                    if balance >= card:
+                        balance -= card
+                if (day * student.atm.annual) % 365 < student.atm.annual and balance >= student.cash_krw:
+                    balance -= student.cash_krw
+                assert balance >= 1_500_000, f"{pred_name} trial {trial} day {day} balance={balance}"
 
 
 def test_live_monetary_steps_shift_out_of_maintenance_window(monkeypatch):

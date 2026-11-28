@@ -119,7 +119,8 @@ async def test_resume_keeps_identity_and_updates_code_revision(identity_run, mon
     assert first["progress"]["seed_state"] == "seeded"
     assert rows[0]["provenance"] == {"code_revision": "original"}
     inputs = deepcopy(rows[0]["inputs"])
-    assert inputs["version"] == inputs["workload_version"] == 2
+    assert inputs["version"] == 2
+    assert inputs["workload_version"] == 3
     assert inputs["schedule_digest"] == inputs["backfill_schedule_digest"]
     assert inputs["planned_counts"]["backfill"]["episodes"] == {"G": 1}
     assert "code_revision" not in inputs
@@ -221,7 +222,7 @@ async def test_resume_rejects_identity_changes_before_bank_http(identity_run, mo
     assert "provenance" not in rows[0]
     original = deepcopy(rows[0]["inputs"])
     if change == "workload_version":
-        monkeypatch.setattr(stage6_identity, "WORKLOAD_VERSION", 3)
+        monkeypatch.setattr(stage6_identity, "WORKLOAD_VERSION", 4)
     elif change == "legacy":
         legacy = rows[0]["inputs"]
         legacy["version"] = 1
@@ -255,10 +256,10 @@ async def test_resume_rejects_identity_changes_before_bank_http(identity_run, mo
         await invoke(resume=True)
     message = str(error.value)
     if change == "workload_version":
-        assert "workload_version (stored=2, computed=3)" in message
+        assert "workload_version (stored=3, computed=4)" in message
     elif change == "legacy":
         assert "version (stored=1, computed=2)" in message
-        assert "workload_version (stored=None, computed=2)" in message
+        assert "workload_version (stored=None, computed=3)" in message
         assert f"schedule_digest (stored=None, computed={original['schedule_digest']!r})" in message
     else:
         for field in ("schedule_digest", "backfill_schedule_digest"):

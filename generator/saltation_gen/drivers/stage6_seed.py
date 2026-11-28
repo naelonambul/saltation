@@ -32,6 +32,7 @@ _SENDERS = {
     "unrelated": ("INDIVIDUAL", "한결"),
 }
 _ANALYST_BATCH = 100
+STAGE6_OPENING_BALANCE = 20_000_000
 
 
 def world_customer_numbers(population: int, start: int = 0) -> list[str]:
@@ -74,7 +75,7 @@ async def _seed_cohort(
             if row["customer_no"] in cohort
         ]
         for row in batch:
-            row["opening_balance"] = 0 if preparing else 3_000_000
+            row["opening_balance"] = 0 if preparing else STAGE6_OPENING_BALANCE
 
         expected = {row["account_no"] for row in batch}
         accounts = await _seed_customer_accounts(bank, batch)
