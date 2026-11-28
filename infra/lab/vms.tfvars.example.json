@@ -1,0 +1,54 @@
+{
+  "vms": {
+    "saltation-oracle": {
+      "image": "oraclelinux-8",
+      "processors": 4,
+      "memory_mb": 8192,
+      "disk_gb": 45,
+      "groups": ["db", "oracle"],
+      "ip": "192.0.2.171/24",
+      "gateway": "192.0.2.1",
+      "dns": ["192.0.2.53"]
+    },
+    "saltation-mongo": {
+      "image": "ubuntu-24.04",
+      "processors": 2,
+      "memory_mb": 4096,
+      "disk_gb": 30,
+      "groups": ["db", "mongo"],
+      "ip": "192.0.2.172/24",
+      "gateway": "192.0.2.1",
+      "dns": ["192.0.2.53"]
+    },
+    "saltation-bank": {
+      "image": "ubuntu-24.04",
+      "processors": 4,
+      "memory_mb": 4096,
+      "disk_gb": 30,
+      "groups": ["app", "bank"],
+      "ip": "192.0.2.173/24",
+      "gateway": "192.0.2.1",
+      "dns": ["192.0.2.53"]
+    },
+    "saltation-web": {
+      "image": "ubuntu-24.04",
+      "processors": 2,
+      "memory_mb": 2048,
+      "disk_gb": 30,
+      "groups": ["web"],
+      "ip": "192.0.2.174/24",
+      "gateway": "192.0.2.1",
+      "dns": ["192.0.2.53"]
+    },
+    "saltation-gen": {
+      "image": "ubuntu-24.04",
+      "processors": 2,
+      "memory_mb": 2048,
+      "disk_gb": 30,
+      "groups": ["gen", "generator"],
+      "ip": "192.0.2.175/24",
+      "gateway": "192.0.2.1",
+      "dns": ["192.0.2.53"]
+    }
+  }
+}
